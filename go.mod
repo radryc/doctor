@@ -1,6 +1,6 @@
 module github.com/rydzu/ainfra/doctor
 
-go 1.25.7
+go 1.26.3
 
 replace github.com/radryc/monofs => ../monofs
 
