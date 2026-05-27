@@ -7,7 +7,7 @@ RUN npm ci
 COPY frontend/ .
 RUN npm run build
 
-FROM golang:1.25 AS build
+FROM golang:1.26.3 AS build
 
 ARG DOCTOR_SERVICE=doctor-ingest
 ARG BUILD_VERSION=dev
