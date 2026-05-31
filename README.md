@@ -1,5 +1,7 @@
 # Doctor
 
+> Part of the **Strata** platform.
+
 Doctor is a privacy-first telemetry backend for OpenTelemetry Collector.
 
 It accepts OTLP traffic, anonymizes sensitive data before persistence, and stores telemetry in MonoFS logengine. The query service exposes trace lookup, log search, metric range queries, and Guardian deployment health APIs, with a built-in browser UI.
