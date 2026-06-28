@@ -396,6 +396,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/guardian/topology", s.handleGuardianTopology)
 	mux.HandleFunc("/v1/guardian/events", s.handleGuardianEvents)
 	mux.HandleFunc("/v1/guardian/health", s.handleGuardianHealth)
+	mux.HandleFunc("/v1/guardian/overview", s.handleGuardianOverview)
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
 	mux.HandleFunc("/", s.handleUI)
 	return mux
@@ -849,6 +850,47 @@ func (s *Service) handleGuardianHealth(w http.ResponseWriter, r *http.Request) {
 		"window":          windowStr,
 		"computed_at":     time.Now().UTC(),
 	})
+}
+
+func (s *Service) handleGuardianOverview(w http.ResponseWriter, r *http.Request) {
+	guardianURL := s.guardianAPIBaseURL()
+	if guardianURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "guardian url not configured",
+		})
+		return
+	}
+
+	overviewURL := fmt.Sprintf("%s/api/overview", strings.TrimRight(guardianURL, "/"))
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, overviewURL, nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "failed to build request",
+		})
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.guardianClient.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": "guardian unreachable",
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": "failed to read guardian response",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
 }
 
 func (s *Service) tenantFromRequest(r *http.Request) string {
