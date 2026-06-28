@@ -159,3 +159,35 @@ export interface GuardianHealthResponse {
   window?: string;
   computed_at?: string;
 }
+
+export type GuardianOverview = {
+  generatedAt: string;
+  summary: {
+    partitions: number;
+    intents: number;
+    assets: number;
+    healthyAssets: number;
+    attentionAssets: number;
+    failingAssets: number;
+    healthyIntents: number;
+    driftedIntents: number;
+    failedIntents: number;
+    servicesHealthy: number;
+    servicesAttention: number;
+  };
+  partitions: Array<{
+    name: string;
+    status: string;
+    displayStatus: string;
+    health: string;
+    intentCount: number;
+    assetCount: number;
+    healthyAssets: number;
+    attentionAssets: number;
+    failingAssets: number;
+    healthyIntents: number;
+    driftedIntents: number;
+    failedIntents: number;
+    lastReconciledAt: string;
+  }>;
+};

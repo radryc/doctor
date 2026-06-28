@@ -1,4 +1,24 @@
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap');
+@import "tailwindcss";
+
+/* === Tailwind Dark Theme === */
+@theme {
+  --color-dark-900: #0a0a0f;
+  --color-dark-800: #12121a;
+  --color-dark-700: #1a1a25;
+  --color-dark-600: #252533;
+  --color-dark-500: #32324a;
+  --color-accent-blue: #3b82f6;
+  --color-accent-purple: #9333ea;
+  --color-accent-cyan: #06b6d4;
+}
+
+/* === Glassmorphism === */
+.glass {
+  background: rgba(18, 18, 26, 0.7);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(50, 50, 74, 0.4);
+}
 
 :root {
   color-scheme: dark;

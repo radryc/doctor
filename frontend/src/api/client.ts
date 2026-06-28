@@ -10,6 +10,7 @@ import type {
   PrometheusQueryResponse,
   HealthResponse,
   GuardianHealthResponse,
+  GuardianOverview,
 } from "../types/api";
 
 async function fetchJSON<T>(url: string): Promise<T> {
@@ -70,4 +71,7 @@ export const api = {
 
   getGuardianHealth: (params: URLSearchParams) =>
     fetchJSON<GuardianHealthResponse>(`/v1/guardian/health?${params}`),
+
+  guardianOverview: () =>
+    fetchJSON<GuardianOverview>("/v1/guardian/overview"),
 };
