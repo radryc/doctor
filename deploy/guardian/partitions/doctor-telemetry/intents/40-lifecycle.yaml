@@ -1,0 +1,13 @@
+apiVersion: guardian/v1alpha1
+kind: Intent
+metadata:
+  name: lifecycle
+spec:
+  intentType: standard
+  joins:
+    - query-plane
+  targetPusher: docker-main
+  target:
+    cluster: docker-main
+  locked: false
+  assets: []

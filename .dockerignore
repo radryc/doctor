@@ -1,0 +1,14 @@
+.git
+.doctor/
+
+# Local binaries
+/doctor-ingest
+/doctor-query
+
+# Frontend deps and artifacts (Docker builds them from source)
+/frontend/node_modules/
+/frontend/tsconfig.tsbuildinfo
+
+# Pre-built UI assets are rebuilt by the frontend stage; exclude from build context
+# to prevent stale assets from leaking in (the build stage always produces fresh ones)
+/internal/query/ui/dist/

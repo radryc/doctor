@@ -1,0 +1,12 @@
+# Compiled binaries
+/doctor-ingest
+/doctor-query
+
+# Runtime data directory (WAL, local catalog, local object store)
+/.doctor/
+
+# Frontend
+/frontend/node_modules/
+/frontend/tsconfig.tsbuildinfo
+
+# Do NOT ignore internal/query/ui/dist/ — it is embedded via //go:embed

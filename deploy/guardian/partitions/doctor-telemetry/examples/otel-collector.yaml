@@ -1,0 +1,134 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          scheme: http
+          static_configs:
+            - targets:
+                - k8s-svc-compute-k8s-main-otel-opentelemetry-collector-collector.otel.svc.cluster.local:8889
+              labels:
+                component: otel-collector
+          metric_relabel_configs:
+            - source_labels: [service_instance_id]
+              target_label: node
+              action: replace
+        - job_name: monofs-router
+          kubernetes_sd_configs:
+            - role: pod
+              namespaces:
+                names:
+                  - storage-k8s
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+              action: keep
+              regex: monofs-router
+            - source_labels: [__meta_kubernetes_pod_ip]
+              target_label: __address__
+              replacement: $1:8080
+            - source_labels: [__meta_kubernetes_namespace]
+              target_label: namespace
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+            - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+              target_label: node
+            - target_label: component
+              replacement: monofs-router
+        - job_name: monofs-server
+          kubernetes_sd_configs:
+            - role: pod
+              namespaces:
+                names:
+                  - storage-k8s
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+              action: keep
+              regex: monofs-server
+            - source_labels: [__meta_kubernetes_pod_ip]
+              target_label: __address__
+              replacement: $1:9100
+            - source_labels: [__meta_kubernetes_namespace]
+              target_label: namespace
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+            - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+              target_label: node
+            - target_label: component
+              replacement: monofs-server
+        - job_name: guardiand
+          kubernetes_sd_configs:
+            - role: pod
+              namespaces:
+                names:
+                  - guardian-configs
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+              action: keep
+              regex: guardiand
+            - source_labels: [__meta_kubernetes_pod_ip]
+              target_label: __address__
+              replacement: $1:8090
+            - source_labels: [__meta_kubernetes_namespace]
+              target_label: namespace
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+            - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+              target_label: node
+            - target_label: component
+              replacement: guardian
+        - job_name: kubernetes-pods-annotated
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+              action: keep
+              regex: "true"
+            - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+              action: keep
+              regex: \d+
+            - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+              action: replace
+              target_label: __metrics_path__
+              regex: (.+)
+            - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+              action: replace
+              regex: (.+);(.+)
+              replacement: $1:$2
+              target_label: __address__
+            - source_labels: [__meta_kubernetes_namespace]
+              target_label: namespace
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+            - source_labels: [__meta_kubernetes_pod_node_name]
+              target_label: k8s_node
+
+processors:
+  batch: {}
+
+exporters:
+  otlp/doctor:
+    endpoint: doctor-ingest-edge:4317
+    compression: none
+    tls:
+      insecure: true
+    headers:
+      x-doctor-tenant: default
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/doctor]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/doctor]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [batch]
+      exporters: [otlp/doctor]

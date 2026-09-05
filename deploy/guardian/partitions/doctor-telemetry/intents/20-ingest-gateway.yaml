@@ -1,0 +1,52 @@
+apiVersion: guardian/v1alpha1
+kind: Intent
+metadata:
+  name: ingest-gateway
+spec:
+  intentType: standard
+  joins: []
+  targetPusher: docker-main
+  target:
+    cluster: docker-main
+  locked: false
+  assets:
+    - type: Compute
+      name: doctor-ingest
+      properties:
+        image: doctor-ingest:latest
+        env:
+          DOCTOR_GRPC_ADDR: :4317
+          DOCTOR_HTTP_ADDR: :4318
+          DOCTOR_DEFAULT_TENANT: default
+          DOCTOR_TENANT_HEADER: X-Doctor-Tenant
+          DOCTOR_PRIVACY_HMAC_KEY: dev-hmac-key-change-in-prod
+          DOCTOR_TRACE_BUFFER_FLUSH_INTERVAL: 5s
+          DOCTOR_TRACE_BUFFER_MAX_RECORDS: "4096"
+          DOCTOR_TRACE_BUFFER_MAX_BYTES: "4194304"
+          DOCTOR_LOG_BUFFER_FLUSH_INTERVAL: 5s
+          DOCTOR_LOG_BUFFER_MAX_BYTES: "4194304"
+          DOCTOR_METRIC_BUFFER_FLUSH_INTERVAL: 5s
+          DOCTOR_METRIC_BUFFER_MAX_BYTES: "4194304"
+          DOCTOR_MONOFS_LOGENGINE_ADDR: host.docker.internal:9090
+        ports:
+          - name: otlp-grpc
+            containerPort: 4317
+            protocol: TCP
+          - name: otlp-http
+            containerPort: 4318
+            protocol: TCP
+
+    - type: LoadBalancer
+      name: doctor-ingest-edge
+      dependsOn:
+        - doctor-ingest
+      properties:
+        targets:
+          - doctor-ingest
+        listeners:
+          - name: otlp-grpc
+            port: 4317
+            protocol: TCP
+          - name: otlp-http
+            port: 4318
+            protocol: TCP

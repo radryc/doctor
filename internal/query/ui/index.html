@@ -1,0 +1,2091 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Doctor</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap');
+
+    :root {
+      color-scheme: dark;
+      --bg: #07101c;
+      --bg-deep: #050b13;
+      --bg-elevated: #0c1627;
+      --panel: rgba(9, 18, 32, 0.82);
+      --panel-border: rgba(148, 163, 184, 0.14);
+      --text: #e7eefc;
+      --muted: #95a6c6;
+      --muted-strong: #c8d5ea;
+      --accent: #6d5efc;
+      --accent-strong: #5547d7;
+      --accent-soft: rgba(109, 94, 252, 0.14);
+      --teal: #14b8a6;
+      --teal-soft: rgba(20, 184, 166, 0.14);
+      --ok: #10b981;
+      --warn: #f59e0b;
+      --err: #f43f5e;
+      --info: #38bdf8;
+      --grid: rgba(148, 163, 184, 0.08);
+      --border: rgba(148, 163, 184, 0.12);
+      --shadow: 0 24px 70px rgba(1, 7, 19, 0.48);
+      font-family: "Manrope", system-ui, sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg-deep);
+      color: var(--text);
+    }
+
+    .app {
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 216px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow-y: auto;
+      background: rgba(5, 11, 20, 0.92);
+      border-right: 1px solid var(--panel-border);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 1.1rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .brand__mark {
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(109,94,252,0.95), rgba(20,184,166,0.9));
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    .brand__text strong {
+      display: block;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .brand__text span {
+      display: block;
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    .tab-nav {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 0.75rem 0.6rem;
+      flex: 1;
+    }
+
+    .tab-link {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      padding: 0.6rem 0.75rem;
+      border-radius: 10px;
+      color: var(--muted);
+      font-size: 0.88rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      user-select: none;
+    }
+
+    .tab-link:hover { background: rgba(148,163,184,0.07); color: var(--muted-strong); }
+
+    .tab-link.is-active {
+      background: var(--accent-soft);
+      border-color: rgba(109,94,252,0.28);
+      color: var(--text);
+    }
+
+    .tab-link__icon { font-style: normal; flex-shrink: 0; opacity: 0.75; }
+
+    .sidebar-footer {
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .sidebar-footer a {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-decoration: none;
+      padding: 0.35rem 0;
+    }
+
+    .sidebar-footer a:hover { color: var(--text); }
+    .sidebar-footer a::after { content: " \2197"; font-size: 0.72rem; opacity: 0.6; }
+
+    /* ── Main ── */
+    .main {
+      flex: 1;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Tab panels ── */
+    .tab-panel {
+      display: none;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .tab-panel.is-active { display: flex; }
+
+    /* ── Panel header ── */
+    .panel-header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.85rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(5, 11, 20, 0.7);
+    }
+
+    .panel-header__left h2 {
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+
+    .panel-header__left p { font-size: 0.82rem; color: var(--muted); margin-top: 2px; }
+
+    .panel-badge {
+      padding: 0.4rem 0.75rem;
+      border: 1px solid rgba(109,94,252,0.24);
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--muted-strong);
+      font-size: 0.78rem;
+      font-family: monospace;
+      white-space: nowrap;
+    }
+
+    /* ── Panel body ── */
+    .panel-body {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Query layout ── */
+    .query-layout {
+      flex: 1;
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: 310px 1fr;
+    }
+
+    .query-form-col {
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 1.25rem;
+      background: rgba(5, 11, 19, 0.5);
+    }
+
+    .query-output-col { overflow-y: auto; padding: 1.25rem; }
+
+    /* ── Forms ── */
+    .query-form { display: grid; gap: 1rem; }
+    .query-form__cluster { display: grid; gap: 0.65rem; }
+
+    .cluster-title {
+      color: var(--teal);
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+
+    label { display: grid; gap: 0.3rem; color: var(--muted); font-size: 0.88rem; }
+
+    input, select {
+      width: 100%;
+      min-height: 42px;
+      padding: 0.6rem 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(6, 12, 22, 0.95);
+      color: var(--text);
+      outline: none;
+      font: inherit;
+    }
+
+    input::placeholder { color: #4a5d7e; }
+
+    input:focus, select:focus {
+      border-color: rgba(109,94,252,0.5);
+      box-shadow: 0 0 0 3px rgba(109,94,252,0.14);
+    }
+
+    .run-btn {
+      min-height: 44px;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      box-shadow: 0 8px 20px rgba(109,94,252,0.22);
+      color: #fff;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      transition: filter 0.15s;
+    }
+
+    .run-btn:hover { filter: brightness(1.08); }
+
+    .form-footnote { color: var(--muted); font-size: 0.8rem; line-height: 1.5; }
+
+    /* ── Query output ── */
+    .request { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.4rem; word-break: break-all; }
+    .request a { color: var(--accent); text-decoration: none; }
+
+    .status { min-height: 1.2rem; font-size: 0.88rem; margin-bottom: 0.75rem; }
+    .status[data-kind="idle"] { color: var(--muted); }
+    .status[data-kind="loading"] { color: var(--warn); }
+    .status[data-kind="ok"] { color: var(--ok); }
+    .status[data-kind="error"] { color: var(--err); }
+
+    .summary { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.75rem; }
+
+    .pill {
+      padding: 0.35rem 0.65rem;
+      border: 1px solid rgba(109,94,252,0.24);
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--text);
+      font-size: 0.82rem;
+    }
+
+    .results { display: grid; gap: 0.85rem; }
+
+    .result-block {
+      overflow: hidden;
+      padding: 1rem;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(8,16,29,0.72);
+    }
+
+    .result-block h3 { font-size: 0.92rem; margin-bottom: 0.65rem; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { padding: 0.6rem 0.65rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { color: var(--muted-strong); font-weight: 700; }
+    td { color: var(--text); word-break: break-word; }
+
+    details { margin-top: 1rem; }
+    summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; padding: 0.35rem 0; }
+
+    pre {
+      background: rgba(6,12,22,0.95);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.85rem;
+      font-size: 0.78rem;
+      color: var(--muted-strong);
+      overflow-x: auto;
+      white-space: pre;
+      margin-top: 0.5rem;
+    }
+
+    .empty { color: var(--muted); font-size: 0.88rem; }
+
+    /* ── Dashboard ── */
+    .dashboard-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+      display: grid;
+      gap: 1.25rem;
+      align-content: start;
+    }
+
+    .dash-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+    }
+
+    .dash-controls label {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .dash-controls select, .dash-controls input[type="text"] {
+      min-height: 34px;
+      padding: 0.3rem 0.65rem;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      width: auto;
+    }
+
+    .dash-controls input[type="text"] { width: 130px; }
+
+    .refresh-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.4rem 0.9rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(8,16,29,0.7);
+      color: var(--muted-strong);
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .refresh-btn:hover { background: rgba(148,163,184,0.08); }
+
+    .spin-icon { display: inline-block; }
+    .refresh-btn.spinning .spin-icon { animation: spin 0.8s linear infinite; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .dash-error {
+      padding: 0.75rem 1rem;
+      border-radius: 12px;
+      border: 1px solid rgba(244,63,94,0.3);
+      background: rgba(244,63,94,0.08);
+      color: var(--err);
+      font-size: 0.88rem;
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+      gap: 1rem;
+    }
+
+    .stat-card {
+      padding: 1rem 1.2rem;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(9,18,32,0.82);
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+    }
+
+    .stat-card__label {
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .stat-card__value {
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 2rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .stat-card__sub { font-size: 0.78rem; color: var(--muted); }
+    .stat-card--err .stat-card__value { color: var(--err); }
+    .stat-card--warn .stat-card__value { color: var(--warn); }
+
+    .charts-row {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      gap: 1rem;
+    }
+
+    .chart-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(9,18,32,0.82);
+      padding: 1rem 1.2rem;
+    }
+
+    .chart-card__title {
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.85rem;
+    }
+
+    .gauge-wrap { display: flex; flex-direction: column; align-items: center; gap: 0.55rem; }
+    .gauge-label { font-size: 0.8rem; color: var(--muted); text-align: center; }
+
+    .gauge-level {
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 1rem;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .gauge-level[data-level="healthy"] { color: var(--ok); }
+    .gauge-level[data-level="degraded"] { color: var(--warn); }
+    .gauge-level[data-level="unhealthy"] { color: var(--err); }
+    .gauge-level[data-level="unknown"] { color: var(--muted); }
+
+    .rec-badge {
+      padding: 0.3rem 0.65rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .rec-badge[data-rec="proceed"] { background: rgba(16,185,129,0.15); color: var(--ok); border: 1px solid rgba(16,185,129,0.3); }
+    .rec-badge[data-rec="hold"] { background: rgba(245,158,11,0.15); color: var(--warn); border: 1px solid rgba(245,158,11,0.3); }
+    .rec-badge[data-rec="rollback"] { background: rgba(244,63,94,0.15); color: var(--err); border: 1px solid rgba(244,63,94,0.3); }
+
+    .health-table-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(9,18,32,0.82);
+      overflow: hidden;
+    }
+
+    .health-table-card__head {
+      padding: 0.65rem 1.2rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .badge-level {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    .badge-level[data-level="healthy"] { background: rgba(16,185,129,0.15); color: var(--ok); }
+    .badge-level[data-level="degraded"] { background: rgba(245,158,11,0.15); color: var(--warn); }
+    .badge-level[data-level="unhealthy"] { background: rgba(244,63,94,0.15); color: var(--err); }
+    .badge-level[data-level="unknown"] { background: rgba(148,163,184,0.1); color: var(--muted); }
+
+    .dash-empty {
+      padding: 3rem;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.88rem;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(9,18,32,0.5);
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.18); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(109,94,252,0.5); }
+
+    /* ── Explorer toolbar (xp-* shared) ── */
+    .xp-toolbar { display:flex; align-items:center; gap:0.4rem; flex-wrap:wrap; }
+    .xp-presets { display:flex; gap:2px; }
+    .xp-preset {
+      padding:0.25rem 0.6rem; border:1px solid var(--border); border-radius:6px;
+      background:transparent; color:var(--muted); font:inherit; font-size:0.78rem;
+      font-weight:700; cursor:pointer; transition:all 0.12s; white-space:nowrap;
+    }
+    .xp-preset:hover { background:rgba(148,163,184,0.08); color:var(--muted-strong); }
+    .xp-preset.xp-active {
+      background:var(--accent-soft); border-color:rgba(109,94,252,0.38); color:var(--text);
+    }
+    .xp-select {
+      min-height:30px; padding:0.2rem 0.6rem; border:1px solid var(--border); border-radius:6px;
+      background:rgba(6,12,22,0.95); color:var(--text); font:inherit; font-size:0.78rem;
+      width:auto; cursor:pointer; outline:none;
+    }
+    .xp-search {
+      min-height:30px; padding:0.2rem 0.65rem; border:1px solid var(--border); border-radius:6px;
+      background:rgba(6,12,22,0.95); color:var(--text); font:inherit; font-size:0.78rem;
+      width:180px; outline:none;
+    }
+    .xp-search::placeholder { color:#4a5d7e; }
+    .xp-search:focus { border-color:rgba(109,94,252,0.45); box-shadow:0 0 0 2px rgba(109,94,252,0.1); }
+    .xp-live-btn {
+      padding:0.25rem 0.7rem; border:1px solid var(--border); border-radius:6px;
+      background:transparent; color:var(--muted); font:inherit; font-size:0.78rem;
+      font-weight:700; cursor:pointer; transition:all 0.12s; white-space:nowrap;
+    }
+    .xp-live-btn.xp-live-on { border-color:rgba(16,185,129,0.4); background:rgba(16,185,129,0.1); color:var(--ok); }
+
+    /* ── Severity pills ── */
+    .sev-filter { display:flex; gap:2px; }
+    .sev-pill {
+      padding:0.2rem 0.48rem; border:1px solid var(--border); border-radius:5px;
+      font:inherit; font-size:0.72rem; font-weight:800; letter-spacing:0.04em;
+      cursor:pointer; background:transparent; color:var(--muted); transition:all 0.12s;
+    }
+    .sev-pill-err.xp-active  { border-color:var(--err);  color:var(--err);  background:rgba(244,63,94,0.1); }
+    .sev-pill-warn.xp-active { border-color:var(--warn); color:var(--warn); background:rgba(245,158,11,0.1); }
+    .sev-pill-info.xp-active { border-color:var(--info); color:var(--info); background:rgba(56,189,248,0.1); }
+    .sev-pill-dbg.xp-active  { border-color:var(--muted); color:var(--muted-strong); background:rgba(148,163,184,0.08); }
+
+    /* ── Explorer body layout ── */
+    .xp-body { display:flex; flex-direction:column; height:100%; overflow:hidden; }
+    .xp-table-header {
+      display:grid; gap:0.5rem; padding:0.45rem 1.25rem;
+      border-bottom:1px solid rgba(148,163,184,0.18);
+      font-size:0.7rem; font-weight:700; letter-spacing:0.09em; text-transform:uppercase;
+      color:var(--muted); flex-shrink:0; background:rgba(5,11,20,0.92); position:sticky; top:0; z-index:2;
+    }
+    .xp-rows { flex:1; overflow-y:auto; }
+    .xp-empty { color:var(--muted); font-size:0.88rem; padding:3rem 1.5rem; text-align:center; }
+
+    /* ── Log rows ── */
+    .log-header { grid-template-columns:90px 48px 150px 1fr; padding-left:1.5rem; }
+    .log-row {
+      display:grid; grid-template-columns:4px 90px 48px 150px 1fr;
+      gap:0 0.5rem; align-items:start; border-bottom:1px solid var(--border);
+      cursor:pointer; transition:background 0.1s; min-height:32px;
+    }
+    .log-row:hover { background:rgba(148,163,184,0.04); }
+    .log-row.xp-expanded { background:rgba(109,94,252,0.05); }
+    .log-sev-bar { width:4px; min-height:32px; height:100%; align-self:stretch; flex-shrink:0; }
+    .bar-err  { background:var(--err); }
+    .bar-warn { background:var(--warn); }
+    .bar-info { background:var(--info); }
+    .bar-dbg  { background:rgba(148,163,184,0.22); }
+    .log-time { color:var(--muted); font-size:0.75rem; font-family:monospace; padding:0.5rem 0; white-space:nowrap; }
+    .log-badge {
+      font-size:0.67rem; font-weight:800; letter-spacing:0.04em;
+      padding:0.17rem 0.32rem; border-radius:4px; white-space:nowrap;
+      align-self:start; margin-top:0.42rem; text-align:center;
+    }
+    .badge-err  { background:rgba(244,63,94,0.14);  color:var(--err); }
+    .badge-warn { background:rgba(245,158,11,0.14); color:var(--warn); }
+    .badge-info { background:rgba(56,189,248,0.14); color:var(--info); }
+    .badge-dbg  { background:rgba(148,163,184,0.1); color:var(--muted); }
+    .log-comp { color:var(--teal); font-size:0.76rem; font-family:monospace; padding:0.5rem 0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .log-body-col { padding:0.45rem 1.25rem 0.45rem 0; overflow:hidden; grid-column:5; }
+    .log-body-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.84rem; color:var(--text); }
+    .log-row.xp-expanded .log-body-text { white-space:normal; overflow:visible; }
+    .log-expand-detail { display:none; margin-top:0.5rem; padding:0.6rem 0.75rem; background:rgba(5,11,20,0.75); border:1px solid var(--border); border-radius:8px; font-size:0.8rem; }
+    .log-row.xp-expanded .log-expand-detail { display:block; }
+    .log-kv { display:grid; grid-template-columns:180px 1fr; gap:0.15rem 0.75rem; margin-bottom:0.5rem; }
+    .log-kv-key { color:var(--muted); font-family:monospace; font-size:0.75rem; }
+    .log-kv-val { color:var(--muted-strong); font-family:monospace; font-size:0.75rem; word-break:break-all; }
+    .log-trace-btn {
+      display:inline-flex; align-items:center; gap:0.3rem; padding:0.27rem 0.7rem;
+      border:1px solid rgba(109,94,252,0.35); border-radius:6px; background:var(--accent-soft);
+      color:var(--accent); font:inherit; font-size:0.78rem; font-weight:700;
+      cursor:pointer; margin-top:0.35rem; transition:filter 0.12s;
+    }
+    .log-trace-btn:hover { filter:brightness(1.15); }
+    .logs-hist-wrap { padding:0.5rem 1.25rem 0; flex-shrink:0; }
+    .logs-hist-wrap svg { display:block; width:100%; max-height:96px; }
+
+    /* ── Trace rows ── */
+    .traces-header { grid-template-columns:130px 1fr 56px 110px; }
+    .trace-row { border-bottom:1px solid var(--border); cursor:pointer; transition:background 0.1s; }
+    .trace-row:hover > .trace-cells { background:rgba(148,163,184,0.04); }
+    .trace-row.xp-expanded > .trace-cells { background:rgba(109,94,252,0.06); }
+    .trace-cells {
+      display:grid; grid-template-columns:130px 1fr 56px 110px; gap:0 0.5rem;
+      padding:0.5rem 1.25rem; align-items:center; transition:background 0.1s;
+    }
+    .trace-svc  { color:var(--teal); font-family:monospace; font-size:0.8rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .trace-tid  { color:var(--muted); font-family:monospace; font-size:0.77rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .trace-spans { color:var(--muted); font-size:0.78rem; text-align:center; }
+    .trace-time  { color:var(--muted); font-size:0.78rem; }
+    .trace-wf-wrap { display:none; padding:0.75rem 1.25rem 1rem; border-top:1px solid var(--border); background:rgba(5,11,20,0.65); }
+    .trace-row.xp-expanded .trace-wf-wrap { display:block; }
+    .trace-wf-loading { color:var(--muted); font-size:0.84rem; }
+    .trace-wf-error   { color:var(--err);  font-size:0.84rem; }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand__mark">Dx</div>
+      <div class="brand__text">
+        <strong>Doctor</strong>
+        <span>Telemetry</span>
+      </div>
+    </div>
+
+    <nav class="tab-nav" id="tab-nav">
+      <a class="tab-link is-active" data-tab="dashboard">
+        <span class="tab-link__icon">&#9636;</span> Dashboard
+      </a>
+      <a class="tab-link" data-tab="traces">
+        <span class="tab-link__icon">&#9672;</span> Traces
+      </a>
+      <a class="tab-link" data-tab="logs">
+        <span class="tab-link__icon">&#8801;</span> Logs
+      </a>
+      <a class="tab-link" data-tab="metrics">
+        <span class="tab-link__icon">&#9724;</span> Metrics
+      </a>
+      <a class="tab-link" data-tab="topology">
+        <span class="tab-link__icon">&#9655;</span> Topology
+      </a>
+      <a class="tab-link" data-tab="events">
+        <span class="tab-link__icon">&#9680;</span> Events
+      </a>
+      <a class="tab-link" data-tab="health">
+        <span class="tab-link__icon">&#9678;</span> Intent Health
+      </a>
+    </nav>
+
+    <div class="sidebar-footer">
+      {{ if .GuardianURL }}<a href="{{ .GuardianURL }}" target="_blank" rel="noreferrer">Guardian UI</a>{{ end }}
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- ═══════════════ DASHBOARD ═══════════════ -->
+    <div id="tab-dashboard" class="tab-panel is-active">
+      <div class="panel-header">
+        <div class="panel-header__left">
+          <h2>Dashboard</h2>
+          <p>Live health overview &mdash; auto-refreshes every 30 s</p>
+        </div>
+        <div class="dash-controls">
+          <label>Partition <input type="text" id="dash-partition" value="{{ .DefaultPartition }}" placeholder="all partitions"></label>
+          <label>Window
+            <select id="dash-window">
+              <option value="10m">10 min</option>
+              <option value="30m">30 min</option>
+              <option value="1h" selected>1 hour</option>
+              <option value="6h">6 hours</option>
+              <option value="24h">24 hours</option>
+            </select>
+          </label>
+          <button class="refresh-btn" id="dash-refresh-btn">
+            <span class="spin-icon">&#8635;</span> Refresh
+          </button>
+        </div>
+      </div>
+
+      <div class="dashboard-body">
+        <div id="dash-error" class="dash-error" style="display:none"></div>
+
+        <div class="stat-grid">
+          <div class="stat-card">
+            <div class="stat-card__label">Health score</div>
+            <div class="stat-card__value" id="ds-score">—</div>
+            <div class="stat-card__sub" id="ds-score-sub">&nbsp;</div>
+          </div>
+          <div class="stat-card stat-card--err">
+            <div class="stat-card__label">Recent failures</div>
+            <div class="stat-card__value" id="ds-failures">—</div>
+            <div class="stat-card__sub">in window</div>
+          </div>
+          <div class="stat-card stat-card--warn">
+            <div class="stat-card__label">Recent drifts</div>
+            <div class="stat-card__value" id="ds-drifts">—</div>
+            <div class="stat-card__sub">in window</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-card__label">Recommendation</div>
+            <div class="stat-card__value" style="font-size:1rem;padding-top:0.35rem;">
+              <span class="rec-badge" id="ds-rec" data-rec="">—</span>
+            </div>
+            <div class="stat-card__sub" id="ds-computed-at">&nbsp;</div>
+          </div>
+        </div>
+
+        <div class="charts-row">
+          <div class="chart-card">
+            <div class="chart-card__title">Health gauge</div>
+            <div class="gauge-wrap">
+              <svg id="gauge-svg" width="180" height="100" viewBox="0 0 180 100" style="display:block;margin:0 auto;">
+                <defs>
+                  <linearGradient id="gauge-grad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stop-color="#f43f5e"/>
+                    <stop offset="50%" stop-color="#f59e0b"/>
+                    <stop offset="100%" stop-color="#10b981"/>
+                  </linearGradient>
+                </defs>
+                <path d="M 20 90 A 70 70 0 0 1 160 90" fill="none" stroke="rgba(148,163,184,0.1)" stroke-width="14" stroke-linecap="round"/>
+                <path id="gauge-fill" d="M 20 90 A 70 70 0 0 1 160 90" fill="none" stroke="url(#gauge-grad)" stroke-width="14" stroke-linecap="round" stroke-dasharray="0 220" style="transition:stroke-dasharray 0.6s ease"/>
+                <line id="gauge-needle" x1="90" y1="90" x2="90" y2="28" stroke="rgba(255,255,255,0.7)" stroke-width="2" stroke-linecap="round" style="transform-origin:90px 90px;transform:rotate(0deg);transition:transform 0.6s ease"/>
+                <circle cx="90" cy="90" r="5" fill="rgba(255,255,255,0.8)"/>
+                <text id="gauge-score-text" x="90" y="78" text-anchor="middle" font-family="Space Grotesk,sans-serif" font-size="18" font-weight="700" fill="#e7eefc">—</text>
+              </svg>
+              <div class="gauge-level" id="gauge-level" data-level="unknown">Unknown</div>
+              <div class="gauge-label" id="gauge-reason">&nbsp;</div>
+            </div>
+          </div>
+
+          <div class="chart-card">
+            <div class="chart-card__title">Event breakdown</div>
+            <svg id="event-chart" width="100%" height="120" viewBox="0 0 500 120" preserveAspectRatio="xMinYMid meet" style="display:block;">
+              <text x="250" y="64" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" fill="rgba(148,163,184,0.4)">Refresh to load event data</text>
+            </svg>
+          </div>
+        </div>
+
+        <div id="dash-health-table-wrap">
+          <div class="dash-empty">Refresh to load the health summary.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ TRACES ═══════════════ -->
+    <div id="tab-traces" class="tab-panel">
+      <div class="panel-header">
+        <div class="panel-header__left">
+          <h2>Traces</h2>
+          <p id="traces-header-status">Recent traces &mdash; click a row to view the waterfall</p>
+        </div>
+        <div class="xp-toolbar">
+          <div class="xp-presets" id="traces-presets">
+            <button class="xp-preset" data-mins="15">15m</button>
+            <button class="xp-preset xp-active" data-mins="60">1h</button>
+            <button class="xp-preset" data-mins="360">6h</button>
+            <button class="xp-preset" data-mins="1440">24h</button>
+          </div>
+          <select id="traces-svc" class="xp-select" title="Filter by service"></select>
+          <input type="text" id="traces-q" class="xp-search" placeholder="Filter trace ID or service&hellip;">
+          <button id="traces-live-btn" class="xp-live-btn xp-live-on" title="Auto-refresh every 15 s">&#9679; Live</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="xp-body">
+          <div class="xp-table-header traces-header">
+            <span>Service</span><span>Trace ID</span><span>Spans</span><span>Time</span>
+          </div>
+          <div id="traces-rows" class="xp-rows">
+            <div class="xp-empty" id="traces-empty">Loading recent traces&hellip;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ LOGS ═══════════════ -->
+    <div id="tab-logs" class="tab-panel">
+      <div class="panel-header">
+        <div class="panel-header__left">
+          <h2>Logs</h2>
+          <p id="logs-header-status">Loading&hellip;</p>
+        </div>
+        <div class="xp-toolbar">
+          <div class="xp-presets" id="logs-presets">
+            <button class="xp-preset" data-mins="15">15m</button>
+            <button class="xp-preset xp-active" data-mins="60">1h</button>
+            <button class="xp-preset" data-mins="360">6h</button>
+            <button class="xp-preset" data-mins="1440">24h</button>
+          </div>
+          <select id="logs-svc" class="xp-select" title="Filter by service"></select>
+          <div class="sev-filter" id="logs-sev">
+            <button class="sev-pill sev-pill-err xp-active" data-sev="ERR">ERR</button>
+            <button class="sev-pill sev-pill-warn xp-active" data-sev="WARN">WARN</button>
+            <button class="sev-pill sev-pill-info xp-active" data-sev="INFO">INFO</button>
+            <button class="sev-pill sev-pill-dbg xp-active" data-sev="DBG">DBG</button>
+          </div>
+          <input type="text" id="logs-q" class="xp-search" placeholder="Filter message, component&hellip;">
+          <button id="logs-live-btn" class="xp-live-btn xp-live-on" title="Auto-refresh every 15 s">&#9679; Live</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="xp-body">
+          <div class="logs-hist-wrap" id="logs-hist-wrap"></div>
+          <div class="xp-table-header log-header">
+            <span>Time</span><span>Sev</span><span>Component</span><span>Message</span>
+          </div>
+          <div id="logs-rows" class="xp-rows">
+            <div class="xp-empty" id="logs-empty">Loading logs&hellip;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ METRICS ═══════════════ -->
+    <div id="tab-metrics" class="tab-panel">
+      <div class="panel-header">
+        <div class="panel-header__left">
+          <h2>Metric range</h2>
+          <p>Plot metric values over a time range.</p>
+        </div>
+        <span class="panel-badge">GET /v1/metrics/range</span>
+      </div>
+      <div class="panel-body">
+        <div class="query-layout" data-endpoint="/v1/metrics/range" data-renderer="metrics" data-deep-link-trigger="metric">
+          <div class="query-form-col">
+            <form class="query-form" data-query-form>
+              <div class="query-form__cluster">
+                <p class="cluster-title">Metric target</p>
+                <div class="grid-2">
+                  <label>Tenant<input name="tenant" value="{{ .DefaultTenant }}" placeholder="default"></label>
+                  <label>Metric name<input name="metric" placeholder="http.server.duration" required></label>
+                </div>
+              </div>
+              <div class="query-form__cluster">
+                <p class="cluster-title">Time window</p>
+                <div class="grid-2">
+                  <label>From<input type="datetime-local" name="from" data-default-offset-hours="-0.16667"></label>
+                  <label>To<input type="datetime-local" name="to" data-default-offset-hours="0"></label>
+                </div>
+              </div>
+              <button type="submit" class="run-btn">Run metric query</button>
+              <p class="form-footnote">Deep link with <code>metric</code>, <code>from</code>, <code>to</code> to open ready to run.</p>
+            </form>
+          </div>
+          <div class="query-output-col">
+            <div class="request" data-request-url>Run a query to see the request URL.</div>
+            <div class="status" data-status data-kind="idle">Configure the query and run it.</div>
+            <div class="summary" data-summary></div>
+            <div class="results" data-results></div>
+            <details><summary>Raw JSON</summary><pre data-json>{}</pre></details>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ TOPOLOGY ═══════════════ -->
+    <div id="tab-topology" class="tab-panel">
+      <div class="panel-header">
+        <div class="panel-header__left">
+          <h2>Partition topology</h2>
+          <p>Explore the deployment graph for a partition.</p>
+        </div>
+        <span class="panel-badge">GET /v1/guardian/topology</span>
+      </div>
+      <div class="panel-body">
+        <div class="query-layout" data-endpoint="/v1/guardian/topology" data-renderer="topology" data-deep-link-trigger="partition"{{ if .DefaultPartition }} data-auto-run="true"{{ end }}>
+          <div class="query-form-col">
+            <form class="query-form" data-query-form>
+              <div class="query-form__cluster">
+                <p class="cluster-title">Partition scope</p>
+                <div class="grid-2">
+                  <label>Tenant<input name="tenant" value="{{ .DefaultTenant }}" placeholder="default"></label>
+                  <label>Partition<input name="partition" value="{{ .DefaultPartition }}" placeholder="doctor-telemetry"></label>
+                </div>
+              </div>
+              <div class="query-form__cluster">
+                <p class="cluster-title">Time window</p>
+                <div class="grid-2">
+                  <label>From<input type="datetime-local" name="from" data-default-offset-hours="-24"></label>
+                  <label>To<input type="datetime-local" name="to" data-default-offset-hours="0"></label>
+                </div>
+              </div>
+              <button type="submit" class="run-btn">Run topology query</button>
+              <p class="form-footnote">Deep links with a partition still auto-run.</p>
+            </form>
+          </div>
+          <div class="query-output-col">
+            <div class="request" data-request-url>Run a query to see the request URL.</div>
+            <div class="status" data-status data-kind="idle">Configure the query and run it.</div>
+            <div class="summary" data-summary></div>
+            <div class="results" data-results></div>
+            <details><summary>Raw JSON</summary><pre data-json>{}</pre></details>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ EVENTS ═══════════════ -->
+    <div id="tab-events" class="tab-panel">
+      <div class="panel-header">
+        <div class="panel-header__left">
+          <h2>Event history</h2>
+          <p>Filter Guardian events by partition, intent, kind, and time window.</p>
+        </div>
+        <span class="panel-badge">GET /v1/guardian/events</span>
+      </div>
+      <div class="panel-body">
+        <div class="query-layout" data-endpoint="/v1/guardian/events" data-renderer="events">
+          <div class="query-form-col">
+            <form class="query-form" data-query-form>
+              <div class="query-form__cluster">
+                <p class="cluster-title">Scope</p>
+                <div class="grid-2">
+                  <label>Tenant<input name="tenant" value="{{ .DefaultTenant }}" placeholder="default"></label>
+                  <label>Partition<input name="partition" value="{{ .DefaultPartition }}" placeholder="doctor-telemetry"></label>
+                </div>
+                <div class="grid-2">
+                  <label>Intent<input name="intent" placeholder="30-query-plane"></label>
+                  <label>Kind
+                    <select name="kind">
+                      <option value="">Any kind</option>
+                      <option value="state_transition">state_transition</option>
+                      <option value="drift_detected">drift_detected</option>
+                      <option value="apply_succeeded">apply_succeeded</option>
+                      <option value="apply_failed">apply_failed</option>
+                      <option value="check_failed">check_failed</option>
+                      <option value="rollback">rollback</option>
+                      <option value="health_check">health_check</option>
+                      <option value="reconcile">reconcile</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div class="query-form__cluster">
+                <p class="cluster-title">Time window</p>
+                <div class="grid-2">
+                  <label>From<input type="datetime-local" name="from" data-default-offset-hours="-24"></label>
+                  <label>To<input type="datetime-local" name="to" data-default-offset-hours="0"></label>
+                </div>
+                <label>Limit<input type="number" name="limit" min="1" max="500" value="100"></label>
+              </div>
+              <button type="submit" class="run-btn">Run event query</button>
+            </form>
+          </div>
+          <div class="query-output-col">
+            <div class="request" data-request-url>Run a query to see the request URL.</div>
+            <div class="status" data-status data-kind="idle">Configure the query and run it.</div>
+            <div class="summary" data-summary></div>
+            <div class="results" data-results></div>
+            <details><summary>Raw JSON</summary><pre data-json>{}</pre></details>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ INTENT HEALTH ═══════════════ -->
+    <div id="tab-health" class="tab-panel">
+      <div class="panel-header">
+        <div class="panel-header__left">
+          <h2>Intent health</h2>
+          <p>Compute health feedback for a specific partition or intent.</p>
+        </div>
+        <span class="panel-badge">GET /v1/guardian/health</span>
+      </div>
+      <div class="panel-body">
+        <div class="query-layout" data-endpoint="/v1/guardian/health" data-renderer="health">
+          <div class="query-form-col">
+            <form class="query-form" data-query-form>
+              <div class="query-form__cluster">
+                <p class="cluster-title">Scope</p>
+                <div class="grid-2">
+                  <label>Tenant<input name="tenant" value="{{ .DefaultTenant }}" placeholder="default"></label>
+                  <label>Partition<input name="partition" value="{{ .DefaultPartition }}" placeholder="doctor-telemetry"></label>
+                </div>
+                <label>Intent<input name="intent" placeholder="30-query-plane (optional)"></label>
+              </div>
+              <div class="query-form__cluster">
+                <p class="cluster-title">Window</p>
+                <label>Duration<input name="window" placeholder="1h, 30m, 6h" value="1h"></label>
+              </div>
+              <button type="submit" class="run-btn">Compute health</button>
+              <p class="form-footnote">Leave intent blank to compute across the whole partition.</p>
+            </form>
+          </div>
+          <div class="query-output-col">
+            <div class="request" data-request-url>Run a query to see the request URL.</div>
+            <div class="status" data-status data-kind="idle">Configure the query and run it.</div>
+            <div class="summary" data-summary></div>
+            <div class="results" data-results></div>
+            <details><summary>Raw JSON</summary><pre data-json>{}</pre></details>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  /* ── Theme colors for SVG charts ── */
+  const themeColors = {
+    accent: "#6d5efc",
+    accentSoft: "rgba(109,94,252,0.16)",
+    teal: "#14b8a6",
+    ok: "#10b981",
+    warn: "#f59e0b",
+    err: "#f43f5e",
+    info: "#38bdf8",
+    muted: "#95a6c6",
+    text: "#e7eefc",
+    border: "rgba(148,163,184,0.12)",
+    grid: "rgba(148,163,184,0.1)",
+  };
+
+  /* ── Tab switching ── */
+  const scheduledAutoRuns = new Set();
+
+  function switchTab(tabName) {
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("is-active"));
+    document.querySelectorAll(".tab-link").forEach(l => l.classList.remove("is-active"));
+    const panel = document.getElementById("tab-" + tabName);
+    if (panel) panel.classList.add("is-active");
+    const link = document.querySelector(".tab-link[data-tab='" + tabName + "']");
+    if (link) link.classList.add("is-active");
+    history.replaceState(null, "", "#" + (tabName === "dashboard" ? "" : tabName));
+  }
+
+  document.getElementById("tab-nav").addEventListener("click", function(e) {
+    const link = e.target.closest(".tab-link[data-tab]");
+    if (!link) return;
+    e.preventDefault();
+    switchTab(link.dataset.tab);
+  });
+
+  function openTabFromHash() {
+    const hash = location.hash.replace("#", "").trim();
+    const valid = ["dashboard","traces","logs","metrics","topology","events","health"];
+    if (hash && valid.includes(hash)) switchTab(hash);
+  }
+
+  window.addEventListener("hashchange", openTabFromHash);
+
+  /* ── Time helpers ── */
+  function toLocalInputValue(date) {
+    const pad = n => String(n).padStart(2, "0");
+    return date.getFullYear() + "-" + pad(date.getMonth()+1) + "-" + pad(date.getDate())
+      + "T" + pad(date.getHours()) + ":" + pad(date.getMinutes());
+  }
+
+  function applyDefaultTimes() {
+    const now = new Date();
+    document.querySelectorAll("[data-default-offset-hours]").forEach(function(input) {
+      const offset = parseFloat(input.dataset.defaultOffsetHours) * 3600000;
+      input.value = toLocalInputValue(new Date(now.getTime() + offset));
+    });
+  }
+
+  /* ── Deep-link defaults ── */
+  function applyDeepLinkDefaults() {
+    const params = new URLSearchParams(window.location.search);
+    ["tenant","partition","intent","service","metric","q","kind","window","trace_id","limit","from","to"].forEach(function(name) {
+      const value = params.get(name);
+      if (!value) return;
+      document.querySelectorAll("[name='" + name + "']").forEach(function(input) {
+        if (!(input instanceof HTMLInputElement || input instanceof HTMLSelectElement)) return;
+        if (input instanceof HTMLInputElement && input.type === "datetime-local") {
+          const d = new Date(value);
+          if (!isNaN(d.getTime())) input.value = toLocalInputValue(d);
+          return;
+        }
+        input.value = value;
+      });
+    });
+  }
+
+  /* ── Query form helpers ── */
+  function buildURL(card, form) {
+    let path = card.dataset.endpoint || "/";
+    const params = new URLSearchParams();
+    Array.from(form.elements).filter(el => el.name).forEach(function(element) {
+      const value = element.value.trim();
+      if (element.dataset.pathParam) {
+        if (!value) throw new Error((element.name || element.dataset.pathParam) + " is required");
+        path = path.replace("{" + element.dataset.pathParam + "}", encodeURIComponent(value));
+        return;
+      }
+      if (value !== "") params.set(element.name, value);
+    });
+    if (/\{[^}]+\}/.test(path)) throw new Error("missing required path parameter");
+    const url = new URL(path, window.location.origin);
+    url.search = params.toString();
+    return url;
+  }
+
+  function setRequestURL(card, url) {
+    const container = card.querySelector("[data-request-url]");
+    container.replaceChildren();
+    const link = document.createElement("a");
+    link.href = url.toString();
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = url.pathname + url.search;
+    container.append("GET ");
+    container.appendChild(link);
+  }
+
+  function setStatus(card, kind, message) {
+    const status = card.querySelector("[data-status]");
+    status.dataset.kind = kind;
+    status.textContent = message;
+  }
+
+  function renderCard(card, payload) {
+    const summary = card.querySelector("[data-summary]");
+    const results = card.querySelector("[data-results]");
+    const raw = card.querySelector("[data-json]");
+    const rendererName = card.dataset.renderer || "generic";
+    const renderer = renderers[rendererName] || function() { return { pills: [], blocks: [] }; };
+    const rendered = renderer(payload);
+
+    summary.replaceChildren();
+    results.replaceChildren();
+    raw.textContent = JSON.stringify(payload, null, 2);
+
+    (rendered.pills || []).forEach(function(text) {
+      const pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = text;
+      summary.appendChild(pill);
+    });
+
+    const blocks = rendered.blocks || [];
+    if (blocks.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "No structured results to display.";
+      results.appendChild(empty);
+      return;
+    }
+    blocks.forEach(function(block) { results.appendChild(block); });
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const card = form.closest("[data-endpoint]");
+    if (!card) return;
+    try {
+      const url = buildURL(card, form);
+      setRequestURL(card, url);
+      setStatus(card, "loading", "Running query\u2026");
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const contentType = response.headers.get("content-type") || "";
+      const body = contentType.includes("application/json") ? await response.json() : { error: await response.text() };
+      if (!response.ok) {
+        renderCard(card, body);
+        setStatus(card, "error", body.error || "Request failed with status " + response.status);
+        return;
+      }
+      renderCard(card, body);
+      setStatus(card, "ok", "Query completed.");
+    } catch (error) {
+      setStatus(card, "error", error instanceof Error ? error.message : "Request failed");
+    }
+  }
+
+  /* ── SVG helpers ── */
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    Object.entries(attrs || {}).forEach(function(e) { el.setAttribute(e[0], String(e[1])); });
+    return el;
+  }
+
+  function createChartWrapper(title) {
+    const wrapper = document.createElement("section");
+    wrapper.className = "result-block";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    wrapper.appendChild(heading);
+    return wrapper;
+  }
+
+  function createTableBlock(title, columns, rows) {
+    const wrapper = document.createElement("section");
+    wrapper.className = "result-block";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    wrapper.appendChild(heading);
+    if (!Array.isArray(rows) || rows.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "No matching records.";
+      wrapper.appendChild(empty);
+      return wrapper;
+    }
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    columns.forEach(function(col) {
+      const th = document.createElement("th");
+      th.textContent = col.label;
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    rows.forEach(function(row) {
+      const tr = document.createElement("tr");
+      columns.forEach(function(col) {
+        const td = document.createElement("td");
+        td.textContent = formatValue(row[col.key]);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrapper.appendChild(table);
+    return wrapper;
+  }
+
+  function formatValue(value) {
+    if (value === undefined || value === null || value === "") return "-";
+    if (typeof value === "number") return Number.isFinite(value) ? value.toString() : "-";
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
+  }
+
+  /* ── Log histogram ── */
+  function createLogHistogramBlock(records) {
+    if (!records || records.length === 0) return null;
+    const buckets = 20;
+    const timestamps = records.map(function(r) { return new Date(r.timestamp).getTime(); }).filter(function(v) { return !isNaN(v); });
+    if (timestamps.length === 0) return null;
+    const minT = Math.min.apply(null, timestamps);
+    const maxT = Math.max.apply(null, timestamps.concat([minT + 1]));
+    const bucketMs = (maxT - minT) / buckets || 60000;
+    const sevColors = { error: themeColors.err, warn: themeColors.warn, info: themeColors.info, debug: themeColors.muted };
+    const data = Array.from({ length: buckets }, function() { return { error:0, warn:0, info:0, debug:0, total:0 }; });
+    records.forEach(function(record) {
+      const t = new Date(record.timestamp).getTime();
+      if (isNaN(t)) return;
+      const bi = Math.min(Math.floor((t - minT) / bucketMs), buckets - 1);
+      const sev = (record.severity_text || "").toLowerCase();
+      const key = sev.includes("error") ? "error" : sev.includes("warn") ? "warn" : sev.includes("info") ? "info" : "debug";
+      data[bi][key]++;
+      data[bi].total++;
+    });
+    const maxCount = Math.max.apply(null, [1].concat(data.map(function(b) { return b.total; })));
+    const W=600, H=150, pL=38, pB=26, pT=18, pR=8, cW=W-pL-pR, cH=H-pT-pB, barW=cW/buckets;
+    const svg = svgEl("svg", { viewBox:"0 0 "+W+" "+H, style:"width:100%;max-width:"+W+"px;display:block" });
+    for (let i=0; i<=4; i++) {
+      const y = pT+cH-(i/4)*cH;
+      svg.appendChild(svgEl("line", { x1:pL, y1:y, x2:pL+cW, y2:y, stroke:themeColors.grid, "stroke-width":1, "stroke-dasharray":"3,3" }));
+      const lbl = svgEl("text", { x:pL-4, y:y+4, "text-anchor":"end", fill:themeColors.muted, "font-size":10 });
+      lbl.textContent = Math.round(maxCount*i/4);
+      svg.appendChild(lbl);
+    }
+    for (let i=0; i<buckets; i++) {
+      const b = data[i]; let yOff = 0;
+      [["error",sevColors.error],["warn",sevColors.warn],["info",sevColors.info],["debug",sevColors.debug]].forEach(function(pair) {
+        const key = pair[0], color = pair[1];
+        if (!b[key]) return;
+        const bH = (b[key]/maxCount)*cH;
+        svg.appendChild(svgEl("rect", { x:pL+i*barW+1, y:pT+cH-yOff-bH, width:barW-2, height:bH, fill:color, rx:1 }));
+        yOff += bH;
+      });
+    }
+    const fmt = function(t) { const d=new Date(t); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); };
+    for (let i=0; i<=4; i++) {
+      const lbl = svgEl("text", { x:pL+(i/4)*cW, y:H-4, "text-anchor":"middle", fill:themeColors.muted, "font-size":10 });
+      lbl.textContent = fmt(minT+(i/4)*(maxT-minT));
+      svg.appendChild(lbl);
+    }
+    let lx = pL;
+    [["ERROR",sevColors.error],["WARN",sevColors.warn],["INFO",sevColors.info],["DEBUG",sevColors.debug]].forEach(function(pair) {
+      svg.appendChild(svgEl("rect", { x:lx, y:4, width:10, height:10, fill:pair[1], rx:2 }));
+      const t = svgEl("text", { x:lx+13, y:13, fill:themeColors.muted, "font-size":10 });
+      t.textContent = pair[0]; svg.appendChild(t);
+      lx += pair[0].length*6.5+22;
+    });
+    const wrapper = createChartWrapper("Log volume \u2014 severity breakdown");
+    wrapper.appendChild(svg);
+    return wrapper;
+  }
+
+  /* ── Metric line chart ── */
+  function createMetricLineChartBlock(points, metricName) {
+    if (!points || points.length < 2) return null;
+    const parsed = points.map(function(p) { return { t:new Date(p.timestamp).getTime(), v:Number(p.value) }; })
+      .filter(function(p) { return !isNaN(p.t) && !isNaN(p.v) && isFinite(p.v); })
+      .sort(function(a,b) { return a.t-b.t; });
+    if (parsed.length < 2) return null;
+    const minT=parsed[0].t, maxT=parsed[parsed.length-1].t;
+    const vals=parsed.map(function(p){return p.v;});
+    const minV=Math.min.apply(null,vals), maxV=Math.max.apply(null,vals), rangeV=maxV-minV||1;
+    const W=600,H=150,pL=52,pB=26,pT=10,pR=10,cW=W-pL-pR,cH=H-pT-pB;
+    const px=function(t){return pL+((t-minT)/(maxT-minT||1))*cW;};
+    const py=function(v){return pT+cH-((v-minV)/rangeV)*cH;};
+    const svg=svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;max-width:"+W+"px;display:block"});
+    for(let i=0;i<=4;i++){
+      const v=minV+(i/4)*rangeV,y=py(v);
+      svg.appendChild(svgEl("line",{x1:pL,y1:y,x2:pL+cW,y2:y,stroke:themeColors.grid,"stroke-width":1,"stroke-dasharray":"3,3"}));
+      const lbl=svgEl("text",{x:pL-4,y:y+4,"text-anchor":"end",fill:themeColors.muted,"font-size":10});
+      lbl.textContent=v.toFixed(Math.abs(v)<10?2:0);svg.appendChild(lbl);
+    }
+    const aD="M "+px(parsed[0].t).toFixed(1)+","+py(parsed[0].v).toFixed(1)+" "
+      +parsed.slice(1).map(function(p){return"L "+px(p.t).toFixed(1)+","+py(p.v).toFixed(1);}).join(" ")
+      +" L "+px(parsed[parsed.length-1].t).toFixed(1)+","+(pT+cH).toFixed(1)
+      +" L "+px(parsed[0].t).toFixed(1)+","+(pT+cH).toFixed(1)+" Z";
+    svg.appendChild(svgEl("path",{d:aD,fill:themeColors.accentSoft,stroke:"none"}));
+    svg.appendChild(svgEl("polyline",{points:parsed.map(function(p){return px(p.t).toFixed(1)+","+py(p.v).toFixed(1);}).join(" "),fill:"none",stroke:themeColors.accent,"stroke-width":2,"stroke-linejoin":"round"}));
+    if(parsed.length<=80) parsed.forEach(function(p){svg.appendChild(svgEl("circle",{cx:px(p.t).toFixed(1),cy:py(p.v).toFixed(1),r:3,fill:themeColors.accent}));});
+    const fmt=function(t){const d=new Date(t);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");};
+    for(let i=0;i<=4;i++){
+      const lbl=svgEl("text",{x:(pL+(i/4)*cW).toFixed(1),y:H-4,"text-anchor":"middle",fill:themeColors.muted,"font-size":10});
+      lbl.textContent=fmt(minT+(i/4)*(maxT-minT));svg.appendChild(lbl);
+    }
+    const avg=vals.reduce(function(s,v){return s+v;},0)/vals.length;
+    const info=svgEl("text",{x:pL+cW,y:pT+10,"text-anchor":"end",fill:themeColors.muted,"font-size":10});
+    info.textContent="min:"+minV.toFixed(2)+"  avg:"+avg.toFixed(2)+"  max:"+maxV.toFixed(2);svg.appendChild(info);
+    const wrapper=createChartWrapper(metricName?"Metric: "+metricName:"Metric values over time");
+    wrapper.appendChild(svg);return wrapper;
+  }
+
+  /* ── Trace waterfall ── */
+  function createTraceWaterfallBlock(spans) {
+    if(!spans||spans.length===0) return null;
+    const parsed=spans.map(function(s){return{name:s.name||s.span_id||"span",service:s.service||"",start:new Date(s.start_time).getTime(),end:new Date(s.end_time).getTime(),status:s.status_code||""};})
+      .filter(function(s){return!isNaN(s.start)&&!isNaN(s.end);}).sort(function(a,b){return a.start-b.start;});
+    if(parsed.length===0) return null;
+    const traceStart=parsed[0].start,traceEnd=Math.max.apply(null,parsed.map(function(s){return s.end;})),dur=traceEnd-traceStart||1;
+    const services=[...new Set(parsed.map(function(s){return s.service;}))];
+    const palette=[themeColors.accent,themeColors.ok,themeColors.warn,themeColors.err,"#c084fc",themeColors.teal,themeColors.info];
+    const svcColors={};services.forEach(function(s,i){svcColors[s]=palette[i%palette.length];});
+    const rowH=22,pL=165,pT=10,pB=28,pR=10,W=600,rows=parsed.slice(0,28),H=pT+rows.length*rowH+pB,cW=W-pL-pR;
+    const svg=svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;max-width:"+W+"px;display:block"});
+    for(let i=0;i<=4;i++){
+      const x=(pL+(i/4)*cW).toFixed(1);
+      svg.appendChild(svgEl("line",{x1:x,y1:pT,x2:x,y2:H-pB,stroke:themeColors.grid,"stroke-width":1,"stroke-dasharray":"3,3"}));
+      const ms=(i/4)*dur;
+      const lbl=svgEl("text",{x,y:H-4,"text-anchor":"middle",fill:themeColors.muted,"font-size":10});
+      lbl.textContent=ms>=1000?(ms/1000).toFixed(1)+"s":Math.round(ms)+"ms";svg.appendChild(lbl);
+    }
+    rows.forEach(function(span,i){
+      const y=pT+i*rowH;
+      const color=span.status.toLowerCase().includes("error")?themeColors.err:(svcColors[span.service]||themeColors.accent);
+      const lbl=svgEl("text",{x:pL-6,y:y+rowH*0.62,"text-anchor":"end",fill:themeColors.muted,"font-size":10});
+      lbl.textContent=span.name.length>24?span.name.slice(0,22)+"\u2026":span.name;svg.appendChild(lbl);
+      const x1=pL+((span.start-traceStart)/dur)*cW,bW=Math.max(2,((span.end-span.start)/dur)*cW);
+      svg.appendChild(svgEl("rect",{x:x1.toFixed(1),y:y+4,width:bW.toFixed(1),height:rowH-8,fill:color,rx:2,opacity:0.85}));
+      const d=span.end-span.start;
+      const dlbl=svgEl("text",{x:(x1+bW+3).toFixed(1),y:y+rowH*0.62,fill:themeColors.text,"font-size":9});
+      dlbl.textContent=d>=1000?(d/1000).toFixed(1)+"s":d+"ms";svg.appendChild(dlbl);
+      svg.appendChild(svgEl("line",{x1:0,y1:y+rowH,x2:W,y2:y+rowH,stroke:themeColors.border,"stroke-width":1}));
+    });
+    const ts=dur>=1000?(dur/1000).toFixed(2)+"s":dur+"ms";
+    const wrapper=createChartWrapper("Trace waterfall \u2014 total "+ts);
+    wrapper.appendChild(svg);return wrapper;
+  }
+
+  /* ── Renderers ── */
+  const renderers = {
+    trace: function(payload) {
+      const spans = payload.spans || [];
+      return {
+        pills: ["spans: "+spans.length, "trace_id: "+(payload.trace_id||"?")],
+        blocks: [createTraceWaterfallBlock(spans), createTableBlock("Spans", [
+          {label:"Name",key:"name"},{label:"Service",key:"service"},
+          {label:"Start",key:"start_time"},{label:"Duration",key:"duration_ms"},{label:"Status",key:"status_code"}
+        ], spans)].filter(Boolean),
+      };
+    },
+    logs: function(payload) {
+      const records = payload.records || [];
+      return {
+        pills: ["results: "+records.length],
+        blocks: [createLogHistogramBlock(records), createTableBlock("Log records", [
+          {label:"Time",key:"timestamp"},{label:"Severity",key:"severity_text"},
+          {label:"Service",key:"service"},{label:"Message",key:"body"}
+        ], records)].filter(Boolean),
+      };
+    },
+    metrics: function(payload) {
+      const points = payload.points || [];
+      return {
+        pills: ["points: "+points.length].concat(payload.metric ? ["metric: "+payload.metric] : []),
+        blocks: [createMetricLineChartBlock(points, payload.metric), createTableBlock("Data points", [
+          {label:"Timestamp",key:"timestamp"},{label:"Value",key:"value"},{label:"Labels",key:"labels"}
+        ], points)].filter(Boolean),
+      };
+    },
+    topology: function(payload) {
+      return {
+        pills: ["nodes: "+(payload.nodes||[]).length, "edges: "+(payload.edges||[]).length],
+        blocks: [
+          createTableBlock("Nodes", [{label:"ID",key:"id"},{label:"Kind",key:"kind"},{label:"State",key:"state"},{label:"Labels",key:"labels"}], payload.nodes||[]),
+          createTableBlock("Edges", [{label:"From",key:"from"},{label:"To",key:"to"},{label:"Kind",key:"kind"}], payload.edges||[]),
+        ],
+      };
+    },
+    events: function(payload) {
+      const events = payload.events || [];
+      return {
+        pills: ["returned: "+(payload.returned != null ? payload.returned : events.length)],
+        blocks: [createTableBlock("Events", [
+          {label:"Time",key:"occurred_at"},{label:"Partition",key:"partition"},
+          {label:"Intent",key:"intent"},{label:"Kind",key:"kind"},{label:"Message",key:"message"},
+        ], events)],
+      };
+    },
+    health: function(payload) {
+      const oh = payload.overall_health || {};
+      return {
+        pills: [
+          "score: "+(typeof oh.score==="number"?oh.score.toFixed(2):"?"),
+          "level: "+(oh.level||"?"),
+          "rec: "+(payload.recommendation||"?"),
+          "failures: "+(payload.recent_failures!=null?payload.recent_failures:"?"),
+          "drifts: "+(payload.recent_drifts!=null?payload.recent_drifts:"?"),
+        ],
+        blocks: [createTableBlock("Health feedback", [
+          {label:"Partition",key:"partition"},{label:"Intent",key:"intent"},
+          {label:"Recommendation",key:"recommendation"},
+          {label:"Failures",key:"recent_failures"},{label:"Drifts",key:"recent_drifts"},
+          {label:"Window",key:"window"},{label:"Computed at",key:"computed_at"},
+        ], [payload])],
+      };
+    },
+  };
+
+  /* ── Dashboard ── */
+  function updateGauge(score) {
+    const totalLen = 220;
+    const filled = score * totalLen;
+    const gaugeFill = document.getElementById("gauge-fill");
+    if (gaugeFill) gaugeFill.setAttribute("stroke-dasharray", filled.toFixed(1)+" "+(totalLen-filled).toFixed(1));
+    const needle = document.getElementById("gauge-needle");
+    if (needle) needle.style.transform = "rotate("+(-90+score*180)+"deg)";
+    const scoreText = document.getElementById("gauge-score-text");
+    if (scoreText) scoreText.textContent = Math.round(score*100)+"%";
+  }
+
+  function updateEventChart(events) {
+    const svg = document.getElementById("event-chart");
+    if (!svg || !events || events.length === 0) return;
+    const counts = {};
+    events.forEach(function(ev) { const k=ev.kind||"unknown"; counts[k]=(counts[k]||0)+1; });
+    const entries = Object.entries(counts).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
+    const maxCount = Math.max.apply(null, [1].concat(entries.map(function(e){return e[1];})));
+    const W=500,H=120,pL=120,pT=10,pB=6,pR=12,cW=W-pL-pR,cH=H-pT-pB;
+    const barH = Math.min(18, Math.floor((cH-(entries.length-1)*4)/entries.length));
+    const gap = entries.length>1 ? (cH-entries.length*barH)/(entries.length-1) : 0;
+    svg.setAttribute("viewBox","0 0 "+W+" "+H);
+    svg.replaceChildren();
+    entries.forEach(function(entry, i) {
+      const kind=entry[0], count=entry[1];
+      const y = pT+i*(barH+gap);
+      const bW = Math.max(2,(count/maxCount)*cW);
+      const color = kind.includes("fail")||kind.includes("error") ? themeColors.err
+        : kind.includes("drift") ? themeColors.warn
+        : kind.includes("succeed")||kind.includes("healthy") ? themeColors.ok
+        : themeColors.accent;
+      const lbl=svgEl("text",{x:pL-6,y:y+barH*0.75,"text-anchor":"end",fill:themeColors.muted,"font-size":11});
+      lbl.textContent=kind.length>18?kind.slice(0,16)+"\u2026":kind;svg.appendChild(lbl);
+      svg.appendChild(svgEl("rect",{x:pL,y,width:cW,height:barH,fill:"rgba(148,163,184,0.06)",rx:3}));
+      svg.appendChild(svgEl("rect",{x:pL,y,width:bW.toFixed(1),height:barH,fill:color,rx:3,opacity:0.85}));
+      const cnt=svgEl("text",{x:pL+bW+4,y:y+barH*0.75,fill:themeColors.muted,"font-size":10});
+      cnt.textContent=count;svg.appendChild(cnt);
+    });
+  }
+
+  function escHtml(str) {
+    return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  async function loadDashboard() {
+    const btn = document.getElementById("dash-refresh-btn");
+    const errEl = document.getElementById("dash-error");
+    const partition = document.getElementById("dash-partition").value.trim();
+    const window_ = document.getElementById("dash-window").value;
+
+    btn.classList.add("spinning");
+    errEl.style.display = "none";
+
+    try {
+      const tenant = "{{ .DefaultTenant }}" || "default";
+      const params = new URLSearchParams({ tenant: tenant, window: window_ });
+      if (partition) params.set("partition", partition);
+
+      const results = await Promise.allSettled([
+        fetch("/v1/guardian/health?"+params, { headers: { Accept: "application/json" } }),
+        fetch("/v1/guardian/events?"+params+"&limit=200", { headers: { Accept: "application/json" } }),
+      ]);
+
+      const healthRes = results[0], eventsRes = results[1];
+
+      if (healthRes.status === "fulfilled" && healthRes.value.ok) {
+        const data = await healthRes.value.json();
+        const oh = data.overall_health || {};
+        const score = typeof oh.score === "number" ? oh.score : 0;
+
+        document.getElementById("ds-score").textContent = Math.round(score*100)+"%";
+        document.getElementById("ds-score-sub").textContent = oh.reason || "\u00a0";
+        document.getElementById("ds-failures").textContent = data.recent_failures != null ? data.recent_failures : "\u2014";
+        document.getElementById("ds-drifts").textContent = data.recent_drifts != null ? data.recent_drifts : "\u2014";
+
+        const recEl = document.getElementById("ds-rec");
+        const rec = data.recommendation || "unknown";
+        recEl.textContent = rec;
+        recEl.dataset.rec = rec;
+
+        const cat = data.computed_at ? new Date(data.computed_at).toLocaleTimeString() : "";
+        document.getElementById("ds-computed-at").textContent = cat ? "as of "+cat : "\u00a0";
+
+        updateGauge(score);
+
+        const levelEl = document.getElementById("gauge-level");
+        levelEl.textContent = oh.level || "unknown";
+        levelEl.dataset.level = oh.level || "unknown";
+        document.getElementById("gauge-reason").textContent = oh.reason || "\u00a0";
+
+        const wrap = document.getElementById("dash-health-table-wrap");
+        wrap.innerHTML = '<div class="health-table-card">'
+          +'<div class="health-table-card__head">Health summary</div>'
+          +'<table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
+          +'<tr><td>Partition</td><td>'+escHtml(data.partition||"\u2014")+'</td></tr>'
+          +'<tr><td>Intent</td><td>'+escHtml(data.intent||"all")+'</td></tr>'
+          +'<tr><td>Level</td><td><span class="badge-level" data-level="'+escHtml(oh.level||"unknown")+'">'+escHtml(oh.level||"unknown")+'</span></td></tr>'
+          +'<tr><td>Score</td><td>'+(typeof oh.score==="number"?oh.score.toFixed(3):"\u2014")+'</td></tr>'
+          +'<tr><td>Recommendation</td><td><span class="rec-badge" data-rec="'+escHtml(rec)+'">'+escHtml(rec)+'</span></td></tr>'
+          +'<tr><td>Recent failures</td><td>'+(data.recent_failures!=null?data.recent_failures:"\u2014")+'</td></tr>'
+          +'<tr><td>Recent drifts</td><td>'+(data.recent_drifts!=null?data.recent_drifts:"\u2014")+'</td></tr>'
+          +'<tr><td>Window</td><td>'+escHtml(data.window||window_)+'</td></tr>'
+          +'<tr><td>Computed at</td><td>'+escHtml(data.computed_at||"\u2014")+'</td></tr>'
+          +'<tr><td>Reason</td><td>'+escHtml(oh.reason||"\u2014")+'</td></tr>'
+          +'</tbody></table></div>';
+      } else {
+        document.getElementById("dash-health-table-wrap").innerHTML = '<div class="dash-empty">No health data available. Is doctor-ingest receiving telemetry?</div>';
+      }
+
+      if (eventsRes.status === "fulfilled" && eventsRes.value.ok) {
+        const evData = await eventsRes.value.json();
+        updateEventChart(evData.events || []);
+      }
+    } catch (err) {
+      errEl.style.display = "";
+      errEl.textContent = "Dashboard load failed: "+err.message;
+    } finally {
+      btn.classList.remove("spinning");
+    }
+  }
+
+  /* ── Auto-run ── */
+  function scheduleAutoRun(form, delay) {
+    if (!form || scheduledAutoRuns.has(form)) return;
+    scheduledAutoRuns.add(form);
+    setTimeout(function() { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); }, delay);
+  }
+
+  function autoRunDeepLinks() {
+    const params = new URLSearchParams(window.location.search);
+    let delay = 220;
+    document.querySelectorAll("[data-deep-link-trigger]").forEach(function(card) {
+      const trigger = card.dataset.deepLinkTrigger;
+      if (!trigger || !params.get(trigger)) return;
+      scheduleAutoRun(card.querySelector("[data-query-form]"), delay);
+      delay += 80;
+    });
+  }
+
+  /* ── Bootstrap ── */
+  applyDefaultTimes();
+  applyDeepLinkDefaults();
+  openTabFromHash();
+
+  document.querySelectorAll("[data-query-form]").forEach(function(form) {
+    form.addEventListener("submit", handleSubmit);
+  });
+
+  document.querySelectorAll("[data-auto-run]").forEach(function(card, i) {
+    scheduleAutoRun(card.querySelector("[data-query-form]"), 150+i*60);
+  });
+
+  autoRunDeepLinks();
+
+  document.getElementById("dash-refresh-btn").addEventListener("click", loadDashboard);
+  document.getElementById("dash-partition").addEventListener("change", loadDashboard);
+  document.getElementById("dash-window").addEventListener("change", loadDashboard);
+
+  loadDashboard();
+
+  setInterval(function() {
+    if (document.getElementById("tab-dashboard").classList.contains("is-active")) loadDashboard();
+  }, 30000);
+
+  /* ════════════════════════════════════════════════════════
+     LOGS EXPLORER
+     ════════════════════════════════════════════════════════ */
+  var logsState = {
+    minutes: 60,
+    service: "",
+    sevActive: { ERR: true, WARN: true, INFO: true, DBG: true },
+    textFilter: "",
+    liveOn: true,
+    timer: null,
+    allRecords: [],
+    tenant: "{{ .DefaultTenant }}" || "default",
+  };
+
+  function logsSevKey(s) {
+    s = (s || "").toUpperCase();
+    if (s.includes("FATAL") || s.includes("ERROR") || s === "FATAL" || s === "ERROR") return "ERR";
+    if (s.includes("WARN"))  return "WARN";
+    if (s.includes("DEBUG") || s.includes("TRACE")) return "DBG";
+    return "INFO";
+  }
+
+  function logsSevBarClass(k) {
+    if (k === "ERR")  return "bar-err";
+    if (k === "WARN") return "bar-warn";
+    if (k === "INFO") return "bar-info";
+    return "bar-dbg";
+  }
+
+  function logsBadgeClass(k) {
+    if (k === "ERR")  return "badge-err";
+    if (k === "WARN") return "badge-warn";
+    if (k === "INFO") return "badge-info";
+    return "badge-dbg";
+  }
+
+  function logsFmtTime(ts) {
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return "-";
+    return String(d.getHours()).padStart(2,"0") + ":" +
+           String(d.getMinutes()).padStart(2,"0") + ":" +
+           String(d.getSeconds()).padStart(2,"0");
+  }
+
+  function logsFmtDate(ts) {
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return "-";
+    return d.toLocaleString();
+  }
+
+  function logsFilterRecords(records) {
+    var tf = logsState.textFilter.toLowerCase();
+    return records.filter(function(r) {
+      var k = logsSevKey(r.severity_text);
+      if (!logsState.sevActive[k]) return false;
+      if (tf) {
+        var comp = (r.resource_attributes && r.resource_attributes["guardian.component"]) || r.service || "";
+        if (!((r.body || "").toLowerCase().includes(tf) ||
+              (r.service || "").toLowerCase().includes(tf) ||
+              comp.toLowerCase().includes(tf))) return false;
+      }
+      return true;
+    });
+  }
+
+  function logsRenderHistogram(records) {
+    var el = document.getElementById("logs-hist-wrap");
+    if (!records || records.length === 0) { el.innerHTML = ""; return; }
+    var block = createLogHistogramBlock(records);
+    el.replaceChildren();
+    if (block) { var svg = block.querySelector("svg"); if (svg) el.appendChild(svg); }
+  }
+
+  function logsRenderStream(records) {
+    var rows = document.getElementById("logs-rows");
+    var statusEl = document.getElementById("logs-header-status");
+    rows.replaceChildren();
+    logsRenderHistogram(records);
+    var filtered = logsFilterRecords(records);
+    if (filtered.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "xp-empty";
+      empty.textContent = records.length === 0 ? "No logs found for this time range." : "No logs match the current filters.";
+      rows.appendChild(empty);
+      statusEl.textContent = records.length + " logs \u2014 0 match filters";
+      return;
+    }
+    var rangeLabel = logsState.minutes < 60 ? logsState.minutes + "m" : (logsState.minutes / 60) + "h";
+    statusEl.textContent = filtered.length + " of " + records.length + " logs \u2014 last " + rangeLabel;
+    filtered.forEach(function(r) {
+      var k = logsSevKey(r.severity_text);
+      var comp = (r.resource_attributes && r.resource_attributes["guardian.component"]) || r.service || "";
+      var traceID = r.trace_id || "";
+      var row = document.createElement("div");
+      row.className = "log-row";
+
+      var bar = document.createElement("div");
+      bar.className = "log-sev-bar " + logsSevBarClass(k);
+      row.appendChild(bar);
+
+      var time = document.createElement("div");
+      time.className = "log-time";
+      time.textContent = logsFmtTime(r.timestamp);
+      row.appendChild(time);
+
+      var badge = document.createElement("div");
+      badge.className = "log-badge " + logsBadgeClass(k);
+      badge.textContent = k;
+      row.appendChild(badge);
+
+      var compEl = document.createElement("div");
+      compEl.className = "log-comp";
+      compEl.textContent = comp;
+      row.appendChild(compEl);
+
+      var bodyCol = document.createElement("div");
+      bodyCol.className = "log-body-col";
+
+      var bodyText = document.createElement("div");
+      bodyText.className = "log-body-text";
+      bodyText.textContent = r.body || "";
+      bodyCol.appendChild(bodyText);
+
+      /* Expandable detail */
+      var detail = document.createElement("div");
+      detail.className = "log-expand-detail";
+      var kv = Object.assign({}, {
+        "timestamp":   logsFmtDate(r.timestamp),
+        "service":     r.service || "",
+        "severity":    r.severity_text || "",
+      });
+      if (traceID) { kv["trace_id"] = traceID; kv["span_id"] = r.span_id || ""; }
+      if (r.resource_attributes) {
+        Object.entries(r.resource_attributes).forEach(function(e) { kv["res." + e[0]] = e[1]; });
+      }
+      if (r.attributes) {
+        Object.entries(r.attributes).forEach(function(e) { kv["attr." + e[0]] = e[1]; });
+      }
+      var kvGrid = document.createElement("div");
+      kvGrid.className = "log-kv";
+      Object.entries(kv).forEach(function(e) {
+        if (!e[1]) return;
+        var k2 = document.createElement("div"); k2.className = "log-kv-key"; k2.textContent = e[0];
+        var v2 = document.createElement("div"); v2.className = "log-kv-val"; v2.textContent = String(e[1]);
+        kvGrid.appendChild(k2); kvGrid.appendChild(v2);
+      });
+      detail.appendChild(kvGrid);
+
+      if (traceID) {
+        var btn = document.createElement("button");
+        btn.className = "log-trace-btn";
+        btn.textContent = "\u2192 View trace " + traceID.slice(0, 16) + "\u2026";
+        btn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          logsOpenTrace(traceID);
+        });
+        detail.appendChild(btn);
+      }
+      bodyCol.appendChild(detail);
+      row.appendChild(bodyCol);
+      row.addEventListener("click", function() { row.classList.toggle("xp-expanded"); });
+      rows.appendChild(row);
+    });
+  }
+
+  function logsOpenTrace(traceID) {
+    switchTab("traces");
+    document.getElementById("traces-q").value = traceID;
+    tracesState.textFilter = traceID;
+    tracesLoadAndRender();
+  }
+
+  async function logsLoad() {
+    var statusEl = document.getElementById("logs-header-status");
+    statusEl.textContent = "Loading\u2026";
+    try {
+      var to = new Date();
+      var from = new Date(to.getTime() - logsState.minutes * 60000);
+      var p = new URLSearchParams({ tenant: logsState.tenant, from: from.toISOString(), to: to.toISOString(), limit: "500" });
+      if (logsState.service) p.set("service", logsState.service);
+      var res = await fetch("/v1/logs/search?" + p, { headers: { Accept: "application/json" } });
+      var data = await res.json();
+      logsState.allRecords = data.results || [];
+      logsRenderStream(logsState.allRecords);
+    } catch (err) {
+      statusEl.textContent = "Error: " + err.message;
+    }
+  }
+
+  async function logsLoadServices() {
+    try {
+      var res = await fetch("/v1/logs/services?tenant=" + logsState.tenant, { headers: { Accept: "application/json" } });
+      var data = await res.json();
+      var sel = document.getElementById("logs-svc");
+      var cur = sel.value;
+      sel.replaceChildren();
+      var opt0 = document.createElement("option"); opt0.value = ""; opt0.textContent = "All services"; sel.appendChild(opt0);
+      (data.services || []).forEach(function(svc) {
+        var opt = document.createElement("option"); opt.value = svc; opt.textContent = svc;
+        if (svc === cur) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    } catch (_) {}
+  }
+
+  function logsStartLive() {
+    logsState.liveOn = true;
+    document.getElementById("logs-live-btn").classList.add("xp-live-on");
+    logsState.timer = setInterval(logsLoad, 15000);
+  }
+  function logsStopLive() {
+    logsState.liveOn = false;
+    document.getElementById("logs-live-btn").classList.remove("xp-live-on");
+    clearInterval(logsState.timer);
+  }
+
+  (function initLogsExplorer() {
+    document.querySelectorAll("#logs-presets .xp-preset").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        document.querySelectorAll("#logs-presets .xp-preset").forEach(function(b) { b.classList.remove("xp-active"); });
+        btn.classList.add("xp-active");
+        logsState.minutes = parseInt(btn.dataset.mins, 10);
+        logsLoad();
+      });
+    });
+
+    document.getElementById("logs-svc").addEventListener("change", function(e) {
+      logsState.service = e.target.value;
+      logsLoad();
+    });
+
+    document.querySelectorAll("#logs-sev .sev-pill").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        var sev = btn.dataset.sev;
+        logsState.sevActive[sev] = !logsState.sevActive[sev];
+        btn.classList.toggle("xp-active", logsState.sevActive[sev]);
+        logsRenderStream(logsState.allRecords);
+      });
+    });
+
+    var logsDebounce = null;
+    document.getElementById("logs-q").addEventListener("input", function(e) {
+      clearTimeout(logsDebounce);
+      logsState.textFilter = e.target.value.trim();
+      logsDebounce = setTimeout(function() { logsRenderStream(logsState.allRecords); }, 280);
+    });
+
+    document.getElementById("logs-live-btn").addEventListener("click", function() {
+      if (logsState.liveOn) logsStopLive(); else logsStartLive();
+    });
+
+    logsLoadServices();
+    logsLoad();
+    logsStartLive();
+  })();
+
+  /* ════════════════════════════════════════════════════════
+     TRACES EXPLORER
+     ════════════════════════════════════════════════════════ */
+  var tracesState = {
+    minutes: 60,
+    service: "",
+    textFilter: "",
+    liveOn: true,
+    timer: null,
+    allTraces: [],
+    tenant: "{{ .DefaultTenant }}" || "default",
+  };
+
+  function tracesFmtTime(ts) {
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return "-";
+    var now = new Date();
+    if (now - d < 86400000) {
+      return String(d.getHours()).padStart(2,"0") + ":" +
+             String(d.getMinutes()).padStart(2,"0") + ":" +
+             String(d.getSeconds()).padStart(2,"0");
+    }
+    return d.toLocaleDateString() + " " +
+           String(d.getHours()).padStart(2,"0") + ":" +
+           String(d.getMinutes()).padStart(2,"0");
+  }
+
+  function tracesFmtDur(minTs, maxTs) {
+    var d = new Date(maxTs) - new Date(minTs);
+    if (isNaN(d) || d < 0) return "-";
+    if (d >= 1000) return (d / 1000).toFixed(2) + " s";
+    return d + " ms";
+  }
+
+  function tracesFilterAll(traces) {
+    var tf = tracesState.textFilter.toLowerCase();
+    return traces.filter(function(t) {
+      if (tracesState.service && t.service !== tracesState.service) return false;
+      if (tf) {
+        if (!(t.trace_id.toLowerCase().includes(tf) || (t.service || "").toLowerCase().includes(tf))) return false;
+      }
+      return true;
+    });
+  }
+
+  function tracesRenderList(traces) {
+    var rows = document.getElementById("traces-rows");
+    var statusEl = document.getElementById("traces-header-status");
+    rows.replaceChildren();
+    var filtered = tracesFilterAll(traces);
+    if (filtered.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "xp-empty";
+      empty.textContent = traces.length === 0 ? "No traces found for this time range." : "No traces match the current filters.";
+      rows.appendChild(empty);
+      var rangeLabel = tracesState.minutes < 60 ? tracesState.minutes + "m" : (tracesState.minutes / 60) + "h";
+      statusEl.textContent = "0 traces \u2014 last " + rangeLabel;
+      return;
+    }
+    var rangeLabel2 = tracesState.minutes < 60 ? tracesState.minutes + "m" : (tracesState.minutes / 60) + "h";
+    statusEl.textContent = filtered.length + " traces \u2014 last " + rangeLabel2;
+    filtered.forEach(function(t) {
+      var row = document.createElement("div");
+      row.className = "trace-row";
+
+      var cells = document.createElement("div");
+      cells.className = "trace-cells";
+
+      var svcEl = document.createElement("div"); svcEl.className = "trace-svc"; svcEl.textContent = t.service || "-"; cells.appendChild(svcEl);
+      var tidEl = document.createElement("div"); tidEl.className = "trace-tid"; tidEl.textContent = t.trace_id; cells.appendChild(tidEl);
+      var spanEl = document.createElement("div"); spanEl.className = "trace-spans"; spanEl.textContent = t.span_count || "-"; cells.appendChild(spanEl);
+      var timeEl = document.createElement("div"); timeEl.className = "trace-time"; timeEl.textContent = tracesFmtTime(t.max_time); cells.appendChild(timeEl);
+      row.appendChild(cells);
+
+      var wfWrap = document.createElement("div");
+      wfWrap.className = "trace-wf-wrap";
+      var wfInner = document.createElement("div");
+      wfInner.className = "trace-wf-loading";
+      wfInner.textContent = "Loading waterfall\u2026";
+      wfWrap.appendChild(wfInner);
+      row.appendChild(wfWrap);
+
+      var loaded = false;
+      row.addEventListener("click", function() {
+        var wasExpanded = row.classList.contains("xp-expanded");
+        row.classList.toggle("xp-expanded");
+        if (!wasExpanded && !loaded) {
+          loaded = true;
+          tracesLoadWaterfall(t.trace_id, t.service, wfInner);
+        }
+      });
+      rows.appendChild(row);
+    });
+  }
+
+  async function tracesLoadWaterfall(traceID, service, container) {
+    try {
+      var res = await fetch("/v1/traces/" + encodeURIComponent(traceID) + "?tenant=" + tracesState.tenant, { headers: { Accept: "application/json" } });
+      if (!res.ok) {
+        container.className = "trace-wf-error";
+        container.textContent = "Trace not found.";
+        return;
+      }
+      var data = await res.json();
+      var spans = data.spans || [];
+      container.replaceChildren();
+      if (spans.length === 0) {
+        container.className = "trace-wf-error";
+        container.textContent = "No spans returned.";
+        return;
+      }
+      /* Add duration to each span for the table */
+      spans.forEach(function(s) {
+        var d = new Date(s.end_time) - new Date(s.start_time);
+        s.duration_ms = isNaN(d) || d < 0 ? "-" : (d >= 1000 ? (d/1000).toFixed(2)+"s" : d+"ms");
+      });
+      var wfBlock = createTraceWaterfallBlock(spans);
+      if (wfBlock) container.appendChild(wfBlock);
+      var spansBlock = createTableBlock("Spans (" + spans.length + ")", [
+        { label: "Name", key: "name" },
+        { label: "Service", key: "service" },
+        { label: "Duration", key: "duration_ms" },
+        { label: "Status", key: "status_code" },
+        { label: "Start", key: "start_time" },
+      ], spans);
+      if (spansBlock) container.appendChild(spansBlock);
+    } catch (err) {
+      container.className = "trace-wf-error";
+      container.textContent = "Error: " + err.message;
+    }
+  }
+
+  async function tracesLoadAndRender() {
+    var statusEl = document.getElementById("traces-header-status");
+    statusEl.textContent = "Loading\u2026";
+    try {
+      var to = new Date();
+      var from = new Date(to.getTime() - tracesState.minutes * 60000);
+      var p = new URLSearchParams({ tenant: tracesState.tenant, from: from.toISOString(), to: to.toISOString(), limit: "200" });
+      if (tracesState.service) p.set("service", tracesState.service);
+      var res = await fetch("/v1/traces/recent?" + p, { headers: { Accept: "application/json" } });
+      var data = await res.json();
+      tracesState.allTraces = data.traces || [];
+      tracesRenderList(tracesState.allTraces);
+    } catch (err) {
+      statusEl.textContent = "Error: " + err.message;
+    }
+  }
+
+  async function tracesLoadServices() {
+    try {
+      var res = await fetch("/v1/logs/services?tenant=" + tracesState.tenant, { headers: { Accept: "application/json" } });
+      var data = await res.json();
+      var sel = document.getElementById("traces-svc");
+      sel.replaceChildren();
+      var opt0 = document.createElement("option"); opt0.value = ""; opt0.textContent = "All services"; sel.appendChild(opt0);
+      (data.services || []).forEach(function(svc) {
+        var opt = document.createElement("option"); opt.value = svc; opt.textContent = svc; sel.appendChild(opt);
+      });
+    } catch (_) {}
+  }
+
+  function tracesStartLive() {
+    tracesState.liveOn = true;
+    document.getElementById("traces-live-btn").classList.add("xp-live-on");
+    tracesState.timer = setInterval(tracesLoadAndRender, 15000);
+  }
+  function tracesStopLive() {
+    tracesState.liveOn = false;
+    document.getElementById("traces-live-btn").classList.remove("xp-live-on");
+    clearInterval(tracesState.timer);
+  }
+
+  (function initTracesExplorer() {
+    document.querySelectorAll("#traces-presets .xp-preset").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        document.querySelectorAll("#traces-presets .xp-preset").forEach(function(b) { b.classList.remove("xp-active"); });
+        btn.classList.add("xp-active");
+        tracesState.minutes = parseInt(btn.dataset.mins, 10);
+        tracesLoadAndRender();
+      });
+    });
+
+    document.getElementById("traces-svc").addEventListener("change", function(e) {
+      tracesState.service = e.target.value;
+      tracesRenderList(tracesState.allTraces);
+    });
+
+    var tracesDebounce = null;
+    document.getElementById("traces-q").addEventListener("input", function(e) {
+      clearTimeout(tracesDebounce);
+      tracesState.textFilter = e.target.value.trim();
+      tracesDebounce = setTimeout(function() { tracesRenderList(tracesState.allTraces); }, 280);
+    });
+
+    document.getElementById("traces-live-btn").addEventListener("click", function() {
+      if (tracesState.liveOn) tracesStopLive(); else tracesStartLive();
+    });
+
+    tracesLoadServices();
+    tracesLoadAndRender();
+    tracesStartLive();
+  })();
+
+</script>
+</body>
+</html>
