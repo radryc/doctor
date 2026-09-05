@@ -1,0 +1,17 @@
+apiVersion: guardian/v1alpha1
+kind: Partition
+metadata:
+  name: doctor-telemetry
+  labels:
+    role: observability
+spec:
+  deletionPolicy: orphan
+  reconciliation:
+    mode: auto
+    interval: 1m
+  labels:
+    stack: local
+    component: doctor
+    topology: docker-host
+    managedBy: external-compose
+    endpoint: http://localhost:18080

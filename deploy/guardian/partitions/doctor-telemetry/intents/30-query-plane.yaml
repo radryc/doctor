@@ -1,0 +1,38 @@
+apiVersion: guardian/v1alpha1
+kind: Intent
+metadata:
+  name: query-plane
+spec:
+  intentType: standard
+  joins:
+    - ingest-gateway
+  targetPusher: docker-main
+  target:
+    cluster: docker-main
+  locked: false
+  assets:
+    - type: Compute
+      name: doctor-query
+      properties:
+        image: doctor-query:latest
+        env:
+          DOCTOR_QUERY_HTTP_ADDR: :18080
+          DOCTOR_DEFAULT_TENANT: default
+          DOCTOR_MONOFS_LOGENGINE_ADDR: host.docker.internal:9090
+          DOCTOR_QUERY_GUARDIAN_HEALTH_ENABLED: "true"
+        ports:
+          - name: http
+            containerPort: 18080
+            protocol: TCP
+
+    - type: LoadBalancer
+      name: doctor-query-edge
+      dependsOn:
+        - doctor-query
+      properties:
+        targets:
+          - doctor-query
+        listeners:
+          - name: http
+            port: 18080
+            protocol: TCP
