@@ -100,6 +100,8 @@ var lokiLabelAllowlist = map[string]struct{}{
 	"k8s_container_name": {},
 	"k8s_node_name":      {},
 	"guardian_component": {},
+	"aws_log_group":      {},
+	"aws_log_stream":     {},
 }
 
 func filterLokiLabels(labels map[string]string) map[string]string {

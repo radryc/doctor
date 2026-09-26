@@ -121,24 +121,23 @@ func (q *doctorPromQuerier) appendAWSMetricPoints(ctx context.Context, query seg
 }
 
 var (
-	lokiSourceAWSPattern  = regexp.MustCompile(`source\s*=~?\s*"(aws|aws\|[^"]*)"`)
-	lokiLogGroupPattern   = regexp.MustCompile(`aws_log_group\s*=~?\s*"([^"]+)"`)
-	lokiLineFilterPattern = regexp.MustCompile(`\|=\s*"([^"]+)"`)
+	lokiSourceAWSPattern = regexp.MustCompile(`source\s*=~?\s*"(aws|aws\|[^"]*)"`)
+	lokiLogGroupPattern  = regexp.MustCompile(`aws_log_group\s*=~?\s*"([^"]+)"`)
 )
 
-// queryAWSLogsForLoki executes a LogQL selector against CloudWatch Logs when it
-// targets the AWS federated source. Errors are swallowed so native logs still
+// queryAWSLogsForLoki executes a parsed LogQL plan against CloudWatch Logs when
+// it targets the AWS federated source. Errors are swallowed so native logs still
 // return.
-func (s *Service) queryAWSLogsForLoki(ctx context.Context, tenant, selector string, from, to time.Time, limit int) []segment.LogRecord {
+func (s *Service) queryAWSLogsForLoki(ctx context.Context, tenant string, plan lokiPlan, from, to time.Time, limit int) []segment.LogRecord {
 	if s.aws == nil || !s.aws.Enabled() {
 		return nil
 	}
-	if !lokiSourceAWSPattern.MatchString(selector) {
+	if !lokiSourceAWSPattern.MatchString(plan.selector) {
 		return nil
 	}
 
 	var logGroups []string
-	if match := lokiLogGroupPattern.FindStringSubmatch(selector); len(match) == 2 {
+	if match := lokiLogGroupPattern.FindStringSubmatch(plan.selector); len(match) == 2 {
 		for _, group := range strings.Split(match[1], "|") {
 			if trimmed := strings.TrimSpace(group); trimmed != "" {
 				logGroups = append(logGroups, trimmed)
@@ -150,17 +149,21 @@ func (s *Service) queryAWSLogsForLoki(ctx context.Context, tenant, selector stri
 	}
 
 	insights := "fields @timestamp, @message, @log_stream, @log_group"
-	filters := lokiLineFilterPattern.FindAllStringSubmatch(selector, -1)
-	if len(filters) > 0 {
-		conditions := make([]string, 0, len(filters))
-		for _, filter := range filters {
-			if len(filter) == 2 && filter[1] != "" {
-				conditions = append(conditions, "@message like /"+regexp.QuoteMeta(filter[1])+"/")
-			}
+	conditions := make([]string, 0, len(plan.lineFilters))
+	for _, filter := range plan.lineFilters {
+		switch filter.op {
+		case "|=":
+			conditions = append(conditions, "@message like /"+regexp.QuoteMeta(filter.value)+"/")
+		case "|~":
+			conditions = append(conditions, "@message like /"+filter.value+"/")
+		case "!=":
+			conditions = append(conditions, "@message not like /"+regexp.QuoteMeta(filter.value)+"/")
+		case "!~":
+			conditions = append(conditions, "@message not like /"+filter.value+"/")
 		}
-		if len(conditions) > 0 {
-			insights += " | filter " + strings.Join(conditions, " and ")
-		}
+	}
+	if len(conditions) > 0 {
+		insights += " | filter " + strings.Join(conditions, " and ")
 	}
 	insights += " | sort @timestamp desc"
 

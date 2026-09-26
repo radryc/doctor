@@ -135,7 +135,7 @@ All limits are disabled by default (0 = no limit).
 | `DOCTOR_DEFAULT_PARTITION` | Default Guardian partition shown in the UI | unset |
 | `DOCTOR_GUARDIAN_UI_URL` | URL to the Guardian UI (used by the Doctor UI for deep links) | unset |
 | `DOCTOR_GUARDIAN_API_URL` | URL to the Guardian API (used for live topology data) | unset |
-| `DOCTOR_AWS_ENABLED` | Federate CloudWatch metrics/Logs Insights and X-Ray traces from guardian-pusher-aws | `false` |
+| `DOCTOR_AWS_ENABLED` | Federate CloudWatch metrics/Logs Insights and X-Ray traces from guardian-pusher-aws (activates once `DOCTOR_AWS_BACKEND_URL` is set) | `true` |
 | `DOCTOR_AWS_BACKEND_URL` | Base URL of the pusher AWS read API (e.g. `http://guardian-awsread:19090`) | unset |
 | `DOCTOR_AWS_BACKEND_TOKEN` | Bearer token for the pusher AWS read API | unset |
 

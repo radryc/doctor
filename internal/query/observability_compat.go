@@ -78,6 +78,33 @@ func (s *Service) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	plan, err := parseLokiPlan(rawQuery)
+	if err != nil {
+		writeLokiError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if plan.metric != nil {
+		window := plan.metric.rangeDur
+		if window <= 0 {
+			window = time.Hour
+		}
+		records, fetchErr := s.fetchLokiRecords(r.Context(), s.tenantFromRequest(r), plan, queryTime.Add(-window), queryTime, 5000)
+		if fetchErr != nil {
+			writeLokiError(w, http.StatusInternalServerError, fetchErr.Error())
+			return
+		}
+		records = plan.applyStages(records)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "vector",
+				"result":     plan.evaluateInstant(records, queryTime),
+				"stats":      map[string]any{},
+			},
+		})
+		return
+	}
+
 	since := time.Hour
 	if rawSince := strings.TrimSpace(r.URL.Query().Get("since")); rawSince != "" {
 		parsedSince, parseErr := time.ParseDuration(rawSince)
@@ -113,16 +140,47 @@ func (s *Service) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
-	limit := parseLimit(r.URL.Query().Get("limit"), 1000, 5000)
 	direction := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("direction")))
 	if direction == "" {
 		direction = "backward"
 	}
+	tenant := s.tenantFromRequest(r)
 
-	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), query, start, end, limit)
+	plan, err := parseLokiPlan(query)
+	if err != nil {
+		writeLokiError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if plan.metric != nil {
+		limit := parseLimit(r.URL.Query().Get("limit"), 5000, 20000)
+		records, fetchErr := s.fetchLokiRecords(r.Context(), tenant, plan, start, end, limit)
+		if fetchErr != nil {
+			writeLokiError(w, http.StatusInternalServerError, fetchErr.Error())
+			return
+		}
+		records = plan.applyStages(records)
+		step := parseLokiStep(r.URL.Query().Get("step"), start, end)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "matrix",
+				"result":     plan.evaluateRange(records, start, end, step),
+				"stats":      map[string]any{},
+			},
+		})
+		return
+	}
+
+	limit := parseLimit(r.URL.Query().Get("limit"), 1000, 5000)
+	logs, err := s.fetchLokiRecords(r.Context(), tenant, plan, start, end, limit)
 	if err != nil {
 		writeLokiError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	logs = plan.applyStages(logs)
+	if len(logs) > limit {
+		logs = logs[:limit]
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -359,17 +417,31 @@ func (s *Service) handleZipkinTraceByID(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Service) queryLogsForLoki(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
+	if strings.TrimSpace(query) == "" {
+		query = `{service=~".+"}`
+	}
+	plan, err := parseLokiPlan(query)
+	if err != nil {
+		return nil, err
+	}
+	return s.fetchLokiRecords(ctx, tenant, plan, from, to, limit)
+}
+
+// fetchLokiRecords reduces a parsed LogQL plan to the storage subset, queries
+// local storage plus any federated AWS backend, and returns the raw records.
+func (s *Service) fetchLokiRecords(ctx context.Context, tenant string, plan lokiPlan, from, to time.Time, limit int) ([]segment.LogRecord, error) {
+	storageQuery := plan.storageQuery()
 	var local []segment.LogRecord
 	var err error
 	if backend, ok := s.logEngine.(rawLogQueryBackend); ok {
-		local, err = backend.QueryLogsRaw(ctx, tenant, query, from, to, limit)
+		local, err = backend.QueryLogsRaw(ctx, tenant, storageQuery, from, to, limit)
 	} else {
-		local, err = s.logEngine.QueryLogs(ctx, tenant, query, "", from, to, limit)
+		local, err = s.logEngine.QueryLogs(ctx, tenant, storageQuery, "", from, to, limit)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if awsLogs := s.queryAWSLogsForLoki(ctx, tenant, query, from, to, limit); len(awsLogs) > 0 {
+	if awsLogs := s.queryAWSLogsForLoki(ctx, tenant, plan, from, to, limit); len(awsLogs) > 0 {
 		local = append(local, awsLogs...)
 	}
 	return local, nil
