@@ -25,11 +25,21 @@ type LogEngineBackend interface {
 
 type Service struct {
 	defaultTenant    string
+	tenantHeader     string
 	guardianURL      string
 	guardianAPIURL   string
 	defaultPartition string
 	logEngine        LogEngineBackend
 	guardianClient   *http.Client
+}
+
+// SetTenantHeader sets the HTTP header used to route queries to a tenant when
+// no explicit tenant query parameter is supplied.
+func (s *Service) SetTenantHeader(header string) {
+	if strings.TrimSpace(header) == "" {
+		header = "X-Doctor-Tenant"
+	}
+	s.tenantHeader = header
 }
 
 // SetGuardianURL sets the URL of the Guardian web UI shown as a header link.
@@ -1045,6 +1055,9 @@ func (s *Service) handleGuardianOverview(w http.ResponseWriter, r *http.Request)
 
 func (s *Service) tenantFromRequest(r *http.Request) string {
 	tenant := requestParam(r, "tenant")
+	if tenant == "" && r != nil && s.tenantHeader != "" {
+		tenant = strings.TrimSpace(r.Header.Get(s.tenantHeader))
+	}
 	if tenant == "" {
 		tenant = s.defaultTenant
 	}
@@ -1142,14 +1155,15 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 		if span.TraceID == "" {
 			continue
 		}
+		partition, intent, asset := traceIdentityLabels(span)
 		t, ok := traceMap[span.TraceID]
 		if !ok {
 			t = &TraceSummary{
 				TraceID:   span.TraceID,
 				Service:   span.Service,
-				Partition: span.Partition,
-				Intent:    span.Intent,
-				Asset:     span.Asset,
+				Partition: partition,
+				Intent:    intent,
+				Asset:     asset,
 				MinTime:   span.StartTime,
 				MaxTime:   span.EndTime,
 			}
@@ -1201,18 +1215,13 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	var components []string
 	var partitions []string
 	for _, rec := range results {
-		comp := rec.ResourceAttributes["guardian.component"]
-		if comp == "" {
-			comp = rec.Service
-		}
+		attrs := mergeStringMaps(rec.ResourceAttributes, rec.Attributes)
+		comp := firstNonEmpty(attrs["guardian.component"], attrs["guardian_component"], rec.Service)
 		if comp != "" && !seen[comp] {
 			seen[comp] = true
 			components = append(components, comp)
 		}
-		part := rec.Partition
-		if part == "" {
-			part = rec.ResourceAttributes["guardian.partition"]
-		}
+		part := firstNonEmpty(rec.Partition, attrs[attrGuardianPartition], attrs[labelPartition])
 		if part != "" && !seenParts[part] {
 			seenParts[part] = true
 			partitions = append(partitions, part)
@@ -1229,18 +1238,18 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 }
 
 type discoveredService struct {
-	Name           string   `json:"name"`
-	HasMetrics     bool     `json:"has_metrics"`
-	HasTraces      bool     `json:"has_traces"`
-	HasLogs        bool     `json:"has_logs"`
-	MetricNames    []string `json:"metric_names,omitempty"`
-	Partition      string   `json:"partition,omitempty"`
-	Intent         string   `json:"intent,omitempty"`
-	LastSeen       string   `json:"last_seen"`
-	TraceCount     int      `json:"trace_count"`
-	LogCount       int      `json:"log_count"`
-	ErrorRate      float64  `json:"error_rate,omitempty"`
-	SuggestedDash  []string `json:"suggested_dashboards"`
+	Name          string   `json:"name"`
+	HasMetrics    bool     `json:"has_metrics"`
+	HasTraces     bool     `json:"has_traces"`
+	HasLogs       bool     `json:"has_logs"`
+	MetricNames   []string `json:"metric_names,omitempty"`
+	Partition     string   `json:"partition,omitempty"`
+	Intent        string   `json:"intent,omitempty"`
+	LastSeen      string   `json:"last_seen"`
+	TraceCount    int      `json:"trace_count"`
+	LogCount      int      `json:"log_count"`
+	ErrorRate     float64  `json:"error_rate,omitempty"`
+	SuggestedDash []string `json:"suggested_dashboards"`
 }
 
 type serviceSuggestion struct {
@@ -1288,11 +1297,12 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		}
 		info.hasTraces = true
 		info.traceCount++
-		if t.Partition != "" {
-			info.partition = t.Partition
+		partition, intent, _ := traceIdentityLabels(t)
+		if partition != "" {
+			info.partition = partition
 		}
-		if t.Intent != "" {
-			info.intent = t.Intent
+		if intent != "" {
+			info.intent = intent
 		}
 		if t.EndTime.After(info.lastSeen) {
 			info.lastSeen = t.EndTime
@@ -1393,11 +1403,11 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tenant":           tenant,
-		"window":           window.String(),
-		"services":         services,
-		"total_services":   len(services),
-		"discovered_at":    time.Now().UTC(),
+		"tenant":         tenant,
+		"window":         window.String(),
+		"services":       services,
+		"total_services": len(services),
+		"discovered_at":  time.Now().UTC(),
 	})
 }
 
@@ -1475,10 +1485,10 @@ func (s *Service) handleServiceSuggest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tenant":     tenant,
-		"service":    serviceName,
-		"window":     window,
-		"suggestions": suggestions,
+		"tenant":       tenant,
+		"service":      serviceName,
+		"window":       window,
+		"suggestions":  suggestions,
 		"generated_at": time.Now().UTC(),
 	})
 }

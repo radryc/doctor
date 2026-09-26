@@ -60,7 +60,14 @@ func (c *LogEngineClient) IngestLogs(ctx context.Context, chunkID string, record
 			Level:             r.SeverityText,
 			Service:           r.Service,
 			TraceId:           r.TraceID,
+			SpanId:            r.SpanID,
 			RawMessage:        r.Body,
+			Labels: mergeLabels(
+				r.ResourceAttributes,
+				identityLabels(r.Partition, r.Intent, r.Asset),
+				r.Attributes,
+				correlationLabels(r.TraceID, r.SpanID),
+			),
 		})
 	}
 	_, err := c.router.IngestLogs(ctx, &pb.IngestLogsRequest{
@@ -79,7 +86,12 @@ func (c *LogEngineClient) IngestMetrics(ctx context.Context, chunkID string, rec
 			Service:           r.Service,
 			MetricName:        r.MetricName,
 			Value:             r.Value,
-			Labels:            mergeMetricLabels(r.ResourceAttributes, r.Attributes, r.TraceID, r.SpanID),
+			Labels: mergeLabels(
+				r.ResourceAttributes,
+				identityLabels(r.Partition, r.Intent, r.Asset),
+				r.Attributes,
+				correlationLabels(r.TraceID, r.SpanID),
+			),
 		})
 	}
 	_, err := c.router.IngestMetrics(ctx, &pb.IngestMetricsRequest{
@@ -102,7 +114,11 @@ func (c *LogEngineClient) IngestTraces(ctx context.Context, chunkID string, reco
 			Service:       r.Service,
 			Name:          r.Name,
 			StatusCode:    r.StatusCode,
-			Attributes:    r.Attributes,
+			Attributes: mergeLabels(
+				r.ResourceAttributes,
+				identityLabels(r.Partition, r.Intent, r.Asset),
+				r.Attributes,
+			),
 		})
 	}
 	_, err := c.router.IngestTraces(ctx, &pb.IngestTracesRequest{
@@ -169,10 +185,17 @@ func (c *LogEngineClient) QueryMetrics(ctx context.Context, tenant string, query
 	}
 	records := make([]segment.MetricPointRecord, 0, len(rawRecords))
 	for _, record := range rawRecords {
-		labels := flattenAttrs(record.Labels)
+		labels := record.Labels
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		partition, intent, asset := labelsFromIdentity(labels)
 		records = append(records, segment.MetricPointRecord{
 			Tenant:     tenant,
 			Service:    record.Service,
+			Partition:  partition,
+			Intent:     intent,
+			Asset:      asset,
 			MetricName: record.MetricName,
 			Timestamp:  record.Timestamp.UTC(),
 			TraceID:    labels["trace_id"],
@@ -270,44 +293,54 @@ func timeToNano(t time.Time) int64 {
 	return t.UnixNano()
 }
 
-func flattenAttrs(m map[string]string) map[string]string {
-	if m == nil {
-		return map[string]string{}
-	}
-	return m
-}
-
-func mergeMetricLabels(resourceAttributes, pointAttributes map[string]string, traceID, spanID string) map[string]string {
-	size := len(resourceAttributes) + len(pointAttributes)
-	if traceID != "" {
-		size++
-	}
-	if spanID != "" {
-		size++
-	}
-	if size == 0 {
-		return map[string]string{}
-	}
-	merged := make(map[string]string, size)
-	for key, value := range resourceAttributes {
-		if value == "" {
-			continue
+// mergeLabels flattens several label maps into one, later maps winning and
+// empty values skipped.
+func mergeLabels(maps ...map[string]string) map[string]string {
+	merged := make(map[string]string)
+	for _, m := range maps {
+		for key, value := range m {
+			if value == "" {
+				continue
+			}
+			merged[key] = value
 		}
-		merged[key] = value
-	}
-	for key, value := range pointAttributes {
-		if value == "" {
-			continue
-		}
-		merged[key] = value
-	}
-	if traceID != "" {
-		merged["trace_id"] = traceID
-	}
-	if spanID != "" {
-		merged["span_id"] = spanID
 	}
 	return merged
+}
+
+// identityLabels exposes the resolved Guardian identity as canonical label keys.
+func identityLabels(partition, intent, asset string) map[string]string {
+	out := make(map[string]string, 3)
+	if partition != "" {
+		out["guardian.partition"] = partition
+	}
+	if intent != "" {
+		out["guardian.intent"] = intent
+	}
+	if asset != "" {
+		out["guardian.asset"] = asset
+	}
+	return out
+}
+
+// correlationLabels exposes trace/span identifiers as canonical label keys.
+func correlationLabels(traceID, spanID string) map[string]string {
+	out := make(map[string]string, 2)
+	if traceID != "" {
+		out["trace_id"] = traceID
+	}
+	if spanID != "" {
+		out["span_id"] = spanID
+	}
+	return out
+}
+
+// labelsFromIdentity extracts the resolved identity back out of a label map.
+func labelsFromIdentity(labels map[string]string) (partition, intent, asset string) {
+	partition = labels["guardian.partition"]
+	intent = labels["guardian.intent"]
+	asset = labels["guardian.asset"]
+	return partition, intent, asset
 }
 
 // buildLogQL constructs a valid LogQL expression from optional service and text filter.

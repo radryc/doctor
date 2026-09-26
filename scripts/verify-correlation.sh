@@ -77,6 +77,11 @@ if [[ -n "${span_id}" ]]; then
   metric_span_series="$(jq '.data | length' <<<"${series_span_json}")"
 fi
 
+loki_selector="{trace_id=\"${TRACE_ID}\"}"
+loki_url="${BASE_URL}/loki/api/v1/query_range?query=$(enc "${loki_selector}")&start=$(enc "${FROM}")&end=$(enc "${TO}")&limit=$(enc "${LIMIT}")"
+loki_json="$(curl -fsS "${loki_url}")"
+loki_streams="$(jq '.data.result | length' <<<"${loki_json}")"
+
 echo "trace_id: ${TRACE_ID}"
 echo "service: ${SERVICE:-unknown}"
 echo "spans_in_trace: ${trace_span_count}"
@@ -92,8 +97,13 @@ if [[ -n "${span_id}" ]]; then
 fi
 echo "metric_names_with_trace_id: ${metric_trace_names:-none}"
 
+echo "loki_streams_with_trace_id: ${loki_streams}"
+
 if [[ "${log_trace_exact}" -le 0 ]]; then
   fail "no logs matched trace_id=${TRACE_ID}"
+fi
+if [[ "${loki_streams}" -le 0 ]]; then
+  fail "no Loki streams matched selector ${loki_selector}"
 fi
 if [[ "${metric_trace_series}" -le 0 ]]; then
   fail "no metric series carried trace_id=${TRACE_ID} (ensure exemplars are enabled/exported)"

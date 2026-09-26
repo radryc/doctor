@@ -131,6 +131,7 @@ All limits are disabled by default (0 = no limit).
 | --- | --- | --- |
 | `DOCTOR_QUERY_HTTP_ADDR` | Query HTTP listen address | `:18080` |
 | `DOCTOR_DEFAULT_TENANT` | Default tenant for queries without an explicit tenant | `default` |
+| `DOCTOR_TENANT_HEADER` | HTTP header used for tenant routing when no `tenant` query parameter is set (falls back to `DOCTOR_DEFAULT_TENANT`) | `X-Doctor-Tenant` |
 | `DOCTOR_DEFAULT_PARTITION` | Default Guardian partition shown in the UI | unset |
 | `DOCTOR_GUARDIAN_UI_URL` | URL to the Guardian UI (used by the Doctor UI for deep links) | unset |
 | `DOCTOR_GUARDIAN_API_URL` | URL to the Guardian API (used for live topology data) | unset |
@@ -185,6 +186,25 @@ The query service also exposes read-only Prometheus and Loki compatibility APIs 
 | `GET /api/v1/query`, `/api/v1/query_range`, `/api/v1/labels`, `/api/v1/label/*`, `/api/v1/series`, `/api/v1/metadata` | Prometheus HTTP API |
 | `GET /loki/api/v1/query`, `/loki/api/v1/query_range`, `/loki/api/v1/labels`, `/loki/api/v1/label/*`, `/loki/api/v1/series` | Loki HTTP API |
 | `GET /api/v2/services`, `/api/v2/spans`, `/api/v2/traces`, `/api/v2/trace/*` | Zipkin HTTP API |
+
+## Grafana unified dataspace
+
+The Prometheus, Loki, and Zipkin compatibility APIs exposed by `doctor-query` project
+every record through one shared label vocabulary so Grafana can correlate signals:
+
+| Label | Source |
+| --- | --- |
+| `service` | OTLP service name |
+| `tenant` | tenant from header/parameter |
+| `guardian_partition`, `guardian_intent`, `guardian_asset` | resolved identity (resource attributes or typed fields) |
+| `k8s_namespace_name`, `k8s_pod_name`, `k8s_container_name`, `k8s_node_name` | resource attributes |
+| `trace_id`, `span_id` | OTLP correlation IDs (metrics via exemplars, logs/traces direct) |
+| `source` | `doctor` (reserved for future federated sources) |
+
+Loki exposes a curated subset of these as stream labels (`trace_id`, `span_id`, identity,
+`level`, and Kubernetes names) to keep stream cardinality bounded; metrics and traces carry
+the full attribute set. Metric samples that carry a `trace_id` are returned as Prometheus
+exemplars, so the provisioned Grafana datasources can link metrics -> traces -> logs.
 
 ## Correlation verification query
 

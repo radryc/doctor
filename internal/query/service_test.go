@@ -672,7 +672,31 @@ func TestHandlePrometheusQueryRangeAcceptsFormEncodedPost(t *testing.T) {
 	}
 }
 
-func TestHandlePrometheusQueryRangeRejectsGuardianCumulativeTotals(t *testing.T) {
+func TestHandlePrometheusQueryRangeRejectsRawGuardianCumulativeTotals(t *testing.T) {
+	t.Helper()
+
+	base := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+	backend := &fakeLogEngineBackend{}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/query_range?tenant=default&query=guardian_task_executions&start="+url.QueryEscape(base.Add(-12*time.Hour).Format(time.RFC3339))+"&end="+url.QueryEscape(base.Format(time.RFC3339))+"&step=15s",
+		nil,
+	)
+	rec := httptest.NewRecorder()
+
+	svc.handlePrometheusQueryRange(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if backend.lastMetricQuery.MetricName != "" {
+		t.Fatalf("metric backend was queried for %q; range guard should reject before storage access", backend.lastMetricQuery.MetricName)
+	}
+}
+
+func TestHandlePrometheusQueryRangeAllowsAggregatedGuardianCumulativeTotals(t *testing.T) {
 	t.Helper()
 
 	base := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
@@ -688,11 +712,8 @@ func TestHandlePrometheusQueryRangeRejectsGuardianCumulativeTotals(t *testing.T)
 
 	svc.handlePrometheusQueryRange(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
-	}
-	if backend.lastMetricQuery.MetricName != "" {
-		t.Fatalf("metric backend was queried for %q; range guard should reject before storage access", backend.lastMetricQuery.MetricName)
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("aggregated range query was rejected: %s", rec.Body.String())
 	}
 }
 

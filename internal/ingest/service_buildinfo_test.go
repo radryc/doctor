@@ -20,7 +20,7 @@ func TestHandlerBuildInfoReturnsStampedRelease(t *testing.T) {
 		buildinfo.BuildTime = oldBuildTime
 	})
 
-	svc := NewServiceWithBuffers("X-Doctor-Tenant", "default", nil, nil, nil, nil, nil)
+	svc := NewServiceWithBuffers("X-Doctor-Tenant", "default", nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/status/buildinfo", nil)
 	rec := httptest.NewRecorder()
 

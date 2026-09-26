@@ -385,20 +385,20 @@ func buildLokiStreams(logs []segment.LogRecord, direction string) []lokiStream {
 }
 
 func lokiLabelsFromRecord(record segment.LogRecord) map[string]string {
-	labels := make(map[string]string, 4)
-	if record.Service != "" {
-		labels["service"] = record.Service
-	}
+	attrs := mergeStringMaps(record.ResourceAttributes, record.Attributes)
+	labels := canonicalLabels(record.Service, record.Tenant, record.Partition, record.Intent, record.Asset, attrs)
 	if record.SeverityText != "" {
 		labels["level"] = strings.ToLower(record.SeverityText)
 	}
+	// Typed correlation IDs are authoritative even when the attribute map is
+	// sparse (e.g. records replayed from pre-extension chunks).
 	if record.TraceID != "" {
 		labels["trace_id"] = record.TraceID
 	}
 	if record.SpanID != "" {
 		labels["span_id"] = record.SpanID
 	}
-	return labels
+	return filterLokiLabels(labels)
 }
 
 func writeLokiError(w http.ResponseWriter, statusCode int, message string) {
@@ -517,11 +517,17 @@ func groupZipkinTraces(spans []segment.TraceRecord) [][]zipkinSpan {
 }
 
 func zipkinSpanFromRecord(span segment.TraceRecord) zipkinSpan {
-	tags := make(map[string]string, len(span.Attributes)+1)
-	for key, value := range span.Attributes {
+	attrs := mergeStringMaps(span.ResourceAttributes, span.Attributes)
+	tags := make(map[string]string, len(attrs)+4)
+	for key, value := range attrs {
 		if value == "" {
 			continue
 		}
+		tags[key] = value
+	}
+	// Add canonical (underscore-normalized) labels so Grafana correlation
+	// configs can reference the same names used by logs and metrics.
+	for key, value := range canonicalLabels(span.Service, span.Tenant, span.Partition, span.Intent, span.Asset, attrs) {
 		tags[key] = value
 	}
 	if span.StatusCode != "" {

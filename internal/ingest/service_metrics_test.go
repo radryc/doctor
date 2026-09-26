@@ -23,7 +23,7 @@ func TestNewServiceWithBuffersPrimesAcceptedIngestMetrics(t *testing.T) {
 		resetIngestMetricsForTest()
 	})
 
-	_ = NewServiceWithBuffers("X-Doctor-Tenant", "default", nil, nil, nil, nil, nil)
+	_ = NewServiceWithBuffers("X-Doctor-Tenant", "default", nil, nil, nil, nil, nil, nil)
 
 	var metrics metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &metrics); err != nil {

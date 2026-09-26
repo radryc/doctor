@@ -445,26 +445,9 @@ func dedupePromFloatPoints(points []promql.FPoint) []promql.FPoint {
 }
 
 func metricPointLabels(point segment.MetricPointRecord) promlabels.Labels {
-	values := map[string]string{
-		promlabels.MetricName: normalizePrometheusMetricName(point.MetricName),
-	}
-	if point.Tenant != "" {
-		values["tenant"] = point.Tenant
-	}
-	if point.Service != "" {
-		values["service"] = point.Service
-	}
-	if point.Partition != "" {
-		values["guardian_partition"] = point.Partition
-	}
-	if point.Intent != "" {
-		values["guardian_intent"] = point.Intent
-	}
-	if point.Asset != "" {
-		values["guardian_asset"] = point.Asset
-	}
-	mergeNormalizedMetricLabels(values, point.ResourceAttributes, false)
-	mergeNormalizedMetricLabels(values, point.Attributes, true)
+	attrs := mergeStringMaps(point.ResourceAttributes, point.Attributes)
+	values := canonicalLabels(point.Service, point.Tenant, point.Partition, point.Intent, point.Asset, attrs)
+	values[promlabels.MetricName] = normalizePrometheusMetricName(point.MetricName)
 	return promlabels.FromMap(values)
 }
 
@@ -496,22 +479,6 @@ func normalizePrometheusMetricName(name string) string {
 		out = "_" + out
 	}
 	return out
-}
-
-func mergeNormalizedMetricLabels(dst map[string]string, src map[string]string, overwrite bool) {
-	for key, value := range src {
-		if value == "" {
-			continue
-		}
-		normalized := normalizeMetricLabelName(key)
-		if normalized == "" || normalized == promlabels.MetricName || normalized == "service" || normalized == "tenant" {
-			continue
-		}
-		if _, exists := dst[normalized]; exists && !overwrite {
-			continue
-		}
-		dst[normalized] = value
-	}
 }
 
 func normalizeMetricLabelName(name string) string {
@@ -674,8 +641,24 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 	writePrometheusSuccess(w, data)
 }
 
+// isHighCardinalityCumulativeRangeQuery reports whether a range query would
+// materialize raw Guardian cumulative task/result totals. Aggregated queries
+// (sum/avg/max/... over rate/increase) are allowed because the operator
+// dashboards depend on them; bare selectors stay blocked.
 func isHighCardinalityCumulativeRangeQuery(queryString string) bool {
-	return strings.Contains(queryString, "guardian_task_executions") || strings.Contains(queryString, "guardian_result_executions")
+	if !strings.Contains(queryString, "guardian_task_executions") && !strings.Contains(queryString, "guardian_result_executions") {
+		return false
+	}
+	lower := strings.Join(strings.Fields(strings.ToLower(queryString)), " ")
+	for _, aggregator := range []string{
+		"sum", "avg", "min", "max", "count", "count_values",
+		"topk", "bottomk", "quantile", "histogram_quantile", "group",
+	} {
+		if strings.Contains(lower, aggregator+"(") || strings.Contains(lower, aggregator+" by") {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {
@@ -900,10 +883,14 @@ func marshalPrometheusValue(value promparser.Value) (map[string]any, error) {
 	case promql.Vector:
 		result := make([]map[string]any, 0, len(typed))
 		for _, sample := range typed {
-			result = append(result, map[string]any{
+			entry := map[string]any{
 				"metric": promLabelsToMap(sample.Metric),
 				"value":  []any{prometheusJSONTime(sample.T), formatPrometheusSampleValue(sample.F)},
-			})
+			}
+			if exemplars := sampleExemplars(sample); len(exemplars) > 0 {
+				entry["exemplars"] = exemplars
+			}
+			result = append(result, entry)
 		}
 		return map[string]any{"resultType": "vector", "result": result}, nil
 	case promql.Matrix:
@@ -932,6 +919,28 @@ func marshalPrometheusValue(value promparser.Value) (map[string]any, error) {
 	default:
 		return nil, fmt.Errorf("unsupported Prometheus result type %T", value)
 	}
+}
+
+// sampleExemplars surfaces the trace/span correlation labels carried by a
+// metric sample as Prometheus exemplars so Grafana can link metrics to traces.
+func sampleExemplars(sample promql.Sample) []map[string]any {
+	traceID := sample.Metric.Get("trace_id")
+	spanID := sample.Metric.Get("span_id")
+	if traceID == "" && spanID == "" {
+		return nil
+	}
+	labels := make(map[string]string, 2)
+	if traceID != "" {
+		labels["trace_id"] = traceID
+	}
+	if spanID != "" {
+		labels["span_id"] = spanID
+	}
+	return []map[string]any{{
+		"labels":    labels,
+		"value":     formatPrometheusSampleValue(sample.F),
+		"timestamp": prometheusJSONTime(sample.T),
+	}}
 }
 
 func promLabelsToMap(labelSet promlabels.Labels) map[string]string {
