@@ -17,107 +17,14 @@ const awsSourceLabel = "aws"
 type awsBackend interface {
 	Enabled() bool
 	ListServices(ctx context.Context) ([]string, error)
-	QueryMetric(ctx context.Context, q awsstore.MetricQuery) ([]awsstore.MetricSeries, error)
 	QueryLogs(ctx context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error)
 	QueryTraces(ctx context.Context, q awsstore.TraceQuery) ([]awsstore.TraceSummary, error)
 	GetTrace(ctx context.Context, traceID string) ([]awsstore.Span, error)
-}
-
-type awsMetricSelector struct {
-	namespace  string
-	dimensions map[string]string
-	stat       string
-}
-
-// awsSelectorFromMetricQuery detects an AWS federated metric query and extracts
-// the CloudWatch namespace and dimensions from its label matchers.
-func awsSelectorFromMetricQuery(query segment.MetricQuery) (awsMetricSelector, bool) {
-	selector := awsMetricSelector{dimensions: make(map[string]string)}
-	found := false
-	for _, matcher := range query.LabelMatchers {
-		switch matcher.Name {
-		case labelSource:
-			if matcher.Type == segment.MetricMatchEqual && matcher.Value == awsSourceLabel {
-				found = true
-			} else if matcher.Type == segment.MetricMatchRegexp && strings.Contains(matcher.Value, awsSourceLabel) {
-				found = true
-			}
-		case "aws_namespace":
-			selector.namespace = matcher.Value
-		case "aws_region", "aws_account", labelTenant, labelService, "trace_id", "span_id",
-			labelPartition, labelIntent, labelAsset, "guardian_component":
-			// Reserved / non-dimension labels.
-		default:
-			if matcher.Type == segment.MetricMatchEqual && matcher.Value != "" {
-				selector.dimensions[matcher.Name] = matcher.Value
-			}
-		}
-	}
-	if !found {
-		return selector, false
-	}
-	return selector, true
-}
-
-func (q *doctorPromQuerier) appendAWSMetricPoints(ctx context.Context, query segment.MetricQuery, requestedMetricName string, from, to time.Time, points []segment.MetricPointRecord) ([]segment.MetricPointRecord, error) {
-	if q.aws == nil || !q.aws.Enabled() {
-		return points, nil
-	}
-	selector, ok := awsSelectorFromMetricQuery(query)
-	if !ok {
-		return points, nil
-	}
-	metricName := requestedMetricName
-	if metricName == "" {
-		metricName = query.MetricName
-	}
-	if metricName == "" || selector.namespace == "" {
-		return points, nil
-	}
-
-	series, err := q.aws.QueryMetric(ctx, awsstore.MetricQuery{
-		Namespace:  selector.namespace,
-		MetricName: metricName,
-		Dimensions: selector.dimensions,
-		Stat:       selector.stat,
-		Period:     time.Minute,
-		From:       from,
-		To:         to,
-	})
-	if err != nil {
-		// Fail soft: a broken AWS backend must not break native queries.
-		return points, nil
-	}
-
-	for _, metricSeries := range series {
-		service := firstNonEmpty(
-			metricSeries.Dimensions["ServiceName"],
-			metricSeries.Dimensions["service"],
-			metricSeries.Dimensions["ClusterName"],
-			awsSourceLabel,
-		)
-		attributes := map[string]string{
-			labelSource:     awsSourceLabel,
-			"aws_namespace": metricSeries.Namespace,
-			"aws_region":    metricSeries.Region,
-			"aws_account":   metricSeries.Account,
-		}
-		for name, value := range metricSeries.Dimensions {
-			attributes[name] = value
-		}
-		for _, point := range metricSeries.Points {
-			points = append(points, segment.MetricPointRecord{
-				Tenant:     q.tenant,
-				Service:    service,
-				MetricName: metricName,
-				Timestamp:  point.Timestamp,
-				Attributes: attributes,
-				HasValue:   true,
-				Value:      point.Value,
-			})
-		}
-	}
-	return points, nil
+	PrometheusQuery(ctx context.Context, query string, at time.Time) (map[string]any, error)
+	PrometheusQueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (map[string]any, error)
+	PrometheusSeries(ctx context.Context, match []string, start, end time.Time) (map[string]any, error)
+	PrometheusLabels(ctx context.Context, match []string, start, end time.Time) (map[string]any, error)
+	PrometheusLabelValues(ctx context.Context, label string, match []string, start, end time.Time) (map[string]any, error)
 }
 
 var (

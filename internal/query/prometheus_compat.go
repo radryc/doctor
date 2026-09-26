@@ -36,14 +36,12 @@ const (
 type doctorPromQueryable struct {
 	backend LogEngineBackend
 	tenant  string
-	aws     awsBackend
 }
 
 func (q doctorPromQueryable) Querier(mint, maxt int64) (promstorage.Querier, error) {
 	return &doctorPromQuerier{
 		backend: q.backend,
 		tenant:  q.tenant,
-		aws:     q.aws,
 		mint:    mint,
 		maxt:    maxt,
 	}, nil
@@ -52,7 +50,6 @@ func (q doctorPromQueryable) Querier(mint, maxt int64) (promstorage.Querier, err
 type doctorPromQuerier struct {
 	backend LogEngineBackend
 	tenant  string
-	aws     awsBackend
 	mint    int64
 	maxt    int64
 
@@ -256,11 +253,7 @@ func (q *doctorPromQuerier) loadMetricPoints(ctx context.Context, metricQuery se
 	from := timeFromPromMillis(q.mint)
 	to := timeFromPromMillis(q.maxt)
 	if requestedMetricName == "" {
-		points, err := q.backend.QueryMetrics(ctx, q.tenant, metricQuery, from, to)
-		if err != nil {
-			return nil, err
-		}
-		return q.appendAWSMetricPoints(ctx, metricQuery, "", from, to, points)
+		return q.backend.QueryMetrics(ctx, q.tenant, metricQuery, from, to)
 	}
 
 	rawNames, err := q.resolveRawMetricNames(ctx, requestedMetricName)
@@ -281,7 +274,7 @@ func (q *doctorPromQuerier) loadMetricPoints(ctx context.Context, metricQuery se
 		}
 		all = append(all, points...)
 	}
-	return q.appendAWSMetricPoints(ctx, metricQuery, requestedMetricName, from, to, all)
+	return all, nil
 }
 
 func (q *doctorPromQuerier) resolveRawMetricNames(ctx context.Context, requestedMetricName string) ([]string, error) {
@@ -555,34 +548,31 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	engine := newDoctorPrometheusEngine()
-	defer func() { _ = engine.Close() }()
+	forwarded, mode := awsQueryMode(queryString)
+	tenant := s.tenantFromRequest(r)
 
-	query, err := engine.NewInstantQuery(
-		r.Context(),
-		doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r), aws: s.aws},
-		promql.NewPrometheusQueryOpts(false, doctorPrometheusLookback),
-		queryString,
-		evaluationTime,
-	)
-	if err != nil {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
-		return
-	}
-	defer query.Close()
-
-	result := query.Exec(r.Context())
-	if result.Err != nil {
-		writePrometheusExecutionError(w, result.Err)
-		return
+	var localData map[string]any
+	if mode != awsQueryOnly {
+		data, execErr, parseErr := s.execPrometheusInstant(r.Context(), tenant, queryString, evaluationTime)
+		if execErr != nil {
+			if parseErr {
+				writePrometheusError(w, http.StatusBadRequest, "bad_data", execErr.Error())
+			} else {
+				writePrometheusExecutionError(w, execErr)
+			}
+			return
+		}
+		localData = data
 	}
 
-	data, err := marshalPrometheusValue(result.Value)
-	if err != nil {
-		writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
+	var awsData map[string]any
+	if mode != awsQueryNone && s.aws != nil && s.aws.Enabled() {
+		if resp, awsErr := s.aws.PrometheusQuery(r.Context(), forwarded, evaluationTime); awsErr == nil {
+			awsData = extractPrometheusData(resp)
+		}
 	}
-	writePrometheusSuccess(w, data)
+
+	writePrometheusSuccess(w, mergePrometheusQueryData(localData, awsData, "vector"))
 }
 
 func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Request) {
@@ -616,36 +606,31 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	engine := newDoctorPrometheusEngine()
-	defer func() { _ = engine.Close() }()
+	forwarded, mode := awsQueryMode(queryString)
+	tenant := s.tenantFromRequest(r)
 
-	query, err := engine.NewRangeQuery(
-		r.Context(),
-		doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r), aws: s.aws},
-		promql.NewPrometheusQueryOpts(false, doctorPrometheusLookback),
-		queryString,
-		start,
-		end,
-		step,
-	)
-	if err != nil {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
-		return
-	}
-	defer query.Close()
-
-	result := query.Exec(r.Context())
-	if result.Err != nil {
-		writePrometheusExecutionError(w, result.Err)
-		return
+	var localData map[string]any
+	if mode != awsQueryOnly {
+		data, execErr, parseErr := s.execPrometheusRange(r.Context(), tenant, queryString, start, end, step)
+		if execErr != nil {
+			if parseErr {
+				writePrometheusError(w, http.StatusBadRequest, "bad_data", execErr.Error())
+			} else {
+				writePrometheusExecutionError(w, execErr)
+			}
+			return
+		}
+		localData = data
 	}
 
-	data, err := marshalPrometheusValue(result.Value)
-	if err != nil {
-		writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
+	var awsData map[string]any
+	if mode != awsQueryNone && s.aws != nil && s.aws.Enabled() {
+		if resp, awsErr := s.aws.PrometheusQueryRange(r.Context(), forwarded, start, end, step); awsErr == nil {
+			awsData = extractPrometheusData(resp)
+		}
 	}
-	writePrometheusSuccess(w, data)
+
+	writePrometheusSuccess(w, mergePrometheusQueryData(localData, awsData, "matrix"))
 }
 
 // isHighCardinalityCumulativeRangeQuery reports whether a range query would
@@ -669,48 +654,58 @@ func isHighCardinalityCumulativeRangeQuery(queryString string) bool {
 }
 
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {
-	querier, err := s.discoveryPrometheusQuerier(r)
-	if err != nil {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
-		return
-	}
-	defer func() { _ = querier.Close() }()
+	matchValues := requestParams(r, "match[]")
+	hasAWS, forwardedMatches := awsMatches(matchValues)
 
-	selectorSets, err := parsePrometheusSelectorSets(requestParams(r, "match[]"))
-	if err != nil {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
+	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
+	if selErr != nil && !hasAWS {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", selErr.Error())
 		return
 	}
 
 	names := make(map[string]struct{})
-	if len(selectorSets) == 0 {
-		values, _, err := querier.LabelNames(r.Context(), nil)
-		if err != nil {
-			writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
+	if selErr == nil {
+		querier, err := s.discoveryPrometheusQuerier(r)
+		if err != nil && !hasAWS {
+			writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
 			return
 		}
-		for _, value := range values {
-			names[value] = struct{}{}
-		}
-	} else {
-		for _, selectorSet := range selectorSets {
-			values, _, err := querier.LabelNames(r.Context(), nil, selectorSet...)
-			if err != nil {
-				writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
-				return
+		if err == nil {
+			defer func() { _ = querier.Close() }()
+			if len(selectorSets) == 0 {
+				values, _, labelErr := querier.LabelNames(r.Context(), nil)
+				if labelErr != nil {
+					writePrometheusError(w, http.StatusInternalServerError, "internal", labelErr.Error())
+					return
+				}
+				for _, value := range values {
+					names[value] = struct{}{}
+				}
+			} else {
+				for _, selectorSet := range selectorSets {
+					values, _, labelErr := querier.LabelNames(r.Context(), nil, selectorSet...)
+					if labelErr != nil {
+						writePrometheusError(w, http.StatusInternalServerError, "internal", labelErr.Error())
+						return
+					}
+					for _, value := range values {
+						names[value] = struct{}{}
+					}
+				}
 			}
-			for _, value := range values {
+		}
+	}
+
+	if hasAWS && len(selectorSets) > 0 && s.aws != nil && s.aws.Enabled() {
+		start, end := prometheusDiscoveryRange(r)
+		if resp, awsErr := s.aws.PrometheusLabels(r.Context(), forwardedMatches, start, end); awsErr == nil {
+			for _, value := range prometheusDataStrings(extractPrometheusData(resp)) {
 				names[value] = struct{}{}
 			}
 		}
 	}
 
-	out := make([]string, 0, len(names))
-	for name := range names {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	writePrometheusSuccess(w, out)
+	writePrometheusSuccess(w, sortedStrings(names))
 }
 
 func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Request) {
@@ -730,82 +725,106 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	querier, err := s.discoveryPrometheusQuerier(r)
-	if err != nil {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
-		return
-	}
-	defer func() { _ = querier.Close() }()
+	matchValues := requestParams(r, "match[]")
+	hasAWS, forwardedMatches := awsMatches(matchValues)
 
-	selectorSets, err := parsePrometheusSelectorSets(requestParams(r, "match[]"))
-	if err != nil {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
+	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
+	if selErr != nil && !hasAWS {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", selErr.Error())
 		return
 	}
 
 	values := make(map[string]struct{})
-	if len(selectorSets) == 0 {
-		results, _, err := querier.LabelValues(r.Context(), labelName, nil)
-		if err != nil {
-			writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
+	if selErr == nil {
+		querier, err := s.discoveryPrometheusQuerier(r)
+		if err != nil && !hasAWS {
+			writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
 			return
 		}
-		for _, value := range results {
-			values[value] = struct{}{}
-		}
-	} else {
-		for _, selectorSet := range selectorSets {
-			results, _, err := querier.LabelValues(r.Context(), labelName, nil, selectorSet...)
-			if err != nil {
-				writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
-				return
+		if err == nil {
+			defer func() { _ = querier.Close() }()
+			if len(selectorSets) == 0 {
+				results, _, labelErr := querier.LabelValues(r.Context(), labelName, nil)
+				if labelErr != nil {
+					writePrometheusError(w, http.StatusInternalServerError, "internal", labelErr.Error())
+					return
+				}
+				for _, value := range results {
+					values[value] = struct{}{}
+				}
+			} else {
+				for _, selectorSet := range selectorSets {
+					results, _, labelErr := querier.LabelValues(r.Context(), labelName, nil, selectorSet...)
+					if labelErr != nil {
+						writePrometheusError(w, http.StatusInternalServerError, "internal", labelErr.Error())
+						return
+					}
+					for _, value := range results {
+						values[value] = struct{}{}
+					}
+				}
 			}
-			for _, value := range results {
+		}
+	}
+
+	if hasAWS && len(selectorSets) > 0 && s.aws != nil && s.aws.Enabled() {
+		start, end := prometheusDiscoveryRange(r)
+		if resp, awsErr := s.aws.PrometheusLabelValues(r.Context(), labelName, forwardedMatches, start, end); awsErr == nil {
+			for _, value := range prometheusDataStrings(extractPrometheusData(resp)) {
 				values[value] = struct{}{}
 			}
 		}
 	}
 
-	out := make([]string, 0, len(values))
-	for value := range values {
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	writePrometheusSuccess(w, out)
+	writePrometheusSuccess(w, sortedStrings(values))
 }
 
 func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request) {
-	selectorSets, err := parsePrometheusSelectorSets(requestParams(r, "match[]"))
-	if err != nil {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
-		return
-	}
-	if len(selectorSets) == 0 {
+	matchValues := requestParams(r, "match[]")
+	if len(matchValues) == 0 {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", "at least one match[] selector is required")
 		return
 	}
-
-	querier, err := s.discoveryPrometheusQuerier(r)
-	if err != nil {
+	hasAWS, forwardedMatches := awsMatches(matchValues)
+	selectorSets, err := parsePrometheusSelectorSets(matchValues)
+	if err != nil && !hasAWS {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
-	defer func() { _ = querier.Close() }()
 
 	seen := make(map[string]map[string]string)
-	for _, selectorSet := range selectorSets {
-		seriesSet := querier.Select(r.Context(), true, nil, selectorSet...)
-		for seriesSet.Next() {
-			series := seriesSet.At()
-			if series == nil {
-				continue
-			}
-			labelSet := series.Labels()
-			seen[string(labelSet.Bytes(nil))] = promLabelsToMap(labelSet)
-		}
-		if err := seriesSet.Err(); err != nil {
-			writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
+	if err == nil {
+		querier, queryErr := s.discoveryPrometheusQuerier(r)
+		if queryErr != nil && !hasAWS {
+			writePrometheusError(w, http.StatusBadRequest, "bad_data", queryErr.Error())
 			return
+		}
+		if queryErr == nil {
+			defer func() { _ = querier.Close() }()
+			for _, selectorSet := range selectorSets {
+				seriesSet := querier.Select(r.Context(), true, nil, selectorSet...)
+				for seriesSet.Next() {
+					series := seriesSet.At()
+					if series == nil {
+						continue
+					}
+					labelSet := series.Labels()
+					seen[string(labelSet.Bytes(nil))] = promLabelsToMap(labelSet)
+				}
+				if seriesErr := seriesSet.Err(); seriesErr != nil && !hasAWS {
+					writePrometheusError(w, http.StatusInternalServerError, "internal", seriesErr.Error())
+					return
+				}
+			}
+		}
+	}
+
+	if hasAWS && s.aws != nil && s.aws.Enabled() {
+		start, end := prometheusDiscoveryRange(r)
+		if resp, awsErr := s.aws.PrometheusSeries(r.Context(), forwardedMatches, start, end); awsErr == nil {
+			for _, labels := range prometheusDataLabelMaps(extractPrometheusData(resp)) {
+				seen[metricLabelMapString(labels)] = labels
+			}
 		}
 	}
 
@@ -859,7 +878,22 @@ func (s *Service) discoveryPrometheusQuerier(r *http.Request) (promstorage.Queri
 	if err != nil {
 		return nil, err
 	}
-	return doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r), aws: s.aws}.Querier(start.UnixMilli(), end.UnixMilli())
+	return doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r)}.Querier(start.UnixMilli(), end.UnixMilli())
+}
+
+// prometheusDiscoveryRange parses start/end for discovery endpoints, defaulting
+// to the standard discovery window.
+func prometheusDiscoveryRange(r *http.Request) (time.Time, time.Time) {
+	now := time.Now().UTC()
+	end, err := parsePrometheusTime(requestParam(r, "end"), now)
+	if err != nil {
+		end = now
+	}
+	start, err := parsePrometheusTime(requestParam(r, "start"), end.Add(-doctorDiscoveryWindow))
+	if err != nil {
+		start = end.Add(-doctorDiscoveryWindow)
+	}
+	return start, end
 }
 
 func newDoctorPrometheusEngine() *promql.Engine {

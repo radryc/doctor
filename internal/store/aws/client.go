@@ -205,6 +205,101 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]Span, error) {
 	return out, nil
 }
 
+// PrometheusQuery proxies an instant PromQL query to CloudWatch.
+func (c *Client) PrometheusQuery(ctx context.Context, query string, at time.Time) (map[string]any, error) {
+	params := url.Values{}
+	params.Set("query", query)
+	if !at.IsZero() {
+		params.Set("time", at.UTC().Format(time.RFC3339Nano))
+	}
+	return c.promql(ctx, "/v1/aws/promql/query", params)
+}
+
+// PrometheusQueryRange proxies a range PromQL query to CloudWatch.
+func (c *Client) PrometheusQueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (map[string]any, error) {
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("start", start.UTC().Format(time.RFC3339Nano))
+	params.Set("end", end.UTC().Format(time.RFC3339Nano))
+	params.Set("step", step.String())
+	return c.promql(ctx, "/v1/aws/promql/query_range", params)
+}
+
+// PrometheusSeries discovers CloudWatch series matching the selectors.
+func (c *Client) PrometheusSeries(ctx context.Context, match []string, start, end time.Time) (map[string]any, error) {
+	params := url.Values{}
+	for _, selector := range match {
+		params.Add("match[]", selector)
+	}
+	if !start.IsZero() {
+		params.Set("start", start.UTC().Format(time.RFC3339Nano))
+	}
+	if !end.IsZero() {
+		params.Set("end", end.UTC().Format(time.RFC3339Nano))
+	}
+	return c.promql(ctx, "/v1/aws/promql/series", params)
+}
+
+// PrometheusLabels discovers CloudWatch label names.
+func (c *Client) PrometheusLabels(ctx context.Context, match []string, start, end time.Time) (map[string]any, error) {
+	params := url.Values{}
+	for _, selector := range match {
+		params.Add("match[]", selector)
+	}
+	if !start.IsZero() {
+		params.Set("start", start.UTC().Format(time.RFC3339Nano))
+	}
+	if !end.IsZero() {
+		params.Set("end", end.UTC().Format(time.RFC3339Nano))
+	}
+	return c.promql(ctx, "/v1/aws/promql/labels", params)
+}
+
+// PrometheusLabelValues discovers values for a CloudWatch label.
+func (c *Client) PrometheusLabelValues(ctx context.Context, label string, match []string, start, end time.Time) (map[string]any, error) {
+	params := url.Values{}
+	for _, selector := range match {
+		params.Add("match[]", selector)
+	}
+	if !start.IsZero() {
+		params.Set("start", start.UTC().Format(time.RFC3339Nano))
+	}
+	if !end.IsZero() {
+		params.Set("end", end.UTC().Format(time.RFC3339Nano))
+	}
+	return c.promql(ctx, "/v1/aws/promql/label/"+url.PathEscape(label)+"/values", params)
+}
+
+func (c *Client) promql(ctx context.Context, path string, params url.Values) (map[string]any, error) {
+	body := params.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("aws promql HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return nil, fmt.Errorf("decode aws promql response: %w", err)
+	}
+	return decoded, nil
+}
+
 func (c *Client) get(ctx context.Context, path string, params url.Values, out any) error {
 	requestURL := c.baseURL + path
 	if len(params) > 0 {

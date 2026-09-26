@@ -13,23 +13,18 @@ import (
 )
 
 type fakeAWSBackend struct {
-	series          []awsstore.MetricSeries
-	logs            []awsstore.LogRecord
-	services        []string
-	traces          []awsstore.TraceSummary
-	spans           []awsstore.Span
-	lastMetricQuery awsstore.MetricQuery
-	lastLogQuery    awsstore.LogQuery
+	logs          []awsstore.LogRecord
+	services      []string
+	traces        []awsstore.TraceSummary
+	spans         []awsstore.Span
+	promResponse  map[string]any
+	lastPromQuery string
+	lastLogQuery  awsstore.LogQuery
 }
 
 func (f *fakeAWSBackend) Enabled() bool { return true }
 
 func (f *fakeAWSBackend) ListServices(context.Context) ([]string, error) { return f.services, nil }
-
-func (f *fakeAWSBackend) QueryMetric(_ context.Context, q awsstore.MetricQuery) ([]awsstore.MetricSeries, error) {
-	f.lastMetricQuery = q
-	return f.series, nil
-}
 
 func (f *fakeAWSBackend) QueryLogs(_ context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error) {
 	f.lastLogQuery = q
@@ -44,23 +39,49 @@ func (f *fakeAWSBackend) GetTrace(context.Context, string) ([]awsstore.Span, err
 	return f.spans, nil
 }
 
+func (f *fakeAWSBackend) PrometheusQuery(_ context.Context, query string, _ time.Time) (map[string]any, error) {
+	f.lastPromQuery = query
+	return f.promResponse, nil
+}
+
+func (f *fakeAWSBackend) PrometheusQueryRange(_ context.Context, query string, _, _ time.Time, _ time.Duration) (map[string]any, error) {
+	f.lastPromQuery = query
+	return f.promResponse, nil
+}
+
+func (f *fakeAWSBackend) PrometheusSeries(context.Context, []string, time.Time, time.Time) (map[string]any, error) {
+	return f.promResponse, nil
+}
+
+func (f *fakeAWSBackend) PrometheusLabels(context.Context, []string, time.Time, time.Time) (map[string]any, error) {
+	return f.promResponse, nil
+}
+
+func (f *fakeAWSBackend) PrometheusLabelValues(context.Context, string, []string, time.Time, time.Time) (map[string]any, error) {
+	return f.promResponse, nil
+}
+
 func TestPrometheusQueryFederatesAWSMetrics(t *testing.T) {
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	aws := &fakeAWSBackend{
-		series: []awsstore.MetricSeries{{
-			Namespace:  "AWS/ECS",
-			MetricName: "CPUUtilization",
-			Dimensions: map[string]string{"ServiceName": "api"},
-			Region:     "eu-west-1",
-			Account:    "123456789012",
-			Points:     []awsstore.MetricPoint{{Timestamp: base, Value: 42}},
-		}},
+		promResponse: map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "vector",
+				"result": []any{
+					map[string]any{
+						"metric": map[string]any{"__name__": "CPUUtilization", "InstanceId": "i-1"},
+						"value":  []any{float64(1780000000), "42"},
+					},
+				},
+			},
+		},
 	}
 	svc := &Service{defaultTenant: "default", logEngine: &fakeLogEngineBackend{}, aws: aws}
 
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/api/v1/query?query=CPUUtilization%7Bsource%3D%22aws%22%2Caws_namespace%3D%22AWS%2FECS%22%2CServiceName%3D%22api%22%7D&time="+strconv.FormatInt(base.Unix(), 10),
+		"/api/v1/query?query=CPUUtilization%7Bsource%3D%22aws%22%7D&time="+strconv.FormatInt(base.Unix(), 10),
 		nil,
 	)
 	rec := httptest.NewRecorder()
@@ -69,8 +90,8 @@ func TestPrometheusQueryFederatesAWSMetrics(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if aws.lastMetricQuery.Namespace != "AWS/ECS" || aws.lastMetricQuery.MetricName != "CPUUtilization" {
-		t.Fatalf("aws metric query = %#v", aws.lastMetricQuery)
+	if aws.lastPromQuery != "CPUUtilization" {
+		t.Fatalf("forwarded promql query = %q, want CPUUtilization", aws.lastPromQuery)
 	}
 
 	var resp struct {
@@ -89,8 +110,28 @@ func TestPrometheusQueryFederatesAWSMetrics(t *testing.T) {
 	if got := resp.Data.Result[0].Metric["source"]; got != "aws" {
 		t.Fatalf("source = %q, want aws", got)
 	}
-	if got := resp.Data.Result[0].Metric["aws_region"]; got != "eu-west-1" {
-		t.Fatalf("aws_region = %q, want eu-west-1", got)
+	if got := resp.Data.Result[0].Metric["InstanceId"]; got != "i-1" {
+		t.Fatalf("InstanceId = %q, want i-1", got)
+	}
+}
+
+func TestAWSQueryModeAndStripping(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantQuery string
+		wantMode  int
+	}{
+		{`CPUUtilization`, `CPUUtilization`, awsQueryNone},
+		{`CPUUtilization{source="aws"}`, `CPUUtilization`, awsQueryOnly},
+		{`sum(rate({CPUUtilization, source="aws"}[5m]))`, `sum(rate({CPUUtilization}[5m]))`, awsQueryOnly},
+		{`X{source="aws", InstanceId="i-1"}`, `X{InstanceId="i-1"}`, awsQueryOnly},
+		{`X{source=~"aws|doctor"}`, `X`, awsQueryMixed},
+	}
+	for _, tc := range cases {
+		forwarded, mode := awsQueryMode(tc.in)
+		if forwarded != tc.wantQuery || mode != tc.wantMode {
+			t.Fatalf("awsQueryMode(%q) = %q, %d; want %q, %d", tc.in, forwarded, mode, tc.wantQuery, tc.wantMode)
+		}
 	}
 }
 

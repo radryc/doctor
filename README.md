@@ -245,6 +245,21 @@ curl -s "http://localhost:18080/api/v1/series?tenant=default&match[]={trace_id=\
 
 If metrics return no matching `trace_id`, ensure OTLP exemplars are enabled in your SDK/collector pipeline.
 
+## CloudWatch PromQL
+
+CloudWatch metrics are federated through CloudWatch's own Prometheus-compatible
+PromQL API (proxied and SigV4-signed by `guardian-pusher-aws`), not a selector
+translation. Add `source="aws"` to a PromQL query to route it to CloudWatch;
+Doctor strips `source` and forwards the rest verbatim, so the full language
+(functions, aggregations, `histogram_quantile`, `@`-scoped OTLP labels) works:
+
+```promql
+sum(rate({CPUUtilization, "@instrumentation.@name"="cloudwatch.aws/ec2", source="aws"}[5m]))
+```
+
+Local and CloudWatch series are merged into one result set, with CloudWatch
+series tagged `source="aws"`.
+
 ## AWS federation verification
 
 When `DOCTOR_AWS_ENABLED=true`, verify the federated CloudWatch/X-Ray surface:
