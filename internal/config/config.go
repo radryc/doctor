@@ -78,6 +78,9 @@ type QueryConfig struct {
 	GuardianAPIURL      string
 	DefaultPartition    string
 	MonoFSLogEngineAddr string
+	AWSEnabled          bool
+	AWSBackendURL       string
+	AWSBackendToken     string
 }
 
 func LoadIngest(service string) (IngestConfig, error) {
@@ -143,6 +146,9 @@ func LoadQuery(service string) QueryConfig {
 		GuardianAPIURL:      envString("DOCTOR_GUARDIAN_API_URL", envString("DOCTOR_GUARDIAN_UI_URL", "")),
 		DefaultPartition:    envString("DOCTOR_DEFAULT_PARTITION", ""),
 		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
+		AWSEnabled:          envBool("DOCTOR_AWS_ENABLED", false),
+		AWSBackendURL:       envString("DOCTOR_AWS_BACKEND_URL", ""),
+		AWSBackendToken:     envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
 	}
 }
 

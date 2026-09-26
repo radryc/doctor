@@ -252,6 +252,11 @@ func (s *Service) handleZipkinServices(w http.ResponseWriter, r *http.Request) {
 			services[span.Service] = struct{}{}
 		}
 	}
+	for _, service := range s.awsServices(r.Context()) {
+		if service != "" {
+			services[service] = struct{}{}
+		}
+	}
 
 	out := make([]string, 0, len(services))
 	for service := range services {
@@ -304,6 +309,7 @@ func (s *Service) handleZipkinTraces(w http.ResponseWriter, r *http.Request) {
 	}
 
 	traces := groupZipkinTraces(spans)
+	traces = append(traces, s.awsZipkinTraces(r.Context(), serviceName, start, end, limit)...)
 	if len(traces) > limit {
 		traces = traces[:limit]
 	}
@@ -336,6 +342,10 @@ func (s *Service) handleZipkinTraceByID(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if len(spans) == 0 {
+		if awsSpans, ok := s.awsZipkinTraceByID(r.Context(), traceID); ok {
+			writeJSON(w, http.StatusOK, awsSpans)
+			return
+		}
 		http.Error(w, "trace not found", http.StatusNotFound)
 		return
 	}
@@ -349,10 +359,20 @@ func (s *Service) handleZipkinTraceByID(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Service) queryLogsForLoki(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
+	var local []segment.LogRecord
+	var err error
 	if backend, ok := s.logEngine.(rawLogQueryBackend); ok {
-		return backend.QueryLogsRaw(ctx, tenant, query, from, to, limit)
+		local, err = backend.QueryLogsRaw(ctx, tenant, query, from, to, limit)
+	} else {
+		local, err = s.logEngine.QueryLogs(ctx, tenant, query, "", from, to, limit)
 	}
-	return s.logEngine.QueryLogs(ctx, tenant, query, "", from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	if awsLogs := s.queryAWSLogsForLoki(ctx, tenant, query, from, to, limit); len(awsLogs) > 0 {
+		local = append(local, awsLogs...)
+	}
+	return local, nil
 }
 
 func buildLokiStreams(logs []segment.LogRecord, direction string) []lokiStream {

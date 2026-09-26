@@ -135,6 +135,9 @@ All limits are disabled by default (0 = no limit).
 | `DOCTOR_DEFAULT_PARTITION` | Default Guardian partition shown in the UI | unset |
 | `DOCTOR_GUARDIAN_UI_URL` | URL to the Guardian UI (used by the Doctor UI for deep links) | unset |
 | `DOCTOR_GUARDIAN_API_URL` | URL to the Guardian API (used for live topology data) | unset |
+| `DOCTOR_AWS_ENABLED` | Federate CloudWatch metrics/Logs Insights and X-Ray traces from guardian-pusher-aws | `false` |
+| `DOCTOR_AWS_BACKEND_URL` | Base URL of the pusher AWS read API (e.g. `http://guardian-awsread:19090`) | unset |
+| `DOCTOR_AWS_BACKEND_TOKEN` | Bearer token for the pusher AWS read API | unset |
 
 ### Self-telemetry (both services)
 
@@ -199,7 +202,7 @@ every record through one shared label vocabulary so Grafana can correlate signal
 | `guardian_partition`, `guardian_intent`, `guardian_asset` | resolved identity (resource attributes or typed fields) |
 | `k8s_namespace_name`, `k8s_pod_name`, `k8s_container_name`, `k8s_node_name` | resource attributes |
 | `trace_id`, `span_id` | OTLP correlation IDs (metrics via exemplars, logs/traces direct) |
-| `source` | `doctor` (reserved for future federated sources) |
+| `source` | `doctor` for native telemetry, `aws` for federated CloudWatch/X-Ray data |
 
 Loki exposes a curated subset of these as stream labels (`trace_id`, `span_id`, identity,
 `level`, and Kubernetes names) to keep stream cardinality bounded; metrics and traces carry
@@ -241,6 +244,18 @@ curl -s "http://localhost:18080/api/v1/series?tenant=default&match[]={trace_id=\
 ```
 
 If metrics return no matching `trace_id`, ensure OTLP exemplars are enabled in your SDK/collector pipeline.
+
+## AWS federation verification
+
+When `DOCTOR_AWS_ENABLED=true`, verify the federated CloudWatch/X-Ray surface:
+
+```bash
+cd doctor
+./scripts/verify-aws-federation.sh
+```
+
+It confirms the `source="aws"` label is present, the CloudWatch namespace/metric
+selector resolves, and the Zipkin datasource returns services (native and X-Ray).
 
 ## Building containers
 

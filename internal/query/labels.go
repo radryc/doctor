@@ -169,6 +169,9 @@ func canonicalLabels(service, tenant, partition, intent, asset string, attrs map
 		labels[normalized] = value
 	}
 
-	labels[labelSource] = sourceDoctor
+	// Federated backends (e.g. AWS) set an explicit source attribute; native
+	// telemetry defaults to "doctor".
+	source := firstNonEmpty(attrs[labelSource], sourceDoctor)
+	labels[labelSource] = source
 	return labels
 }

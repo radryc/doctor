@@ -1,0 +1,251 @@
+// Package awsstore is a small HTTP client for the read-only CloudWatch/X-Ray
+// API exposed by guardian-pusher-aws. Doctor federates these results into the
+// same Grafana dataspace as its own OTLP telemetry.
+package awsstore
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// MetricSeries mirrors awsread.MetricSeries.
+type MetricSeries struct {
+	Namespace  string            `json:"namespace"`
+	MetricName string            `json:"metric_name"`
+	Dimensions map[string]string `json:"dimensions,omitempty"`
+	Region     string            `json:"region,omitempty"`
+	Account    string            `json:"account,omitempty"`
+	Unit       string            `json:"unit,omitempty"`
+	Points     []MetricPoint     `json:"points"`
+}
+
+// MetricPoint mirrors awsread.MetricPoint.
+type MetricPoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	Value     float64   `json:"value"`
+}
+
+// LogRecord mirrors awsread.LogRecord.
+type LogRecord struct {
+	Timestamp time.Time         `json:"timestamp"`
+	LogGroup  string            `json:"log_group"`
+	LogStream string            `json:"log_stream,omitempty"`
+	Message   string            `json:"message"`
+	Fields    map[string]string `json:"fields,omitempty"`
+}
+
+// Span mirrors awsread.Span.
+type Span struct {
+	TraceID      string            `json:"trace_id"`
+	SpanID       string            `json:"span_id"`
+	ParentSpanID string            `json:"parent_span_id,omitempty"`
+	Name         string            `json:"name"`
+	Service      string            `json:"service"`
+	StartTime    time.Time         `json:"start_time"`
+	EndTime      time.Time         `json:"end_time"`
+	StatusCode   string            `json:"status_code,omitempty"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
+}
+
+// TraceSummary mirrors awsread.TraceSummary.
+type TraceSummary struct {
+	TraceID    string            `json:"trace_id"`
+	Service    string            `json:"service,omitempty"`
+	StartTime  time.Time         `json:"start_time"`
+	EndTime    time.Time         `json:"end_time"`
+	Duration   time.Duration     `json:"duration"`
+	Status     string            `json:"status,omitempty"`
+	SpanCount  int               `json:"span_count,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// MetricQuery selects a CloudWatch metric series.
+type MetricQuery struct {
+	Namespace  string
+	MetricName string
+	Dimensions map[string]string
+	Stat       string
+	Period     time.Duration
+	From       time.Time
+	To         time.Time
+}
+
+// LogQuery selects CloudWatch log records.
+type LogQuery struct {
+	LogGroups []string
+	Query     string
+	From      time.Time
+	To        time.Time
+	Limit     int
+}
+
+// TraceQuery selects X-Ray traces.
+type TraceQuery struct {
+	Service string
+	From    time.Time
+	To      time.Time
+	Limit   int
+}
+
+// Client talks to the pusher AWS read API.
+type Client struct {
+	baseURL    string
+	token      string
+	httpClient *http.Client
+}
+
+// NewClient builds a client for the given base URL.
+func NewClient(baseURL, token string) *Client {
+	return &Client{
+		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		token:   strings.TrimSpace(token),
+		httpClient: &http.Client{
+			Timeout: 45 * time.Second,
+		},
+	}
+}
+
+// Enabled reports whether a backend URL is configured.
+func (c *Client) Enabled() bool {
+	return c != nil && c.baseURL != ""
+}
+
+// ListServices returns X-Ray service names.
+func (c *Client) ListServices(ctx context.Context) ([]string, error) {
+	var out []string
+	if err := c.get(ctx, "/v1/aws/xray/services", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// QueryMetric fetches a CloudWatch metric series.
+func (c *Client) QueryMetric(ctx context.Context, q MetricQuery) ([]MetricSeries, error) {
+	params := url.Values{}
+	params.Set("namespace", q.Namespace)
+	params.Set("metric", q.MetricName)
+	if q.Stat != "" {
+		params.Set("stat", q.Stat)
+	}
+	if q.Period > 0 {
+		params.Set("period", q.Period.String())
+	}
+	if !q.From.IsZero() {
+		params.Set("from", q.From.UTC().Format(time.RFC3339Nano))
+	}
+	if !q.To.IsZero() {
+		params.Set("to", q.To.UTC().Format(time.RFC3339Nano))
+	}
+	for name, value := range q.Dimensions {
+		params.Set("dim."+name, value)
+	}
+	var out []MetricSeries
+	if err := c.get(ctx, "/v1/aws/metrics/query", params, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// QueryLogs runs a CloudWatch Logs Insights query.
+func (c *Client) QueryLogs(ctx context.Context, q LogQuery) ([]LogRecord, error) {
+	body := map[string]any{
+		"log_groups": q.LogGroups,
+		"query":      q.Query,
+		"limit":      q.Limit,
+	}
+	if !q.From.IsZero() {
+		body["from"] = q.From.UTC().Format(time.RFC3339Nano)
+	}
+	if !q.To.IsZero() {
+		body["to"] = q.To.UTC().Format(time.RFC3339Nano)
+	}
+	var out []LogRecord
+	if err := c.post(ctx, "/v1/aws/logs/query", body, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// QueryTraces returns X-Ray trace summaries.
+func (c *Client) QueryTraces(ctx context.Context, q TraceQuery) ([]TraceSummary, error) {
+	params := url.Values{}
+	if q.Service != "" {
+		params.Set("service", q.Service)
+	}
+	if !q.From.IsZero() {
+		params.Set("from", q.From.UTC().Format(time.RFC3339Nano))
+	}
+	if !q.To.IsZero() {
+		params.Set("to", q.To.UTC().Format(time.RFC3339Nano))
+	}
+	if q.Limit > 0 {
+		params.Set("limit", strconv.Itoa(q.Limit))
+	}
+	var out []TraceSummary
+	if err := c.get(ctx, "/v1/aws/xray/traces", params, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetTrace returns the spans of an X-Ray trace.
+func (c *Client) GetTrace(ctx context.Context, traceID string) ([]Span, error) {
+	var out []Span
+	if err := c.get(ctx, "/v1/aws/xray/trace/"+url.PathEscape(traceID), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) get(ctx context.Context, path string, params url.Values, out any) error {
+	requestURL := c.baseURL + path
+	if len(params) > 0 {
+		requestURL += "?" + params.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return err
+	}
+	return c.do(req, out)
+}
+
+func (c *Client) post(ctx context.Context, path string, body any, out any) error {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, out)
+}
+
+func (c *Client) do(req *http.Request, out any) error {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("aws backend HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}

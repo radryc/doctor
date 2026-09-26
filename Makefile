@@ -2,7 +2,7 @@ MONOFS_DIR ?= ../monofs
 SERVICE ?= doctor-ingest
 SERVICES ?= doctor-ingest doctor-query
 
-.PHONY: test build vet docker-build image image-all frontend frontend-dev verify-correlation
+.PHONY: test build vet docker-build image image-all frontend frontend-dev verify-correlation verify-aws
 
 test:
 	go test ./...
@@ -34,3 +34,6 @@ image-all:
 
 verify-correlation:
 	./scripts/verify-correlation.sh
+
+verify-aws:
+	./scripts/verify-aws-federation.sh

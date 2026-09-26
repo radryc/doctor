@@ -13,6 +13,7 @@ import (
 
 	"github.com/rydzu/ainfra/doctor/internal/config"
 	"github.com/rydzu/ainfra/doctor/internal/query"
+	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
 	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
 	"github.com/rydzu/ainfra/doctor/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -70,6 +71,10 @@ func main() {
 	svc.SetGuardianURL(cfg.GuardianURL)
 	svc.SetGuardianAPIURL(cfg.GuardianAPIURL)
 	svc.SetDefaultPartition(cfg.DefaultPartition)
+	if cfg.AWSEnabled && cfg.AWSBackendURL != "" {
+		svc.SetAWSBackend(awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken))
+		log.Printf("aws federation enabled via %s", cfg.AWSBackendURL)
+	}
 
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,

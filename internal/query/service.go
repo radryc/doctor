@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/segment"
+	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
 	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
 )
 
@@ -30,7 +31,18 @@ type Service struct {
 	guardianAPIURL   string
 	defaultPartition string
 	logEngine        LogEngineBackend
+	aws              awsBackend
 	guardianClient   *http.Client
+}
+
+// SetAWSBackend configures the optional AWS (CloudWatch/X-Ray) federation
+// backend served by guardian-pusher-aws.
+func (s *Service) SetAWSBackend(client *awsstore.Client) {
+	if client == nil {
+		s.aws = nil
+		return
+	}
+	s.aws = client
 }
 
 // SetTenantHeader sets the HTTP header used to route queries to a tenant when

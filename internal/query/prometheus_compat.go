@@ -36,12 +36,14 @@ const (
 type doctorPromQueryable struct {
 	backend LogEngineBackend
 	tenant  string
+	aws     awsBackend
 }
 
 func (q doctorPromQueryable) Querier(mint, maxt int64) (promstorage.Querier, error) {
 	return &doctorPromQuerier{
 		backend: q.backend,
 		tenant:  q.tenant,
+		aws:     q.aws,
 		mint:    mint,
 		maxt:    maxt,
 	}, nil
@@ -50,6 +52,7 @@ func (q doctorPromQueryable) Querier(mint, maxt int64) (promstorage.Querier, err
 type doctorPromQuerier struct {
 	backend LogEngineBackend
 	tenant  string
+	aws     awsBackend
 	mint    int64
 	maxt    int64
 
@@ -253,7 +256,11 @@ func (q *doctorPromQuerier) loadMetricPoints(ctx context.Context, metricQuery se
 	from := timeFromPromMillis(q.mint)
 	to := timeFromPromMillis(q.maxt)
 	if requestedMetricName == "" {
-		return q.backend.QueryMetrics(ctx, q.tenant, metricQuery, from, to)
+		points, err := q.backend.QueryMetrics(ctx, q.tenant, metricQuery, from, to)
+		if err != nil {
+			return nil, err
+		}
+		return q.appendAWSMetricPoints(ctx, metricQuery, "", from, to, points)
 	}
 
 	rawNames, err := q.resolveRawMetricNames(ctx, requestedMetricName)
@@ -274,7 +281,7 @@ func (q *doctorPromQuerier) loadMetricPoints(ctx context.Context, metricQuery se
 		}
 		all = append(all, points...)
 	}
-	return all, nil
+	return q.appendAWSMetricPoints(ctx, metricQuery, requestedMetricName, from, to, all)
 }
 
 func (q *doctorPromQuerier) resolveRawMetricNames(ctx context.Context, requestedMetricName string) ([]string, error) {
@@ -553,7 +560,7 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 
 	query, err := engine.NewInstantQuery(
 		r.Context(),
-		doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r)},
+		doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r), aws: s.aws},
 		promql.NewPrometheusQueryOpts(false, doctorPrometheusLookback),
 		queryString,
 		evaluationTime,
@@ -614,7 +621,7 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 
 	query, err := engine.NewRangeQuery(
 		r.Context(),
-		doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r)},
+		doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r), aws: s.aws},
 		promql.NewPrometheusQueryOpts(false, doctorPrometheusLookback),
 		queryString,
 		start,
@@ -852,7 +859,7 @@ func (s *Service) discoveryPrometheusQuerier(r *http.Request) (promstorage.Queri
 	if err != nil {
 		return nil, err
 	}
-	return doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r)}.Querier(start.UnixMilli(), end.UnixMilli())
+	return doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r), aws: s.aws}.Querier(start.UnixMilli(), end.UnixMilli())
 }
 
 func newDoctorPrometheusEngine() *promql.Engine {
