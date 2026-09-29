@@ -86,12 +86,11 @@ func (c *LogEngineClient) IngestMetrics(ctx context.Context, chunkID string, rec
 			Service:           r.Service,
 			MetricName:        r.MetricName,
 			Value:             r.Value,
-			Labels: mergeLabels(
+			Labels: filterUnboundedMetricLabels(mergeLabels(
 				r.ResourceAttributes,
 				identityLabels(r.Partition, r.Intent, r.Asset),
 				r.Attributes,
-				correlationLabels(r.TraceID, r.SpanID),
-			),
+			)),
 		})
 	}
 	_, err := c.router.IngestMetrics(ctx, &pb.IngestMetricsRequest{
@@ -169,6 +168,23 @@ func (c *LogEngineClient) QueryLogsRaw(ctx context.Context, tenant, query string
 // QueryMetrics returns metric data points for the given query and time range.
 // The tenant parameter is ignored by monofs (it uses internal partitioning).
 func (c *LogEngineClient) QueryMetrics(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time) ([]segment.MetricPointRecord, error) {
+	records := make([]segment.MetricPointRecord, 0)
+	err := c.StreamMetrics(ctx, tenant, query, from, to, func(record segment.MetricPointRecord) error {
+		records = append(records, record)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// StreamMetrics streams metric data points for the given query and time range,
+// invoking yield for every record as it arrives. Unlike QueryMetrics it never
+// buffers the full result set, so callers that only need per-record metadata
+// (label/series discovery) stay bounded regardless of the number of samples.
+// The tenant parameter is ignored by monofs (it uses internal partitioning).
+func (c *LogEngineClient) StreamMetrics(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricPointRecord) error) error {
 	stream, err := c.router.StreamQueryMetrics(ctx, &pb.QueryMetricsRequest{
 		MetricName:    query.MetricName,
 		FromUnixNano:  timeToNano(from),
@@ -177,35 +193,49 @@ func (c *LogEngineClient) QueryMetrics(ctx context.Context, tenant string, query
 		LabelMatchers: protoMetricMatchers(query.LabelMatchers),
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	rawRecords, err := unmarshalQueryItems[metricStreamRecord](stream)
-	if err != nil {
-		return nil, fmt.Errorf("unmarshal metric results: %w", err)
-	}
-	records := make([]segment.MetricPointRecord, 0, len(rawRecords))
-	for _, record := range rawRecords {
-		labels := record.Labels
-		if labels == nil {
-			labels = map[string]string{}
+	for {
+		item, err := stream.Recv()
+		if err == io.EOF {
+			return nil
 		}
-		partition, intent, asset := labelsFromIdentity(labels)
-		records = append(records, segment.MetricPointRecord{
-			Tenant:     tenant,
-			Service:    record.Service,
-			Partition:  partition,
-			Intent:     intent,
-			Asset:      asset,
-			MetricName: record.MetricName,
-			Timestamp:  record.Timestamp.UTC(),
-			TraceID:    labels["trace_id"],
-			SpanID:     labels["span_id"],
-			Attributes: labels,
-			HasValue:   true,
-			Value:      record.Value,
-		})
+		if err != nil {
+			return err
+		}
+		if item == nil || len(item.GetItemJson()) == 0 {
+			continue
+		}
+		var raw metricStreamRecord
+		if err := json.Unmarshal(item.GetItemJson(), &raw); err != nil {
+			return fmt.Errorf("unmarshal metric results: %w", err)
+		}
+		if err := yield(metricPointFromStreamRecord(tenant, raw)); err != nil {
+			return err
+		}
 	}
-	return records, nil
+}
+
+func metricPointFromStreamRecord(tenant string, record metricStreamRecord) segment.MetricPointRecord {
+	labels := record.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	partition, intent, asset := labelsFromIdentity(labels)
+	return segment.MetricPointRecord{
+		Tenant:     tenant,
+		Service:    record.Service,
+		Partition:  partition,
+		Intent:     intent,
+		Asset:      asset,
+		MetricName: record.MetricName,
+		Timestamp:  record.Timestamp.UTC(),
+		TraceID:    labels["trace_id"],
+		SpanID:     labels["span_id"],
+		Attributes: labels,
+		HasValue:   true,
+		Value:      record.Value,
+	}
 }
 
 func protoMetricMatchers(matchers []segment.MetricLabelMatcher) []*pb.MetricLabelMatcher {
@@ -306,6 +336,17 @@ func mergeLabels(maps ...map[string]string) map[string]string {
 		}
 	}
 	return merged
+}
+
+// filterUnboundedMetricLabels drops per-record correlation identifiers so they
+// never become metric series labels (which would explode cardinality).
+func filterUnboundedMetricLabels(labels map[string]string) map[string]string {
+	for key := range labels {
+		if segment.IsUnboundedMetricLabel(key) {
+			delete(labels, key)
+		}
+	}
+	return labels
 }
 
 // identityLabels exposes the resolved Guardian identity as canonical label keys.

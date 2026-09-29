@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,9 @@ import (
 type LogEngineBackend interface {
 	QueryLogs(ctx context.Context, tenant, query, service string, from, to time.Time, limit int) ([]segment.LogRecord, error)
 	QueryMetrics(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time) ([]segment.MetricPointRecord, error)
+	// StreamMetrics yields metric points incrementally so metadata-only callers
+	// (label and series discovery) never buffer the full result set in memory.
+	StreamMetrics(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricPointRecord) error) error
 	QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error)
 }
 
@@ -561,8 +565,21 @@ func (s *Service) handleMetricRange(w http.ResponseWriter, r *http.Request) {
 	if to.IsZero() {
 		to = time.Now().UTC()
 	}
-	points, err := s.logEngine.QueryMetrics(r.Context(), tenant, segment.MetricQuery{MetricName: metricName}, from, to)
+	points := make([]segment.MetricPointRecord, 0, 1024)
+	scanned := 0
+	err := s.logEngine.StreamMetrics(r.Context(), tenant, segment.MetricQuery{MetricName: metricName}, from, to, func(point segment.MetricPointRecord) error {
+		scanned++
+		if scanned > maxMetricRangePoints {
+			return errMetricQueryTooBroad
+		}
+		points = append(points, point)
+		return nil
+	})
 	if err != nil {
+		if errors.Is(err, errMetricQueryTooBroad) {
+			http.Error(w, "metric has too many points; narrow the time range", http.StatusUnprocessableEntity)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1190,6 +1207,37 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.awsReady() {
+		awsSummaries, awsErr := s.aws.QueryTraces(r.Context(), awsstore.TraceQuery{
+			Service: service,
+			From:    from,
+			To:      to,
+			Limit:   limit,
+		})
+		if awsErr == nil {
+			for _, summary := range awsSummaries {
+				if summary.TraceID == "" {
+					continue
+				}
+				if _, exists := traceMap[summary.TraceID]; exists {
+					continue
+				}
+				spanCount := summary.SpanCount
+				if spanCount <= 0 {
+					spanCount = 1
+				}
+				traceMap[summary.TraceID] = &TraceSummary{
+					TraceID:   summary.TraceID,
+					Service:   firstNonEmpty(summary.Service, awsSourceLabel),
+					Partition: awsPartition(summary.Region, summary.Account),
+					MinTime:   summary.StartTime,
+					MaxTime:   summary.EndTime,
+					SpanCount: spanCount,
+				}
+			}
+		}
+	}
+
 	summaries := make([]TraceSummary, 0, len(traceMap))
 	for _, t := range traceMap {
 		summaries = append(summaries, *t)
@@ -1214,12 +1262,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.logEngine.QueryLogs(r.Context(), tenant, "", "", from, to, 2000)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"tenant":     tenant,
-			"services":   []string{},
-			"partitions": []string{},
-		})
-		return
+		results = nil
 	}
 
 	seen := map[string]bool{}
@@ -1235,6 +1278,19 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 		}
 		part := firstNonEmpty(rec.Partition, attrs[attrGuardianPartition], attrs[labelPartition])
 		if part != "" && !seenParts[part] {
+			seenParts[part] = true
+			partitions = append(partitions, part)
+		}
+	}
+
+	// Federated X-Ray services have no local log records, but should still be
+	// selectable alongside native services and carry their AWS partition.
+	for _, svc := range s.awsServiceInfos(r.Context()) {
+		if svc.Name != "" && !seen[svc.Name] {
+			seen[svc.Name] = true
+			components = append(components, svc.Name)
+		}
+		if part := awsPartition(svc.Region, svc.Account); part != "" && !seenParts[part] {
 			seenParts[part] = true
 			partitions = append(partitions, part)
 		}
@@ -1349,26 +1405,48 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Discover metric names per service via Prometheus labels.
+	// Discover metric names per service via Prometheus labels. Stream the
+	// records so an unbounded number of samples cannot exhaust memory.
 	end := time.Now().UTC()
 	start := end.Add(-window)
-	metricNamesResp, err := s.logEngine.QueryMetrics(r.Context(), tenant, segment.MetricQuery{}, start, end)
-	if err == nil {
-		seenMetrics := make(map[string]struct{})
-		for _, m := range metricNamesResp {
-			seenMetrics[m.MetricName] = struct{}{}
-			if m.Service != "" {
-				info, ok := svcMap[m.Service]
-				if !ok {
-					info = &svcInfo{metricNames: make(map[string]struct{})}
-					svcMap[m.Service] = info
-				}
-				info.hasMetrics = true
-				info.metricNames[m.MetricName] = struct{}{}
-				if m.Timestamp.After(info.lastSeen) {
-					info.lastSeen = m.Timestamp
-				}
-			}
+	scanned := 0
+	_ = s.logEngine.StreamMetrics(r.Context(), tenant, segment.MetricQuery{}, start, end, func(m segment.MetricPointRecord) error {
+		if scanned >= maxDiscoveryScannedRecords {
+			return errDiscoveryScanLimit
+		}
+		scanned++
+		if m.Service == "" {
+			return nil
+		}
+		info, ok := svcMap[m.Service]
+		if !ok {
+			info = &svcInfo{metricNames: make(map[string]struct{})}
+			svcMap[m.Service] = info
+		}
+		info.hasMetrics = true
+		if m.MetricName != "" {
+			info.metricNames[m.MetricName] = struct{}{}
+		}
+		if m.Timestamp.After(info.lastSeen) {
+			info.lastSeen = m.Timestamp
+		}
+		return nil
+	})
+
+	// Federated X-Ray services are trace-only signals; add them (with their AWS
+	// partition) so AWS workloads show up next to native services.
+	for _, svc := range s.awsServiceInfos(r.Context()) {
+		if svc.Name == "" {
+			continue
+		}
+		info, ok := svcMap[svc.Name]
+		if !ok {
+			info = &svcInfo{metricNames: make(map[string]struct{})}
+			svcMap[svc.Name] = info
+		}
+		info.hasTraces = true
+		if partition := awsPartition(svc.Region, svc.Account); partition != "" {
+			info.partition = partition
 		}
 	}
 

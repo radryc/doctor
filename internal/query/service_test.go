@@ -181,6 +181,19 @@ func (f *fakeLogEngineBackend) QueryMetrics(_ context.Context, _ string, query s
 	return filtered, nil
 }
 
+func (f *fakeLogEngineBackend) StreamMetrics(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricPointRecord) error) error {
+	records, err := f.QueryMetrics(ctx, tenant, query, from, to)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := yield(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func fakeMetricDiscoveryMode(query segment.MetricQuery) string {
 	for _, matcher := range query.LabelMatchers {
 		if matcher.Name == fakeMetricDiscoveryMatcherName && matcher.Type == segment.MetricMatchEqual {

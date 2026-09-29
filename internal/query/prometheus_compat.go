@@ -2,7 +2,7 @@ package query
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,9 +29,60 @@ const (
 	doctorPrometheusLookback         = 5 * time.Minute
 	doctorPrometheusTimeout          = 30 * time.Second
 	doctorDiscoveryWindow            = 24 * time.Hour
+	// doctorDiscoveryScanWindow caps how far back label/series discovery scans.
+	// The label vocabulary is stable, so a short recent window yields the same
+	// names while keeping the scan (and its memory) small even when Grafana asks
+	// for hours or days.
+	doctorDiscoveryScanWindow        = 15 * time.Minute
 	doctorMetricDiscoveryMatcherName = "__doctor_discovery__"
 	doctorMetricDiscoveryModeNames   = "metric_names"
+	doctorMetricDiscoveryModeLabels  = "label_names"
+	doctorMetricDiscoveryModeValues  = "label_values:"
+
+	// maxDiscoveryScannedRecords bounds how many samples a series-discovery scan
+	// reads before stopping. It is a safety valve; the projected label sets are
+	// what callers consume.
+	maxDiscoveryScannedRecords = 10000
+
+	// maxQueryLoadedSamples and maxQueryLoadedSeries bound how much a PromQL
+	// query may pull into memory. Samples stream straight into the series index
+	// (never buffered as records) and the query fails with a 422 once either
+	// budget is exhausted, so a broad selector cannot OOM the query service.
+	maxQueryLoadedSamples = 1_000_000
+	maxQueryLoadedSeries  = 100_000
+
+	// maxQueryMetricNames bounds how many stored metric names a single
+	// `__name__` matcher (e.g. a regex) may expand to before the query is
+	// rejected.
+	maxQueryMetricNames = 5_000
+
+	// maxMetricRangePoints bounds the legacy /v1/metrics/range endpoint.
+	maxMetricRangePoints = 200_000
 )
+
+// errMetricQueryTooBroad is returned internally while streaming once a query
+// exceeds its sample or series budget. It is translated to
+// promql.ErrTooManySamples (HTTP 422) at the query boundary.
+var errMetricQueryTooBroad = errors.New("metric query exceeds the configured sample/series budget")
+
+// errDiscoveryScanLimit is returned internally when a discovery scan hits its
+// record budget and is treated as a successful partial result.
+var errDiscoveryScanLimit = errors.New("metric discovery scan limit reached")
+
+// doctorDiscoveryQuery builds a manifest-backed discovery query so that label
+// and metric-name lookups read chunk metadata instead of scanning samples.
+func doctorDiscoveryQuery(mode string, matchers []*promlabels.Matcher) segment.MetricQuery {
+	query := metricQueryFromMatchers(matchers)
+	if name := exactPromMetricNameMatcher(matchers); name != "" {
+		query.MetricName = name
+	}
+	query.LabelMatchers = append(query.LabelMatchers, segment.MetricLabelMatcher{
+		Name:  doctorMetricDiscoveryMatcherName,
+		Value: mode,
+		Type:  segment.MetricMatchEqual,
+	})
+	return query
+}
 
 type doctorPromQueryable struct {
 	backend LogEngineBackend
@@ -126,21 +177,18 @@ func (q *doctorPromQuerier) LabelValues(ctx context.Context, name string, _ *pro
 		return q.discoverMetricNames(ctx)
 	}
 
-	index, err := q.load(ctx, matchers)
-	if err != nil {
-		return nil, nil, err
+	if values, err := q.discoverLabelValues(ctx, name, matchers); err == nil {
+		return values, nil, nil
 	}
 
 	values := make(map[string]struct{})
-	for _, series := range index.series {
-		if !metricLabelsMatch(series.labels, matchers) {
-			continue
+	err := q.forEachSeriesLabels(ctx, matchers, func(labelSet promlabels.Labels) {
+		if value := labelSet.Get(name); value != "" {
+			values[value] = struct{}{}
 		}
-		value := series.labels.Get(name)
-		if value == "" {
-			continue
-		}
-		values[value] = struct{}{}
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 
 	out := make([]string, 0, len(values))
@@ -149,6 +197,112 @@ func (q *doctorPromQuerier) LabelValues(ctx context.Context, name string, _ *pro
 	}
 	sort.Strings(out)
 	return out, nil, nil
+}
+
+// discoverLabelValues uses the backend's manifest-backed label discovery, which
+// reads chunk metadata rather than samples, so it stays fast and bounded even
+// for high-cardinality labels.
+func (q *doctorPromQuerier) discoverLabelValues(ctx context.Context, name string, matchers []*promlabels.Matcher) ([]string, error) {
+	if name == "" {
+		return nil, fmt.Errorf("label name is required")
+	}
+	values := make(map[string]struct{})
+	scanned := 0
+	err := q.backend.StreamMetrics(ctx, q.tenant, doctorDiscoveryQuery(doctorMetricDiscoveryModeValues+name, matchers), timeFromPromMillis(q.mint), timeFromPromMillis(q.maxt), func(record segment.MetricPointRecord) error {
+		if scanned >= maxDiscoveryScannedRecords {
+			return errDiscoveryScanLimit
+		}
+		scanned++
+		if value := record.Attributes[name]; value != "" {
+			values[value] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errDiscoveryScanLimit) {
+		return nil, err
+	}
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// forEachSeriesLabels streams matching metric records and invokes yield once for
+// every distinct series label set. It deliberately does not build the sample
+// index used by query execution: discovery endpoints only need series metadata,
+// so memory stays proportional to the number of series instead of the (much
+// larger) number of samples. This is what protects /api/v1/labels and
+// /api/v1/series from OOMing on high-frequency metrics.
+func (q *doctorPromQuerier) forEachSeriesLabels(ctx context.Context, matchers []*promlabels.Matcher, yield func(promlabels.Labels)) error {
+	metricQuery := metricQueryFromMatchers(matchers)
+	requestedMetricName := exactPromMetricNameMatcher(matchers)
+	from := timeFromPromMillis(q.mint)
+	to := timeFromPromMillis(q.maxt)
+
+	seen := make(map[string]struct{})
+	scanned := 0
+	emit := func(point segment.MetricPointRecord) error {
+		// Bound the scan: a pathological high-cardinality metric must not be
+		// able to exhaust memory before the caller's limit is reached.
+		if scanned >= maxDiscoveryScannedRecords {
+			return errDiscoveryScanLimit
+		}
+		scanned++
+		labelSet := metricPointLabels(point)
+		if !metricLabelsMatch(labelSet, matchers) {
+			return nil
+		}
+		key := string(labelSet.Bytes(nil))
+		if _, ok := seen[key]; ok {
+			return nil
+		}
+		seen[key] = struct{}{}
+		yield(labelSet)
+		return nil
+	}
+
+	stream := func(query segment.MetricQuery) error {
+		err := q.backend.StreamMetrics(ctx, q.tenant, query, from, to, emit)
+		if errors.Is(err, errDiscoveryScanLimit) {
+			return nil
+		}
+		return err
+	}
+
+	if requestedMetricName == "" {
+		return stream(metricQuery)
+	}
+
+	rawNames, err := q.resolveRawMetricNames(ctx, requestedMetricName)
+	if err != nil {
+		return err
+	}
+	if len(rawNames) == 0 {
+		rawNames = []string{requestedMetricName}
+	}
+	for _, rawName := range rawNames {
+		aliasQuery := metricQuery
+		aliasQuery.MetricName = rawName
+		if err := stream(aliasQuery); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// seriesLabelMaps returns the distinct label sets of all matching series
+// without materializing samples.
+func (q *doctorPromQuerier) seriesLabelMaps(ctx context.Context, matchers []*promlabels.Matcher) ([]map[string]string, error) {
+	out := make([]map[string]string, 0)
+	err := q.forEachSeriesLabels(ctx, matchers, func(labelSet promlabels.Labels) {
+		out = append(out, promLabelsToMap(labelSet))
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (q *doctorPromQuerier) discoverMetricNames(ctx context.Context) ([]string, annotations.Annotations, error) {
@@ -181,19 +335,18 @@ func (q *doctorPromQuerier) discoverMetricNames(ctx context.Context) ([]string, 
 }
 
 func (q *doctorPromQuerier) LabelNames(ctx context.Context, _ *promstorage.LabelHints, matchers ...*promlabels.Matcher) ([]string, annotations.Annotations, error) {
-	index, err := q.load(ctx, matchers)
-	if err != nil {
-		return nil, nil, err
+	if names, err := q.discoverLabelNames(ctx, matchers); err == nil {
+		return names, nil, nil
 	}
 
 	names := make(map[string]struct{})
-	for _, series := range index.series {
-		if !metricLabelsMatch(series.labels, matchers) {
-			continue
-		}
-		series.labels.Range(func(label promlabels.Label) {
+	err := q.forEachSeriesLabels(ctx, matchers, func(labelSet promlabels.Labels) {
+		labelSet.Range(func(label promlabels.Label) {
 			names[label.Name] = struct{}{}
 		})
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 
 	out := make([]string, 0, len(names))
@@ -204,17 +357,40 @@ func (q *doctorPromQuerier) LabelNames(ctx context.Context, _ *promstorage.Label
 	return out, nil, nil
 }
 
+// discoverLabelNames uses manifest-backed label discovery so /api/v1/labels
+// reads chunk metadata instead of scanning every metric sample.
+func (q *doctorPromQuerier) discoverLabelNames(ctx context.Context, matchers []*promlabels.Matcher) ([]string, error) {
+	names := make(map[string]struct{})
+	scanned := 0
+	err := q.backend.StreamMetrics(ctx, q.tenant, doctorDiscoveryQuery(doctorMetricDiscoveryModeLabels, matchers), timeFromPromMillis(q.mint), timeFromPromMillis(q.maxt), func(record segment.MetricPointRecord) error {
+		if scanned >= maxDiscoveryScannedRecords {
+			return errDiscoveryScanLimit
+		}
+		scanned++
+		for name := range record.Attributes {
+			if name != "" {
+				names[name] = struct{}{}
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errDiscoveryScanLimit) {
+		return nil, err
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (q *doctorPromQuerier) Close() error {
 	return nil
 }
 
 func (q *doctorPromQuerier) load(ctx context.Context, matchers []*promlabels.Matcher) (*doctorPromIndex, error) {
-	metricQuery := metricQueryFromMatchers(matchers)
-	requestedMetricName := exactPromMetricNameMatcher(matchers)
-	cacheKey, err := metricQueryCacheKey(metricQuery, requestedMetricName)
-	if err != nil {
-		return nil, err
-	}
+	cacheKey := matcherCacheKey(matchers)
 
 	q.mu.Lock()
 	if index, ok := q.indexes[cacheKey]; ok {
@@ -227,7 +403,7 @@ func (q *doctorPromQuerier) load(ctx context.Context, matchers []*promlabels.Mat
 	}
 	q.mu.Unlock()
 
-	points, err := q.loadMetricPoints(ctx, metricQuery, requestedMetricName)
+	index, err := q.buildIndex(ctx, matchers)
 	if err != nil {
 		q.mu.Lock()
 		if q.errs == nil {
@@ -238,7 +414,6 @@ func (q *doctorPromQuerier) load(ctx context.Context, matchers []*promlabels.Mat
 		return nil, err
 	}
 
-	index := buildDoctorPromIndex(points)
 	q.mu.Lock()
 	if q.indexes == nil {
 		q.indexes = make(map[string]*doctorPromIndex)
@@ -249,32 +424,181 @@ func (q *doctorPromQuerier) load(ctx context.Context, matchers []*promlabels.Mat
 	return index, nil
 }
 
-func (q *doctorPromQuerier) loadMetricPoints(ctx context.Context, metricQuery segment.MetricQuery, requestedMetricName string) ([]segment.MetricPointRecord, error) {
+// buildIndex streams matching metric points straight into the PromQL series
+// index. It never buffers raw records (unlike a QueryMetrics call), and it stops
+// with errMetricQueryTooBroad once the sample or series budget is exhausted so a
+// broad selector cannot exhaust memory. `__name__` matchers are expanded to
+// exact stored names first, so `{__name__=~"guardian.*"}` only reads the
+// matching metrics instead of every metric in the store.
+func (q *doctorPromQuerier) buildIndex(ctx context.Context, matchers []*promlabels.Matcher) (*doctorPromIndex, error) {
 	from := timeFromPromMillis(q.mint)
 	to := timeFromPromMillis(q.maxt)
-	if requestedMetricName == "" {
-		return q.backend.QueryMetrics(ctx, q.tenant, metricQuery, from, to)
-	}
 
-	rawNames, err := q.resolveRawMetricNames(ctx, requestedMetricName)
+	names, err := q.resolveStorageMetricNames(ctx, matchers, from, to)
 	if err != nil {
 		return nil, err
 	}
-	if len(rawNames) == 0 {
-		rawNames = []string{requestedMetricName}
+	if names != nil && len(names) == 0 {
+		// The selector named metrics that the store does not have; do not scan.
+		return emptyDoctorPromIndex(), nil
 	}
 
-	all := make([]segment.MetricPointRecord, 0)
-	for _, rawName := range rawNames {
-		aliasQuery := metricQuery
-		aliasQuery.MetricName = rawName
-		points, err := q.backend.QueryMetrics(ctx, q.tenant, aliasQuery, from, to)
-		if err != nil {
-			return nil, err
+	base := segment.MetricQuery{Service: exactServiceMatcher(matchers)}
+
+	builders := make(map[string]*promql.Series)
+	labelsByKey := make(map[string]promlabels.Labels)
+	samples := 0
+	emit := func(point segment.MetricPointRecord) error {
+		if !point.HasValue || point.MetricName == "" || point.Timestamp.IsZero() {
+			return nil
 		}
-		all = append(all, points...)
+		samples++
+		if samples > maxQueryLoadedSamples {
+			return errMetricQueryTooBroad
+		}
+		labelSet := metricPointLabels(point)
+		key := string(labelSet.Bytes(nil))
+		series := builders[key]
+		if series == nil {
+			if len(builders) >= maxQueryLoadedSeries {
+				return errMetricQueryTooBroad
+			}
+			series = &promql.Series{Metric: labelSet.Copy()}
+			builders[key] = series
+			labelsByKey[key] = labelSet.Copy()
+		}
+		series.Floats = append(series.Floats, promql.FPoint{
+			T: point.Timestamp.UTC().UnixMilli(),
+			F: point.Value,
+		})
+		return nil
 	}
-	return all, nil
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	if names == nil {
+		if err := q.backend.StreamMetrics(streamCtx, q.tenant, base, from, to, emit); err != nil {
+			return nil, translateMetricLoadError(err)
+		}
+		return finalizeDoctorPromIndex(builders, labelsByKey), nil
+	}
+
+	for _, name := range names {
+		query := base
+		query.MetricName = name
+		if err := q.backend.StreamMetrics(streamCtx, q.tenant, query, from, to, emit); err != nil {
+			return nil, translateMetricLoadError(err)
+		}
+	}
+	return finalizeDoctorPromIndex(builders, labelsByKey), nil
+}
+
+// resolveStorageMetricNames expands the query's `__name__` matchers (exact or
+// regex) into the exact raw names the store uses. A nil result means the query
+// carries no name constraint and the store should be scanned unfiltered.
+func (q *doctorPromQuerier) resolveStorageMetricNames(ctx context.Context, matchers []*promlabels.Matcher, from, to time.Time) ([]string, error) {
+	nameMatchers := make([]*promlabels.Matcher, 0, 1)
+	for _, matcher := range matchers {
+		if matcher != nil && matcher.Name == promlabels.MetricName {
+			nameMatchers = append(nameMatchers, matcher)
+		}
+	}
+	if len(nameMatchers) == 0 {
+		return nil, nil
+	}
+
+	rawNames, err := q.discoverRawMetricNames(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rawNames))
+	for _, rawName := range rawNames {
+		normalized := normalizePrometheusMetricName(rawName)
+		matches := true
+		for _, matcher := range nameMatchers {
+			if !matcher.Matches(normalized) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			out = append(out, rawName)
+		}
+		if len(out) > maxQueryMetricNames {
+			return nil, promql.ErrTooManySamples("metric name matcher selects too many metrics; narrow the selector")
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// discoverRawMetricNames reads the distinct stored metric names without scanning
+// samples.
+func (q *doctorPromQuerier) discoverRawMetricNames(ctx context.Context, from, to time.Time) ([]string, error) {
+	names := make([]string, 0)
+	seen := make(map[string]struct{})
+	scanned := 0
+	err := q.backend.StreamMetrics(ctx, q.tenant, segment.MetricQuery{
+		LabelMatchers: []segment.MetricLabelMatcher{{
+			Name:  doctorMetricDiscoveryMatcherName,
+			Value: doctorMetricDiscoveryModeNames,
+			Type:  segment.MetricMatchEqual,
+		}},
+	}, from, to, func(record segment.MetricPointRecord) error {
+		scanned++
+		if scanned > maxDiscoveryScannedRecords {
+			return errDiscoveryScanLimit
+		}
+		name := strings.TrimSpace(record.MetricName)
+		if name == "" {
+			return nil
+		}
+		if _, ok := seen[name]; ok {
+			return nil
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+		return nil
+	})
+	if err != nil && !errors.Is(err, errDiscoveryScanLimit) {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// translateMetricLoadError converts the internal budget error into the Prometheus
+// sample-limit error so callers return HTTP 422 instead of a 500.
+func translateMetricLoadError(err error) error {
+	if errors.Is(err, errMetricQueryTooBroad) {
+		return promql.ErrTooManySamples("metric query matches too many samples; narrow the time range or add a metric name")
+	}
+	return err
+}
+
+// matcherCacheKey identifies a query by its label matchers. Unlike the previous
+// metric-query key it includes `__name__` matchers, which now select different
+// exact metric names.
+func matcherCacheKey(matchers []*promlabels.Matcher) string {
+	parts := make([]string, 0, len(matchers))
+	for _, matcher := range matchers {
+		if matcher == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s\x01%d\x01%s", matcher.Name, matcher.Type, matcher.Value))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\x00")
+}
+
+func exactServiceMatcher(matchers []*promlabels.Matcher) string {
+	for _, matcher := range matchers {
+		if matcher != nil && matcher.Name == "service" && matcher.Type == promlabels.MatchEqual {
+			return matcher.Value
+		}
+	}
+	return ""
 }
 
 func (q *doctorPromQuerier) resolveRawMetricNames(ctx context.Context, requestedMetricName string) ([]string, error) {
@@ -310,28 +634,9 @@ func (q *doctorPromQuerier) resolveRawMetricNames(ctx context.Context, requested
 	return out, nil
 }
 
-func buildDoctorPromIndex(points []segment.MetricPointRecord) *doctorPromIndex {
-	builders := make(map[string]*promql.Series)
-	labelsByKey := make(map[string]promlabels.Labels)
-	for _, point := range points {
-		if !point.HasValue || point.MetricName == "" || point.Timestamp.IsZero() {
-			continue
-		}
-
-		labelSet := metricPointLabels(point)
-		key := string(labelSet.Bytes(nil))
-		series := builders[key]
-		if series == nil {
-			series = &promql.Series{Metric: labelSet.Copy()}
-			builders[key] = series
-			labelsByKey[key] = labelSet.Copy()
-		}
-		series.Floats = append(series.Floats, promql.FPoint{
-			T: point.Timestamp.UTC().UnixMilli(),
-			F: point.Value,
-		})
-	}
-
+// finalizeDoctorPromIndex turns the streamed series builders into the sorted
+// index the querier serves.
+func finalizeDoctorPromIndex(builders map[string]*promql.Series, labelsByKey map[string]promlabels.Labels) *doctorPromIndex {
 	seriesList := make([]doctorPromSeries, 0, len(builders))
 	for key, built := range builders {
 		if len(built.Floats) == 0 {
@@ -354,23 +659,26 @@ func buildDoctorPromIndex(points []segment.MetricPointRecord) *doctorPromIndex {
 	return &doctorPromIndex{series: seriesList}
 }
 
+func emptyDoctorPromIndex() *doctorPromIndex {
+	return &doctorPromIndex{series: []doctorPromSeries{}}
+}
+
+// metricQueryFromMatchers builds the storage-level query for streaming.
+//
+// Only `service` is pushed down: the store keys its metric labels by their raw
+// (dotted) names, while the Prometheus vocabulary this API exposes is
+// normalized, so pushing a normalized label matcher (`guardian_partition`) would
+// match nothing in the store. Labels are instead applied in Select against the
+// normalized series labels. `__name__` matchers are handled separately by
+// resolveStorageMetricNames so they can expand to exact stored names.
 func metricQueryFromMatchers(matchers []*promlabels.Matcher) segment.MetricQuery {
 	query := segment.MetricQuery{}
 	for _, matcher := range matchers {
 		if matcher == nil {
 			continue
 		}
-		switch {
-		case matcher.Name == promlabels.MetricName:
-			continue
-		case matcher.Name == "service" && matcher.Type == promlabels.MatchEqual && query.Service == "":
+		if matcher.Name == "service" && matcher.Type == promlabels.MatchEqual && query.Service == "" {
 			query.Service = matcher.Value
-		default:
-			query.LabelMatchers = append(query.LabelMatchers, segment.MetricLabelMatcher{
-				Name:  matcher.Name,
-				Value: matcher.Value,
-				Type:  metricMatchTypeFromProm(matcher.Type),
-			})
 		}
 	}
 	return query
@@ -386,46 +694,6 @@ func exactPromMetricNameMatcher(matchers []*promlabels.Matcher) string {
 		}
 	}
 	return ""
-}
-
-func metricMatchTypeFromProm(matchType promlabels.MatchType) segment.MetricMatchType {
-	switch matchType {
-	case promlabels.MatchNotEqual:
-		return segment.MetricMatchNotEqual
-	case promlabels.MatchRegexp:
-		return segment.MetricMatchRegexp
-	case promlabels.MatchNotRegexp:
-		return segment.MetricMatchNotRegexp
-	default:
-		return segment.MetricMatchEqual
-	}
-}
-
-func metricQueryCacheKey(query segment.MetricQuery, requestedMetricName string) (string, error) {
-	normalized := struct {
-		MetricQuery         segment.MetricQuery `json:"metricQuery"`
-		RequestedMetricName string              `json:"requestedMetricName,omitempty"`
-	}{
-		MetricQuery:         query,
-		RequestedMetricName: requestedMetricName,
-	}
-	if len(normalized.MetricQuery.LabelMatchers) > 0 {
-		normalized.MetricQuery.LabelMatchers = append([]segment.MetricLabelMatcher(nil), normalized.MetricQuery.LabelMatchers...)
-		sort.Slice(normalized.MetricQuery.LabelMatchers, func(i, j int) bool {
-			if normalized.MetricQuery.LabelMatchers[i].Name != normalized.MetricQuery.LabelMatchers[j].Name {
-				return normalized.MetricQuery.LabelMatchers[i].Name < normalized.MetricQuery.LabelMatchers[j].Name
-			}
-			if normalized.MetricQuery.LabelMatchers[i].Type != normalized.MetricQuery.LabelMatchers[j].Type {
-				return normalized.MetricQuery.LabelMatchers[i].Type < normalized.MetricQuery.LabelMatchers[j].Type
-			}
-			return normalized.MetricQuery.LabelMatchers[i].Value < normalized.MetricQuery.LabelMatchers[j].Value
-		})
-	}
-	b, err := json.Marshal(normalized)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
 }
 
 func dedupePromFloatPoints(points []promql.FPoint) []promql.FPoint {
@@ -446,6 +714,11 @@ func dedupePromFloatPoints(points []promql.FPoint) []promql.FPoint {
 
 func metricPointLabels(point segment.MetricPointRecord) promlabels.Labels {
 	attrs := mergeStringMaps(point.ResourceAttributes, point.Attributes)
+	for key := range attrs {
+		if segment.IsUnboundedMetricLabel(key) {
+			delete(attrs, key)
+		}
+	}
 	values := canonicalLabels(point.Service, point.Tenant, point.Partition, point.Intent, point.Asset, attrs)
 	values[promlabels.MetricName] = normalizePrometheusMetricName(point.MetricName)
 	return promlabels.FromMap(values)
@@ -565,9 +838,20 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 		localData = data
 	}
 
+	awsQuery := forwarded
+	queryAWS := mode != awsQueryNone && s.awsReady()
+	if !queryAWS && mode == awsQueryNone && s.awsReady() && prometheusResultEmpty(localData) {
+		// Transparent fallback: a selector that resolved no local series may
+		// name a CloudWatch metric surfaced by metric-name discovery. Forward it
+		// verbatim so browsing AWS metrics in Grafana works without an explicit
+		// `source="aws"` matcher.
+		awsQuery = queryString
+		queryAWS = true
+	}
+
 	var awsData map[string]any
-	if mode != awsQueryNone && s.aws != nil && s.aws.Enabled() {
-		if resp, awsErr := s.aws.PrometheusQuery(r.Context(), forwarded, evaluationTime); awsErr == nil {
+	if queryAWS {
+		if resp, awsErr := s.aws.PrometheusQuery(r.Context(), awsQuery, evaluationTime); awsErr == nil {
 			awsData = extractPrometheusData(resp)
 		}
 	}
@@ -623,9 +907,18 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 		localData = data
 	}
 
+	awsQuery := forwarded
+	queryAWS := mode != awsQueryNone && s.awsReady()
+	if !queryAWS && mode == awsQueryNone && s.awsReady() && prometheusResultEmpty(localData) {
+		// See handlePrometheusQuery: fall back to CloudWatch when a selector
+		// resolves no local series so discovered AWS metrics remain queryable.
+		awsQuery = queryString
+		queryAWS = true
+	}
+
 	var awsData map[string]any
-	if mode != awsQueryNone && s.aws != nil && s.aws.Enabled() {
-		if resp, awsErr := s.aws.PrometheusQueryRange(r.Context(), forwarded, start, end, step); awsErr == nil {
+	if queryAWS {
+		if resp, awsErr := s.aws.PrometheusQueryRange(r.Context(), awsQuery, start, end, step); awsErr == nil {
 			awsData = extractPrometheusData(resp)
 		}
 	}
@@ -656,9 +949,10 @@ func isHighCardinalityCumulativeRangeQuery(queryString string) bool {
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
+	awsEnabled := s.awsReady()
 
 	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
-	if selErr != nil && !hasAWS {
+	if selErr != nil && !hasAWS && !awsEnabled {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", selErr.Error())
 		return
 	}
@@ -666,7 +960,7 @@ func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request)
 	names := make(map[string]struct{})
 	if selErr == nil {
 		querier, err := s.discoveryPrometheusQuerier(r)
-		if err != nil && !hasAWS {
+		if err != nil && !hasAWS && !awsEnabled {
 			writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
 			return
 		}
@@ -696,13 +990,16 @@ func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if hasAWS && len(selectorSets) > 0 && s.aws != nil && s.aws.Enabled() {
+	if awsEnabled {
 		start, end := prometheusDiscoveryRange(r)
 		if resp, awsErr := s.aws.PrometheusLabels(r.Context(), forwardedMatches, start, end); awsErr == nil {
-			for _, value := range prometheusDataStrings(extractPrometheusData(resp)) {
+			for _, value := range extractPrometheusStringList(resp) {
 				names[value] = struct{}{}
 			}
 		}
+		// `source` is a Doctor-injected label, so CloudWatch cannot report it:
+		// always surface the federated partition value when AWS is enabled.
+		names[labelSource] = struct{}{}
 	}
 
 	writePrometheusSuccess(w, sortedStrings(names))
@@ -727,17 +1024,24 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
+	awsEnabled := s.awsReady()
 
 	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
-	if selErr != nil && !hasAWS {
+	if selErr != nil && !hasAWS && !awsEnabled {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", selErr.Error())
 		return
 	}
 
 	values := make(map[string]struct{})
+	if labelName == labelSource {
+		values[sourceDoctor] = struct{}{}
+		if awsEnabled {
+			values[awsSourceLabel] = struct{}{}
+		}
+	}
 	if selErr == nil {
 		querier, err := s.discoveryPrometheusQuerier(r)
-		if err != nil && !hasAWS {
+		if err != nil && !hasAWS && !awsEnabled {
 			writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
 			return
 		}
@@ -767,11 +1071,28 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	if hasAWS && len(selectorSets) > 0 && s.aws != nil && s.aws.Enabled() {
+	if awsEnabled {
 		start, end := prometheusDiscoveryRange(r)
 		if resp, awsErr := s.aws.PrometheusLabelValues(r.Context(), labelName, forwardedMatches, start, end); awsErr == nil {
-			for _, value := range prometheusDataStrings(extractPrometheusData(resp)) {
+			for _, value := range extractPrometheusStringList(resp) {
 				values[value] = struct{}{}
+			}
+		}
+		if labelName == promlabels.MetricName {
+			// CloudWatch's PromQL API has no label-values route, so fall back to
+			// ListMetrics to populate the Grafana metric-name browser.
+			for _, name := range s.awsMetricNames(r.Context()) {
+				values[name] = struct{}{}
+			}
+		} else if len(forwardedMatches) > 0 {
+			// Derive label values from series when a metric selector is
+			// available; CloudWatch's /series requires a __name__ matcher.
+			if resp, seriesErr := s.aws.PrometheusSeries(r.Context(), forwardedMatches, start, end); seriesErr == nil {
+				for _, labels := range extractPrometheusSeries(resp) {
+					if value := labels[labelName]; value != "" {
+						values[value] = struct{}{}
+					}
+				}
 			}
 		}
 	}
@@ -786,8 +1107,9 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	hasAWS, forwardedMatches := awsMatches(matchValues)
+	awsEnabled := s.awsReady()
 	selectorSets, err := parsePrometheusSelectorSets(matchValues)
-	if err != nil && !hasAWS {
+	if err != nil && !hasAWS && !awsEnabled {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
@@ -795,34 +1117,34 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 	seen := make(map[string]map[string]string)
 	if err == nil {
 		querier, queryErr := s.discoveryPrometheusQuerier(r)
-		if queryErr != nil && !hasAWS {
+		if queryErr != nil && !hasAWS && !awsEnabled {
 			writePrometheusError(w, http.StatusBadRequest, "bad_data", queryErr.Error())
 			return
 		}
 		if queryErr == nil {
 			defer func() { _ = querier.Close() }()
+			doctorQuerier, ok := querier.(*doctorPromQuerier)
+			if !ok {
+				writePrometheusError(w, http.StatusInternalServerError, "internal", "unexpected querier type")
+				return
+			}
 			for _, selectorSet := range selectorSets {
-				seriesSet := querier.Select(r.Context(), true, nil, selectorSet...)
-				for seriesSet.Next() {
-					series := seriesSet.At()
-					if series == nil {
-						continue
-					}
-					labelSet := series.Labels()
-					seen[string(labelSet.Bytes(nil))] = promLabelsToMap(labelSet)
-				}
-				if seriesErr := seriesSet.Err(); seriesErr != nil && !hasAWS {
+				labelMaps, seriesErr := doctorQuerier.seriesLabelMaps(r.Context(), selectorSet)
+				if seriesErr != nil && !hasAWS && !awsEnabled {
 					writePrometheusError(w, http.StatusInternalServerError, "internal", seriesErr.Error())
 					return
+				}
+				for _, labels := range labelMaps {
+					seen[metricLabelMapString(labels)] = labels
 				}
 			}
 		}
 	}
 
-	if hasAWS && s.aws != nil && s.aws.Enabled() {
+	if awsEnabled {
 		start, end := prometheusDiscoveryRange(r)
 		if resp, awsErr := s.aws.PrometheusSeries(r.Context(), forwardedMatches, start, end); awsErr == nil {
-			for _, labels := range prometheusDataLabelMaps(extractPrometheusData(resp)) {
+			for _, labels := range extractPrometheusSeries(resp) {
 				seen[metricLabelMapString(labels)] = labels
 			}
 		}
@@ -839,21 +1161,23 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Request) {
-	querier, err := s.discoveryPrometheusQuerier(r)
-	if err != nil {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
-		return
+	metricNames := make(map[string]struct{})
+	if querier, err := s.discoveryPrometheusQuerier(r); err == nil {
+		names, _, labelErr := querier.LabelValues(r.Context(), promlabels.MetricName, nil)
+		_ = querier.Close()
+		if labelErr == nil {
+			for _, name := range names {
+				metricNames[name] = struct{}{}
+			}
+		}
 	}
-	defer func() { _ = querier.Close() }()
 
-	metricNames, _, err := querier.LabelValues(r.Context(), promlabels.MetricName, nil)
-	if err != nil {
-		writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
+	for _, name := range s.awsMetricNames(r.Context()) {
+		metricNames[name] = struct{}{}
 	}
 
 	metadata := make(map[string][]map[string]string, len(metricNames))
-	for _, metricName := range metricNames {
+	for metricName := range metricNames {
 		metadata[metricName] = []map[string]string{{
 			"type": "untyped",
 			"help": "",
@@ -878,7 +1202,20 @@ func (s *Service) discoveryPrometheusQuerier(r *http.Request) (promstorage.Queri
 	if err != nil {
 		return nil, err
 	}
+	start, end = clampDiscoveryWindow(start, end)
 	return doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r)}.Querier(start.UnixMilli(), end.UnixMilli())
+}
+
+// clampDiscoveryWindow bounds a discovery time range to doctorDiscoveryScanWindow
+// so label/series lookups never scan an unbounded number of samples.
+func clampDiscoveryWindow(start, end time.Time) (time.Time, time.Time) {
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	if start.IsZero() || end.Sub(start) > doctorDiscoveryScanWindow {
+		start = end.Add(-doctorDiscoveryScanWindow)
+	}
+	return start, end
 }
 
 // prometheusDiscoveryRange parses start/end for discovery endpoints, defaulting
@@ -893,7 +1230,7 @@ func prometheusDiscoveryRange(r *http.Request) (time.Time, time.Time) {
 	if err != nil {
 		start = end.Add(-doctorDiscoveryWindow)
 	}
-	return start, end
+	return clampDiscoveryWindow(start, end)
 }
 
 func newDoctorPrometheusEngine() *promql.Engine {
@@ -920,9 +1257,13 @@ func newDoctorPrometheusEngine() *promql.Engine {
 }
 
 func marshalPrometheusValue(value promparser.Value) (map[string]any, error) {
+	// Keep every result as a []any: the AWS federation merge and emptiness
+	// checks type-assert data["result"].([]any), and JSON-decoded CloudWatch
+	// responses are []any as well. Returning a concrete []map[string]any here
+	// made local series look empty to those helpers.
 	switch typed := value.(type) {
 	case promql.Vector:
-		result := make([]map[string]any, 0, len(typed))
+		result := make([]any, 0, len(typed))
 		for _, sample := range typed {
 			entry := map[string]any{
 				"metric": promLabelsToMap(sample.Metric),
@@ -935,7 +1276,7 @@ func marshalPrometheusValue(value promparser.Value) (map[string]any, error) {
 		}
 		return map[string]any{"resultType": "vector", "result": result}, nil
 	case promql.Matrix:
-		result := make([]map[string]any, 0, len(typed))
+		result := make([]any, 0, len(typed))
 		for _, series := range typed {
 			values := make([][]any, 0, len(series.Floats))
 			for _, point := range series.Floats {
@@ -1093,13 +1434,16 @@ func writePrometheusError(w http.ResponseWriter, statusCode int, errorType, mess
 }
 
 func writePrometheusExecutionError(w http.ResponseWriter, err error) {
+	var tooManySamples promql.ErrTooManySamples
+	if errors.As(err, &tooManySamples) {
+		writePrometheusError(w, http.StatusUnprocessableEntity, "execution", "query matches too many samples; narrow the time range or add a metric name")
+		return
+	}
 	switch err.(type) {
 	case promql.ErrQueryTimeout:
 		writePrometheusError(w, http.StatusServiceUnavailable, "timeout", err.Error())
 	case promql.ErrQueryCanceled:
 		writePrometheusError(w, http.StatusServiceUnavailable, "canceled", err.Error())
-	case promql.ErrTooManySamples:
-		writePrometheusError(w, http.StatusUnprocessableEntity, "execution", err.Error())
 	default:
 		writePrometheusError(w, http.StatusUnprocessableEntity, "execution", err.Error())
 	}

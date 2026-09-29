@@ -344,6 +344,16 @@ func (s *Service) handleZipkinSpans(w http.ResponseWriter, r *http.Request) {
 			names[span.Name] = struct{}{}
 		}
 	}
+	// X-Ray trace summaries do not expose per-segment operation names, so expose
+	// the service name itself as the operation. This lets Grafana's Zipkin
+	// datasource populate the span-name dropdown for federated AWS services and
+	// then query /api/v2/traces for them.
+	for _, service := range s.awsServices(r.Context()) {
+		if service == serviceName {
+			names[serviceName] = struct{}{}
+			break
+		}
+	}
 
 	out := make([]string, 0, len(names))
 	for name := range names {

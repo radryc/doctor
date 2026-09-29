@@ -40,6 +40,8 @@ type LogRecord struct {
 	LogStream string            `json:"log_stream,omitempty"`
 	Message   string            `json:"message"`
 	Fields    map[string]string `json:"fields,omitempty"`
+	Region    string            `json:"region,omitempty"`
+	Account   string            `json:"account,omitempty"`
 }
 
 // Span mirrors awsread.Span.
@@ -53,6 +55,8 @@ type Span struct {
 	EndTime      time.Time         `json:"end_time"`
 	StatusCode   string            `json:"status_code,omitempty"`
 	Attributes   map[string]string `json:"attributes,omitempty"`
+	Region       string            `json:"region,omitempty"`
+	Account      string            `json:"account,omitempty"`
 }
 
 // TraceSummary mirrors awsread.TraceSummary.
@@ -65,6 +69,23 @@ type TraceSummary struct {
 	Status     string            `json:"status,omitempty"`
 	SpanCount  int               `json:"span_count,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
+	Region     string            `json:"region,omitempty"`
+	Account    string            `json:"account,omitempty"`
+}
+
+// ServiceInfo mirrors awsread.ServiceInfo.
+type ServiceInfo struct {
+	Name    string `json:"name"`
+	Region  string `json:"region,omitempty"`
+	Account string `json:"account,omitempty"`
+}
+
+// MetricDescriptor mirrors awsread.MetricDescriptor.
+type MetricDescriptor struct {
+	Namespace  string   `json:"namespace"`
+	MetricName string   `json:"metric_name"`
+	Dimensions []string `json:"dimensions,omitempty"`
+	Region     string   `json:"region,omitempty"`
 }
 
 // MetricQuery selects a CloudWatch metric series.
@@ -118,10 +139,42 @@ func (c *Client) Enabled() bool {
 	return c != nil && c.baseURL != ""
 }
 
-// ListServices returns X-Ray service names.
-func (c *Client) ListServices(ctx context.Context) ([]string, error) {
-	var out []string
-	if err := c.get(ctx, "/v1/aws/xray/services", nil, &out); err != nil {
+// ListServices returns X-Ray services with their AWS partition metadata. It
+// accepts both the object form (`[{"name":"api",...}]`) and the legacy string
+// form (`["api"]`) so doctor and the pusher can be rolled independently.
+func (c *Client) ListServices(ctx context.Context) ([]ServiceInfo, error) {
+	var raw json.RawMessage
+	if err := c.get(ctx, "/v1/aws/xray/services", nil, &raw); err != nil {
+		return nil, err
+	}
+	var infos []ServiceInfo
+	if err := json.Unmarshal(raw, &infos); err == nil {
+		return infos, nil
+	}
+	var names []string
+	if err := json.Unmarshal(raw, &names); err != nil {
+		return nil, fmt.Errorf("decode aws xray services: %w", err)
+	}
+	out := make([]ServiceInfo, 0, len(names))
+	for _, name := range names {
+		out = append(out, ServiceInfo{Name: name})
+	}
+	return out, nil
+}
+
+// ListMetrics discovers CloudWatch metrics, optionally filtered by namespace and
+// metric name. CloudWatch's PromQL API does not implement the label-values
+// route, so metric-name discovery for Grafana uses this REST endpoint instead.
+func (c *Client) ListMetrics(ctx context.Context, namespace, metric string) ([]MetricDescriptor, error) {
+	params := url.Values{}
+	if namespace != "" {
+		params.Set("namespace", namespace)
+	}
+	if metric != "" {
+		params.Set("metric", metric)
+	}
+	var out []MetricDescriptor
+	if err := c.get(ctx, "/v1/aws/metrics", params, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

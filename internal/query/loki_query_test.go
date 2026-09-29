@@ -181,3 +181,35 @@ func TestLokiCountOverTimeInstantReturnsVector(t *testing.T) {
 		t.Fatalf("instant result = %#v", resp.Data.Result)
 	}
 }
+
+func TestLokiDropKeepStageArgumentsAreConsumed(t *testing.T) {
+	cases := []string{
+		`{service="guardian"} | logfmt | json | drop __error__`,
+		`{service="guardian"} | logfmt | json | drop __error__ | trace_id="abc"`,
+		`{service="guardian"} | keep level | drop __error__`,
+		`sum(count_over_time({service="guardian"} | json | drop __error__ [5m]))`,
+		`{service="guardian"} | drop foo, bar`,
+	}
+	for _, query := range cases {
+		if _, err := parseLokiPlan(query); err != nil {
+			t.Errorf("parseLokiPlan(%q) returned error: %v", query, err)
+		}
+	}
+}
+
+// Grafana's trace-to-logs link builds pipelines ending in `| drop __error__`.
+// This is the shape that broke the log volume query with
+// `unsupported query fragment "__error__"`.
+func TestLokiGrafanaTraceToLogsPipelineParses(t *testing.T) {
+	query := `{service="guardian"} | logfmt | json | drop __error__ | trace_id="7946b05c2e2e4e5a" | span_id="6605c7b08e715d6c"`
+	plan, err := parseLokiPlan(query)
+	if err != nil {
+		t.Fatalf("parseLokiPlan(%q) returned error: %v", query, err)
+	}
+	if !plan.hasLogfmt || !plan.hasJSON {
+		t.Fatalf("expected logfmt and json stages to be recorded, got %+v", plan)
+	}
+	if len(plan.labelFilters) != 2 {
+		t.Fatalf("label filters = %d, want 2 (%+v)", len(plan.labelFilters), plan.labelFilters)
+	}
+}

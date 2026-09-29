@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,10 +14,52 @@ import (
 // awsSourceLabel marks federated CloudWatch/X-Ray records.
 const awsSourceLabel = "aws"
 
+const (
+	// attrAWSRegion / attrAWSAccount expose the AWS partition an X-Ray/CloudWatch
+	// record came from. awsPartitionLabel is the canonical, filterable partition
+	// shared with native telemetry.
+	attrAWSRegion     = "aws_region"
+	attrAWSAccount    = "aws_account"
+	awsPartitionLabel = labelPartition
+)
+
+// awsReady reports whether the AWS federation backend is configured and enabled.
+func (s *Service) awsReady() bool {
+	return s.aws != nil && s.aws.Enabled()
+}
+
+// awsPartition derives a partition identifier from an AWS region and account so
+// federated records can be grouped in the same partition filters as native
+// telemetry. Region is preferred because it is always present.
+func awsPartition(region, account string) string {
+	switch {
+	case region != "":
+		return region
+	case account != "":
+		return account
+	default:
+		return awsSourceLabel
+	}
+}
+
+// applyAWSPartition adds the AWS partition and region/account labels to attrs.
+func applyAWSPartition(attrs map[string]string, region, account string) {
+	if region != "" {
+		attrs[attrAWSRegion] = region
+	}
+	if account != "" {
+		attrs[attrAWSAccount] = account
+	}
+	if partition := awsPartition(region, account); partition != "" {
+		attrs[awsPartitionLabel] = partition
+	}
+}
+
 // awsBackend is the read surface Doctor federates from guardian-pusher-aws.
 type awsBackend interface {
 	Enabled() bool
-	ListServices(ctx context.Context) ([]string, error)
+	ListMetrics(ctx context.Context, namespace, metric string) ([]awsstore.MetricDescriptor, error)
+	ListServices(ctx context.Context) ([]awsstore.ServiceInfo, error)
 	QueryLogs(ctx context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error)
 	QueryTraces(ctx context.Context, q awsstore.TraceQuery) ([]awsstore.TraceSummary, error)
 	GetTrace(ctx context.Context, traceID string) ([]awsstore.Span, error)
@@ -55,7 +98,7 @@ func (s *Service) queryAWSLogsForLoki(ctx context.Context, tenant string, plan l
 		return nil
 	}
 
-	insights := "fields @timestamp, @message, @log_stream, @log_group"
+	insights := "fields @timestamp, @message, @logStream, @log"
 	conditions := make([]string, 0, len(plan.lineFilters))
 	for _, filter := range plan.lineFilters {
 		switch filter.op {
@@ -97,9 +140,11 @@ func (s *Service) queryAWSLogsForLoki(ctx context.Context, tenant string, plan l
 		for key, value := range record.Fields {
 			attributes[key] = value
 		}
+		applyAWSPartition(attributes, record.Region, record.Account)
 		out = append(out, segment.LogRecord{
 			Tenant:     tenant,
 			Service:    firstNonEmpty(record.Fields["service"], record.Fields["service_name"], awsSourceLabel),
+			Partition:  record.Region,
 			Timestamp:  record.Timestamp,
 			Body:       record.Message,
 			Attributes: attributes,
@@ -108,9 +153,34 @@ func (s *Service) queryAWSLogsForLoki(ctx context.Context, tenant string, plan l
 	return out
 }
 
-// awsServices returns X-Ray service names.
-func (s *Service) awsServices(ctx context.Context) []string {
-	if s.aws == nil || !s.aws.Enabled() {
+// awsMetricNames returns discovered CloudWatch metric names. It uses the REST
+// ListMetrics endpoint because CloudWatch's PromQL API does not implement the
+// Prometheus label-values route used by Grafana's metric browser.
+func (s *Service) awsMetricNames(ctx context.Context) []string {
+	if !s.awsReady() {
+		return nil
+	}
+	metrics, err := s.aws.ListMetrics(ctx, "", "")
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(metrics))
+	for _, metric := range metrics {
+		if name := strings.TrimSpace(metric.MetricName); name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// awsServiceInfos returns X-Ray services with their AWS partition metadata.
+func (s *Service) awsServiceInfos(ctx context.Context) []awsstore.ServiceInfo {
+	if !s.awsReady() {
 		return nil
 	}
 	services, err := s.aws.ListServices(ctx)
@@ -118,6 +188,22 @@ func (s *Service) awsServices(ctx context.Context) []string {
 		return nil
 	}
 	return services
+}
+
+// awsServices returns X-Ray service names.
+func (s *Service) awsServices(ctx context.Context) []string {
+	seen := make(map[string]struct{})
+	for _, service := range s.awsServiceInfos(ctx) {
+		if service.Name != "" {
+			seen[service.Name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // awsZipkinTraces converts X-Ray trace summaries into single-span trace groups.
@@ -141,6 +227,11 @@ func (s *Service) awsZipkinTraces(ctx context.Context, service string, from, to 
 		if duration < 0 {
 			duration = 0
 		}
+		tags := map[string]string{
+			labelSource: awsSourceLabel,
+			"status":    summary.Status,
+		}
+		applyAWSPartition(tags, summary.Region, summary.Account)
 		out = append(out, []zipkinSpan{{
 			TraceID:       summary.TraceID,
 			ID:            summary.TraceID,
@@ -149,10 +240,7 @@ func (s *Service) awsZipkinTraces(ctx context.Context, service string, from, to 
 			Timestamp:     summary.StartTime.UTC().UnixMicro(),
 			Duration:      duration,
 			LocalEndpoint: zipkinEndpoint{ServiceName: serviceName},
-			Tags: map[string]string{
-				labelSource: awsSourceLabel,
-				"status":    summary.Status,
-			},
+			Tags:          tags,
 		}})
 	}
 	return out
@@ -181,6 +269,7 @@ func (s *Service) awsZipkinTraceByID(ctx context.Context, traceID string) ([]zip
 			tags[key] = value
 		}
 		tags[labelSource] = awsSourceLabel
+		applyAWSPartition(tags, span.Region, span.Account)
 		out = append(out, zipkinSpan{
 			TraceID:       span.TraceID,
 			ID:            span.SpanID,

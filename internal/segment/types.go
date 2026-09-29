@@ -79,6 +79,37 @@ type MetricPointRecord struct {
 	Raw                json.RawMessage   `json:"raw,omitempty"`
 }
 
+// unboundedMetricLabels are per-record correlation identifiers. They must never
+// become metric series labels: every sample would form its own series, which
+// explodes cardinality and makes label/series discovery impossible to serve.
+// Trace correlation belongs on the record's typed TraceID/SpanID fields (and
+// exemplars), not in the series identity.
+var unboundedMetricLabels = map[string]struct{}{
+	"trace_id":   {},
+	"span_id":    {},
+	"task_id":    {},
+	"log_id":     {},
+	"request_id": {},
+
+	// Guardian correlation identifiers are per-execution identifiers. As metric
+	// series labels they explode cardinality (one series per task) and make
+	// broad queries load hundreds of MB, so they are excluded from series
+	// identity. Both the raw dotted form and the normalized form are listed.
+	"guardian.task.id":             {},
+	"guardian.task.correlation_id": {},
+	"guardian.task.correlation.id": {},
+	"guardian_task_id":             {},
+	"guardian_task_correlation_id": {},
+	"guardian_correlation_id":      {},
+}
+
+// IsUnboundedMetricLabel reports whether name identifies a per-record value that
+// must be excluded from metric series labels.
+func IsUnboundedMetricLabel(name string) bool {
+	_, ok := unboundedMetricLabels[name]
+	return ok
+}
+
 type MetricMatchType string
 
 const (

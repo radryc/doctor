@@ -203,6 +203,7 @@ every record through one shared label vocabulary so Grafana can correlate signal
 | `k8s_namespace_name`, `k8s_pod_name`, `k8s_container_name`, `k8s_node_name` | resource attributes |
 | `trace_id`, `span_id` | OTLP correlation IDs (metrics via exemplars, logs/traces direct) |
 | `source` | `doctor` for native telemetry, `aws` for federated CloudWatch/X-Ray data |
+| `aws_region`, `aws_account` | AWS partition of federated CloudWatch/X-Ray records; `guardian_partition` falls back to the region |
 
 Loki exposes a curated subset of these as stream labels (`trace_id`, `span_id`, identity,
 `level`, and Kubernetes names) to keep stream cardinality bounded; metrics and traces carry
@@ -259,6 +260,15 @@ sum(rate({CPUUtilization, "@instrumentation.@name"="cloudwatch.aws/ec2", source=
 
 Local and CloudWatch series are merged into one result set, with CloudWatch
 series tagged `source="aws"`.
+
+Metric/log/trace discovery (`/api/v1/label/__name__/values`, `/api/v1/labels`,
+`/api/v1/series`, `/api/v1/metadata`, `/v1/logs/services`,
+`/v1/services/discover` and the Zipkin service list) always unions the AWS
+federation when `DOCTOR_AWS_ENABLED=true`, so CloudWatch metrics and X-Ray
+services are browsable without first knowing `source="aws"`. A PromQL query that
+matches no local series is transparently retried against CloudWatch, and
+federated records carry `aws_region`/`aws_account` with `guardian_partition` set
+to the region.
 
 ## AWS federation verification
 

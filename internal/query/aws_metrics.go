@@ -88,6 +88,73 @@ func extractPrometheusData(response map[string]any) map[string]any {
 	return data
 }
 
+// extractPrometheusStringList decodes label/label-value discovery responses.
+// Prometheus returns these as a bare JSON array under "data"
+// (`{"status":"success","data":["a","b"]}`), but some backends wrap the array
+// in an object with a "result" field, so both shapes are accepted.
+func extractPrometheusStringList(response map[string]any) []string {
+	if response == nil {
+		return nil
+	}
+	out := make([]string, 0)
+	appendValue := func(value any) {
+		if str, ok := value.(string); ok {
+			out = append(out, str)
+		}
+	}
+	switch data := response["data"].(type) {
+	case []any:
+		for _, value := range data {
+			appendValue(value)
+		}
+	case map[string]any:
+		if result, ok := data["result"].([]any); ok {
+			for _, value := range result {
+				appendValue(value)
+			}
+		}
+	}
+	return out
+}
+
+// extractPrometheusSeries decodes a series-discovery response, accepting both
+// the Prometheus array-of-label-maps shape and a wrapped "result" object.
+func extractPrometheusSeries(response map[string]any) []map[string]string {
+	if response == nil {
+		return nil
+	}
+	out := make([]map[string]string, 0)
+	appendSeries := func(item any) {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return
+		}
+		labels := make(map[string]string, len(m)+1)
+		for key, raw := range m {
+			if str, ok := raw.(string); ok {
+				labels[key] = str
+			}
+		}
+		if _, exists := labels[labelSource]; !exists {
+			labels[labelSource] = awsSourceLabel
+		}
+		out = append(out, labels)
+	}
+	switch data := response["data"].(type) {
+	case []any:
+		for _, item := range data {
+			appendSeries(item)
+		}
+	case map[string]any:
+		if result, ok := data["result"].([]any); ok {
+			for _, item := range result {
+				appendSeries(item)
+			}
+		}
+	}
+	return out
+}
+
 // mergePrometheusQueryData merges CloudWatch vector/matrix data into the local
 // result, tagging AWS series with source="aws".
 func mergePrometheusQueryData(local, aws map[string]any, defaultType string) map[string]any {
@@ -105,8 +172,8 @@ func mergePrometheusQueryData(local, aws map[string]any, defaultType string) map
 	if localType != "" && awsType != "" && localType != awsType {
 		return local
 	}
-	localResult, _ := local["result"].([]any)
-	awsResult, _ := aws["result"].([]any)
+	localResult := prometheusResultSlice(local)
+	awsResult := prometheusResultSlice(aws)
 	for _, item := range awsResult {
 		localResult = append(localResult, tagPrometheusItem(item))
 	}
@@ -114,11 +181,37 @@ func mergePrometheusQueryData(local, aws map[string]any, defaultType string) map
 	return local
 }
 
+// prometheusResultSlice returns data["result"] as a []any regardless of whether
+// it was built in-process (concrete slices) or decoded from JSON ([]any).
+func prometheusResultSlice(data map[string]any) []any {
+	if data == nil {
+		return nil
+	}
+	switch result := data["result"].(type) {
+	case []any:
+		return result
+	case []map[string]any:
+		out := make([]any, 0, len(result))
+		for _, item := range result {
+			out = append(out, item)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// prometheusResultEmpty reports whether a Prometheus query result contains no
+// series. A nil result is treated as empty.
+func prometheusResultEmpty(data map[string]any) bool {
+	return len(prometheusResultSlice(data)) == 0
+}
+
 func tagPrometheusData(data map[string]any) map[string]any {
 	if data == nil {
 		return nil
 	}
-	if result, ok := data["result"].([]any); ok {
+	if result := prometheusResultSlice(data); result != nil {
 		tagged := make([]any, 0, len(result))
 		for _, item := range result {
 			tagged = append(tagged, tagPrometheusItem(item))
@@ -145,43 +238,6 @@ func tagPrometheusItem(item any) any {
 		m[labelSource] = awsSourceLabel
 	}
 	return m
-}
-
-func prometheusDataStrings(data map[string]any) []string {
-	if data == nil {
-		return nil
-	}
-	values, _ := data["result"].([]any)
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		if str, ok := value.(string); ok {
-			out = append(out, str)
-		}
-	}
-	return out
-}
-
-func prometheusDataLabelMaps(data map[string]any) []map[string]string {
-	if data == nil {
-		return nil
-	}
-	values, _ := data["result"].([]any)
-	out := make([]map[string]string, 0, len(values))
-	for _, value := range values {
-		m, ok := value.(map[string]any)
-		if !ok {
-			continue
-		}
-		labels := make(map[string]string, len(m)+1)
-		for key, raw := range m {
-			if str, ok := raw.(string); ok {
-				labels[key] = str
-			}
-		}
-		labels[labelSource] = awsSourceLabel
-		out = append(out, labels)
-	}
-	return out
 }
 
 // execPrometheusInstant runs an instant query against local storage. parseErr is

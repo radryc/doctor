@@ -200,6 +200,11 @@ func parseLokiStreamInto(plan *lokiPlan, expr string) error {
 					plan.hasLogfmt = true
 				case "json":
 					plan.hasJSON = true
+				case "drop", "keep":
+					// drop/keep take a label list (e.g. `| drop __error__`);
+					// consume the arguments so the next stage parses cleanly.
+					rest = skipLokiStageArguments(after)
+					continue
 				}
 				rest = after
 				continue
@@ -259,6 +264,18 @@ func readLokiIdentifier(input string) (string, string) {
 		}
 	}
 	return input, ""
+}
+
+// skipLokiStageArguments drops the remainder of a parser stage's arguments up
+// to the next pipeline stage. It is used for stages such as drop/keep whose
+// argument grammar Doctor does not need to interpret (the labels are already
+// present on the record), but whose arguments must be consumed so the following
+// `|` stage is not mistaken for a label filter or an unsupported fragment.
+func skipLokiStageArguments(input string) string {
+	if idx := strings.Index(input, "|"); idx >= 0 {
+		return input[idx:]
+	}
+	return ""
 }
 
 func findSelectorEnd(input string) (int, error) {

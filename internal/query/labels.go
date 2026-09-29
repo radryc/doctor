@@ -102,6 +102,8 @@ var lokiLabelAllowlist = map[string]struct{}{
 	"guardian_component": {},
 	"aws_log_group":      {},
 	"aws_log_stream":     {},
+	"aws_region":         {},
+	"aws_account":        {},
 }
 
 func filterLokiLabels(labels map[string]string) map[string]string {

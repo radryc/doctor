@@ -119,16 +119,24 @@ func TestTenantFromRequestPrefersHeader(t *testing.T) {
 	}
 }
 
-func TestHandlePrometheusQueryReturnsExemplars(t *testing.T) {
+// Per-record correlation identifiers must never become metric series labels:
+// each sample would form its own series and explode cardinality. This is the
+// regression guard for the dashboard OOM.
+func TestHandlePrometheusQueryExcludesCorrelationLabelsFromSeries(t *testing.T) {
 	base := time.Date(2026, 5, 12, 14, 0, 0, 0, time.UTC)
 	backend := &fakeLogEngineBackend{
 		metrics: []segment.MetricPointRecord{{
 			Service:    "api",
 			MetricName: "http_requests_total",
 			Timestamp:  base,
-			Attributes: map[string]string{"trace_id": "trace-123", "span_id": "span-1"},
-			HasValue:   true,
-			Value:      1,
+			Attributes: map[string]string{
+				"trace_id":         "trace-123",
+				"span_id":          "span-1",
+				"guardian_task_id": "task-1",
+				"route":            "/healthz",
+			},
+			HasValue: true,
+			Value:    1,
 		}},
 	}
 	svc := &Service{defaultTenant: "default", logEngine: backend}
@@ -148,9 +156,7 @@ func TestHandlePrometheusQueryReturnsExemplars(t *testing.T) {
 	var resp struct {
 		Data struct {
 			Result []struct {
-				Exemplars []struct {
-					Labels map[string]string `json:"labels"`
-				} `json:"exemplars"`
+				Metric map[string]string `json:"metric"`
 			} `json:"result"`
 		} `json:"data"`
 	}
@@ -160,10 +166,13 @@ func TestHandlePrometheusQueryReturnsExemplars(t *testing.T) {
 	if len(resp.Data.Result) != 1 {
 		t.Fatalf("result length = %d, want 1", len(resp.Data.Result))
 	}
-	if len(resp.Data.Result[0].Exemplars) != 1 {
-		t.Fatalf("exemplars length = %d, want 1", len(resp.Data.Result[0].Exemplars))
+	metric := resp.Data.Result[0].Metric
+	for _, label := range []string{"trace_id", "span_id", "guardian_task_id"} {
+		if _, ok := metric[label]; ok {
+			t.Fatalf("series unexpectedly exposes unbounded label %q: %v", label, metric)
+		}
 	}
-	if got := resp.Data.Result[0].Exemplars[0].Labels["trace_id"]; got != "trace-123" {
-		t.Fatalf("exemplar trace_id = %q, want trace-123", got)
+	if got := metric["route"]; got != "/healthz" {
+		t.Fatalf("bounded label route = %q, want /healthz", got)
 	}
 }
