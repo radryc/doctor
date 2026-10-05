@@ -451,6 +451,8 @@ func (r *Router) entryFor(backend Backend) upstreamEntry {
 		entry.upstreams.Metrics = NewPromHTTPUpstream(backend, nil)
 	case KindLoki:
 		entry.upstreams.Logs = NewLokiHTTPUpstream(backend, nil)
+	case KindTempo:
+		entry.upstreams.Traces = NewTempoHTTPUpstream(backend, nil)
 	}
 
 	r.mu.Lock()

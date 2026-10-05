@@ -1051,12 +1051,28 @@ and Loki labels still use the legacy local+AWS path until P3 adapters land),
 active health probes (health is currently derived from the circuit breaker),
 and trace fan-out (P2 replaces Zipkin with Tempo).
 
-### P2 — Tempo replaces Zipkin
+### P2 — Tempo replaces Zipkin — landed
 
-- `internal/tempo` handlers + conversion; remove Zipkin routes (compat flag).
-- Grafana datasource/dashboard migration in `stratatools`; update scripts.
-- **Acceptance:** Grafana Tempo datasource browses native MonoFS traces;
-  trace-by-ID and tag discovery work; verify scripts updated.
+- `internal/tempo` wire types and conversion from `segment.TraceRecord`
+  (batches grouped by service, canonical labels merged into span attributes by
+  the query adapter). Handlers: `/api/echo`, `/api/traces/{id}`, `/api/search`
+  (tag search and TraceQL), `/api/search/tags`, `/api/search/tag/{tag}/values`.
+- Zipkin routes and conversions removed entirely (no compat flag); native trace
+  APIs remain and continue to merge AWS.
+- Router trace fan-out: `SearchTraces`/`GetTrace`/`TraceTags`/`TraceTagValues`
+  with summary dedup, span-level dedup preferring local, `shard` labels on
+  cross-backend overlap, and TraceQL routed only to `TraceQLUpstream` backends
+  (400 when none are configured).
+- Tempo HTTP upstream adapter; local traces adapter with tag filtering,
+  duration filters, and canonical label search.
+- Grafana migration (`zipkin` → `tempo` datasource and panel query types) lands
+  as a separate commit in the `stratatools` repository; verify scripts updated.
+- **Acceptance:** Tempo handler tests cover trace-by-ID OTLP-JSON, search
+  summaries, tag discovery, AWS fallback, and TraceQL rejection without a Tempo
+  backend; router tests cover merge/shard/union.
+
+Deferred to P3: the local TraceQL subset matcher (TraceQL currently requires a
+Tempo backend).
 
 ### P3 — Tempo/Elasticsearch/BigQuery adapters + translation
 

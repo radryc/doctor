@@ -61,6 +61,7 @@ func newProxyTestRouter(t *testing.T, svc *Service) *proxy.Router {
 	}, proxy.Upstreams{
 		Metrics: svc.LocalMetricsUpstream(),
 		Logs:    svc.LocalLogsUpstream(),
+		Traces:  svc.LocalTracesUpstream(),
 	}); err != nil {
 		t.Fatalf("register local: %v", err)
 	}

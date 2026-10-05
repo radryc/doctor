@@ -44,12 +44,12 @@ if ! jq -e '.status == "success"' <<<"${metric_json}" >/dev/null; then
 fi
 echo "metric result count: $(jq '.data.result | length' <<<"${metric_json}")"
 
-services_url="${BASE_URL}/api/v2/services"
+services_url="${BASE_URL}/api/search/tag/service.name/values?tenant=$(enc "${TENANT}")"
 services_json="$(curl -fsS "${services_url}")"
-if ! jq -e 'length > 0' <<<"${services_json}" >/dev/null; then
-  fail "no Zipkin services returned (expected native and/or X-Ray services)"
+if ! jq -e '.tagValues | length > 0' <<<"${services_json}" >/dev/null; then
+  fail "no Tempo trace services returned (expected native and/or X-Ray services)"
 fi
-echo "zipkin services: $(jq -c '.' <<<"${services_json}")"
+echo "tempo trace services: $(jq -c '.tagValues' <<<"${services_json}")"
 
 if [[ "${series_count}" -le 0 ]]; then
   echo "aws federation: WARN - no AWS metric series matched; check the namespace/metric and IAM permissions"

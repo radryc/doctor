@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/rydzu/ainfra/doctor/internal/tempo"
 )
 
 func TestCanonicalLabelsUnifySignals(t *testing.T) {
@@ -30,11 +31,15 @@ func TestCanonicalLabelsUnifySignals(t *testing.T) {
 		Tenant:     "default",
 		Attributes: attrs,
 	})
-	traceTags := zipkinSpanFromRecord(segment.TraceRecord{
+	trace := tempo.TraceFromRecords(canonicalizeTraceRecords([]segment.TraceRecord{{
 		Service:    "doctor",
 		Tenant:     "default",
 		Attributes: attrs,
-	}).Tags
+	}}))
+	traceTags := map[string]string{}
+	for _, attribute := range trace.Batches[0].ScopeSpans[0].Spans[0].Attributes {
+		traceTags[attribute.Key] = attribute.Value.StringValue
+	}
 
 	want := map[string]string{
 		"service":            "doctor",

@@ -6,7 +6,7 @@ import (
 )
 
 // This file defines the canonical label vocabulary shared by the metrics
-// (Prometheus), logs (Loki) and traces (Zipkin) compatibility APIs. Grafana
+// (Prometheus), logs (Loki) and traces (Tempo) compatibility APIs. Grafana
 // correlates signals by matching these labels, so they must be projected
 // identically regardless of the source record type.
 

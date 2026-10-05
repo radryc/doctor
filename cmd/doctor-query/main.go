@@ -151,6 +151,7 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 	if err := router.Register(localBackend, proxy.Upstreams{
 		Metrics: svc.LocalMetricsUpstream(),
 		Logs:    svc.LocalLogsUpstream(),
+		Traces:  svc.LocalTracesUpstream(),
 	}); err != nil {
 		log.Fatalf("register local proxy backend: %v", err)
 	}

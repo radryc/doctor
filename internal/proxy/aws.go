@@ -308,20 +308,20 @@ func (u *AWSUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 }
 
 // ListServices implements TracesUpstream.
-func (u *AWSUpstream) ListServices(ctx context.Context) ([]string, error) {
+func (u *AWSUpstream) ListServices(ctx context.Context, _ string) ([]string, error) {
 	return AWSServices(ctx, u.Client), nil
 }
 
-// QueryTraces implements TracesUpstream.
-func (u *AWSUpstream) QueryTraces(ctx context.Context, service string, from, to time.Time, limit int) ([]TraceSummary, error) {
+// SearchTraces implements TracesUpstream.
+func (u *AWSUpstream) SearchTraces(ctx context.Context, _ string, search TraceSearch) ([]TraceSummary, error) {
 	if u.Client == nil || !u.Client.Enabled() {
 		return nil, nil
 	}
 	summaries, err := u.Client.QueryTraces(ctx, awsstore.TraceQuery{
-		Service: service,
-		From:    from,
-		To:      to,
-		Limit:   limit,
+		Service: search.Service,
+		From:    search.From,
+		To:      search.To,
+		Limit:   search.Limit,
 	})
 	if err != nil {
 		return nil, err
@@ -335,6 +335,7 @@ func (u *AWSUpstream) QueryTraces(ctx context.Context, service string, from, to 
 			Service:         firstNonEmpty(summary.Service, SourceAWS),
 			StartTime:       summary.StartTime.UTC(),
 			Duration:        summary.Duration,
+			SpanCount:       summary.SpanCount,
 			Region:          summary.Region,
 			Account:         summary.Account,
 			Status:          summary.Status,
@@ -344,7 +345,7 @@ func (u *AWSUpstream) QueryTraces(ctx context.Context, service string, from, to 
 }
 
 // GetTrace implements TracesUpstream.
-func (u *AWSUpstream) GetTrace(ctx context.Context, traceID string) ([]segment.TraceRecord, bool, error) {
+func (u *AWSUpstream) GetTrace(ctx context.Context, _ string, traceID string) ([]segment.TraceRecord, bool, error) {
 	if u.Client == nil || !u.Client.Enabled() {
 		return nil, false, nil
 	}

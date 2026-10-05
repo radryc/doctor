@@ -182,17 +182,18 @@ Doctor can emit its own OTLP traces, metrics, and logs. All telemetry is disable
 | `GET /v1/guardian/health?tenant=&partition=&intent=&window=` | Rollout health feedback |
 | `GET /v1/ui/config` | UI runtime configuration |
 
-The query service also exposes read-only Prometheus and Loki compatibility APIs for Grafana datasource integration:
+The query service also exposes read-only Prometheus, Loki, and Tempo compatibility APIs for Grafana datasource integration:
 
 | Prefix | Purpose |
 | --- | --- |
 | `GET /api/v1/query`, `/api/v1/query_range`, `/api/v1/labels`, `/api/v1/label/*`, `/api/v1/series`, `/api/v1/metadata` | Prometheus HTTP API |
 | `GET /loki/api/v1/query`, `/loki/api/v1/query_range`, `/loki/api/v1/labels`, `/loki/api/v1/label/*`, `/loki/api/v1/series` | Loki HTTP API |
-| `GET /api/v2/services`, `/api/v2/spans`, `/api/v2/traces`, `/api/v2/trace/*` | Zipkin HTTP API |
+| `GET /api/echo`, `/api/traces/{id}`, `/api/search`, `/api/search/tags`, `/api/search/tag/{tag}/values` | Tempo HTTP API (TraceQL pass-through to Tempo backends) |
+| `GET /v1/proxy/endpoints` | Federated backend list with health state |
 
 ## Grafana unified dataspace
 
-The Prometheus, Loki, and Zipkin compatibility APIs exposed by `doctor-query` project
+The Prometheus, Loki, and Tempo compatibility APIs exposed by `doctor-query` project
 every record through one shared label vocabulary so Grafana can correlate signals:
 
 | Label | Source |
@@ -263,7 +264,7 @@ series tagged `source="aws"`.
 
 Metric/log/trace discovery (`/api/v1/label/__name__/values`, `/api/v1/labels`,
 `/api/v1/series`, `/api/v1/metadata`, `/v1/logs/services`,
-`/v1/services/discover` and the Zipkin service list) always unions the AWS
+`/v1/services/discover` and the Tempo trace-service list) always unions the AWS
 federation when `DOCTOR_AWS_ENABLED=true`, so CloudWatch metrics and X-Ray
 services are browsable without first knowing `source="aws"`. A PromQL query that
 matches no local series is transparently retried against CloudWatch, and
@@ -280,7 +281,7 @@ cd doctor
 ```
 
 It confirms the `source="aws"` label is present, the CloudWatch namespace/metric
-selector resolves, and the Zipkin datasource returns services (native and X-Ray).
+selector resolves, and the Tempo datasource returns trace services (native and X-Ray).
 
 ## Building containers
 

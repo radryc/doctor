@@ -36,9 +36,38 @@ type LogsUpstream interface {
 // TracesUpstream executes trace discovery and lookup against one source.
 type TracesUpstream interface {
 	Name() string
-	ListServices(ctx context.Context) ([]string, error)
-	QueryTraces(ctx context.Context, service string, from, to time.Time, limit int) ([]TraceSummary, error)
-	GetTrace(ctx context.Context, traceID string) ([]segment.TraceRecord, bool, error)
+	ListServices(ctx context.Context, tenant string) ([]string, error)
+	SearchTraces(ctx context.Context, tenant string, search TraceSearch) ([]TraceSummary, error)
+	GetTrace(ctx context.Context, tenant, traceID string) ([]segment.TraceRecord, bool, error)
+}
+
+// TraceTagSource is implemented by upstreams that expose tag discovery.
+type TraceTagSource interface {
+	TraceTags(ctx context.Context, tenant string) ([]string, error)
+	TraceTagValues(ctx context.Context, tenant, tag string) ([]string, error)
+}
+
+// TraceQLUpstream is implemented by upstreams that can execute TraceQL natively.
+type TraceQLUpstream interface {
+	SearchTraceQL(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]TraceSummary, error)
+}
+
+// TraceSearch describes a trace search request.
+type TraceSearch struct {
+	Service     string
+	Tags        []TraceTag
+	TraceQL     string
+	From        time.Time
+	To          time.Time
+	Limit       int
+	MinDuration time.Duration
+	MaxDuration time.Duration
+}
+
+// TraceTag is an exact-match tag filter.
+type TraceTag struct {
+	Key   string
+	Value string
 }
 
 // TraceSummary is a source-agnostic trace search hit.
@@ -49,6 +78,7 @@ type TraceSummary struct {
 	Service         string
 	StartTime       time.Time
 	Duration        time.Duration
+	SpanCount       int
 	Region          string
 	Account         string
 	Status          string
