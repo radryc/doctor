@@ -73,7 +73,7 @@ func (s *Service) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 		}
 		records, fetchErr := s.fetchLokiRecords(r.Context(), s.tenantFromRequest(r), plan, queryTime.Add(-window), queryTime, 5000)
 		if fetchErr != nil {
-			writeLokiError(w, http.StatusInternalServerError, fetchErr.Error())
+			writeLokiQueryError(w, fetchErr)
 			return
 		}
 		records = plan.applyStages(records)
@@ -139,7 +139,7 @@ func (s *Service) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		limit := parseLimit(r.URL.Query().Get("limit"), 5000, 20000)
 		records, fetchErr := s.fetchLokiRecords(r.Context(), tenant, plan, start, end, limit)
 		if fetchErr != nil {
-			writeLokiError(w, http.StatusInternalServerError, fetchErr.Error())
+			writeLokiQueryError(w, fetchErr)
 			return
 		}
 		records = plan.applyStages(records)
@@ -158,7 +158,7 @@ func (s *Service) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 1000, 5000)
 	logs, err := s.fetchLokiRecords(r.Context(), tenant, plan, start, end, limit)
 	if err != nil {
-		writeLokiError(w, http.StatusInternalServerError, err.Error())
+		writeLokiQueryError(w, err)
 		return
 	}
 	logs = plan.applyStages(logs)
@@ -185,7 +185,7 @@ func (s *Service) handleLokiLabels(w http.ResponseWriter, r *http.Request) {
 
 	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), strings.TrimSpace(r.URL.Query().Get("query")), start, end, 5000)
 	if err != nil {
-		writeLokiError(w, http.StatusInternalServerError, err.Error())
+		writeLokiQueryError(w, err)
 		return
 	}
 
@@ -223,7 +223,7 @@ func (s *Service) handleLokiLabelValues(w http.ResponseWriter, r *http.Request) 
 
 	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), strings.TrimSpace(r.URL.Query().Get("query")), start, end, 5000)
 	if err != nil {
-		writeLokiError(w, http.StatusInternalServerError, err.Error())
+		writeLokiQueryError(w, err)
 		return
 	}
 
@@ -259,7 +259,7 @@ func (s *Service) handleLokiSeries(w http.ResponseWriter, r *http.Request) {
 
 	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), query, start, end, 5000)
 	if err != nil {
-		writeLokiError(w, http.StatusInternalServerError, err.Error())
+		writeLokiQueryError(w, err)
 		return
 	}
 
@@ -358,6 +358,16 @@ func lokiLabelsFromRecord(record segment.LogRecord) map[string]string {
 		labels["span_id"] = record.SpanID
 	}
 	return filterLokiLabels(labels)
+}
+
+// writeLokiQueryError maps access enforcement denials to 403 and other fetch
+// failures to 500.
+func writeLokiQueryError(w http.ResponseWriter, err error) {
+	if isAccessDenied(err) {
+		writeLokiError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	writeLokiError(w, http.StatusInternalServerError, err.Error())
 }
 
 func writeLokiError(w http.ResponseWriter, statusCode int, message string) {

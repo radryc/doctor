@@ -44,6 +44,10 @@ func (s *Service) handleTempoTraceByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		if isAccessDenied(err) {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -73,6 +77,10 @@ func (s *Service) handleTempoSearch(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if errors.Is(err, proxy.ErrUnsupported) {
 				writeTempoError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if isAccessDenied(err) {
+				writeTempoError(w, http.StatusForbidden, err.Error())
 				return
 			}
 			writeTempoError(w, http.StatusInternalServerError, err.Error())
@@ -106,6 +114,10 @@ func (s *Service) handleTempoTags(w http.ResponseWriter, r *http.Request) {
 	if s.proxyRouter != nil {
 		names, warnings, err := s.proxyRouter.TraceTags(r.Context(), tenant)
 		if err != nil {
+			if isAccessDenied(err) {
+				writeTempoError(w, http.StatusForbidden, err.Error())
+				return
+			}
 			writeTempoError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -144,6 +156,10 @@ func (s *Service) handleTempoTagValues(w http.ResponseWriter, r *http.Request) {
 	if s.proxyRouter != nil {
 		found, warnings, err := s.proxyRouter.TraceTagValues(r.Context(), tenant, tag)
 		if err != nil {
+			if isAccessDenied(err) {
+				writeTempoError(w, http.StatusForbidden, err.Error())
+				return
+			}
 			writeTempoError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

@@ -145,6 +145,20 @@ All limits are disabled by default (0 = no limit).
 | `DOCTOR_GUARDIAN_DISCOVERY_ENABLED` | Discover backends from Guardian (`/api/pushers`, partitions) | `false` |
 | `DOCTOR_GUARDIAN_DISCOVERY_INTERVAL` | Discovery poll interval | `30s` |
 | `DOCTOR_GUARDIAN_TOKEN` | Bearer token for Guardian discovery | unset |
+| `DOCTOR_AUTH_REQUIRE` | Reject anonymous callers outside exempt paths | `false` |
+| `DOCTOR_AUTH_EXEMPT_PATHS` | Comma-separated unauthenticated paths | health/ready/metrics/Prometheus |
+| `DOCTOR_OIDC_ISSUER` / `DOCTOR_OIDC_AUDIENCE` | OIDC issuer and audience | unset |
+| `DOCTOR_OIDC_CLIENT_ID` / `DOCTOR_OIDC_CLIENT_SECRET` / `DOCTOR_OIDC_REDIRECT_URL` | Browser login client | unset |
+| `DOCTOR_BREAK_GLASS_TOKEN` | Static admin bearer token | unset |
+| `DOCTOR_SESSION_DIR` | Persistent browser session directory | `.doctor/sessions` |
+| `DOCTOR_ACCESS_RESOLVER` | `owners`, `grants`, `static`, `chain`, or `allow-all` | `owners` |
+| `DOCTOR_ACCESS_MODE` | `observe` (log only) or `enforce` (filter logs/traces) | `observe` |
+| `DOCTOR_ACCESS_ENFORCE_LOGS` / `DOCTOR_ACCESS_ENFORCE_TRACES` | Per-signal enforcement | `false` |
+| `DOCTOR_ACCESS_TEAM_MAPPING` | OWNERS `@team` to IdP group mapping (file or inline YAML) | unset |
+| `DOCTOR_ACCESS_GRANTS_PATH` | Grant-store JSON path for the `grants` resolver | unset |
+| `DOCTOR_ACCESS_OWNERS_ROOT` | Default OWNERS path root | `/doctor/v1/endpoints` |
+| `DOCTOR_ACCESS_CACHE_TTL` | OWNERS decision cache TTL | `60s` |
+| `DOCTOR_MONOFS_TOKEN` | Guardian token used to read OWNERS files from MonoFS | unset |
 
 ### Self-telemetry (both services)
 

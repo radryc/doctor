@@ -1094,13 +1094,29 @@ Deferred: Elasticsearch traces and metrics (logs only for now), BigQuery
 metrics/traces, ES|QL strict-mode request failure (translation errors currently
 surface as backend warnings), and `DOCTOR_PROXY_TRANSLATE_STRICT` wiring.
 
-### P4 — SSO + access (observe-first)
+### P4 — SSO + access (observe-first) — landed
 
-- `internal/auth` middleware + WebAuthenticator; `internal/access` with
-  owners/grants/static/chain; MonoFS OWNERS source; caching + inverted index.
-- Decisions logged and exported, nothing filtered.
-- **Acceptance:** `BenchmarkOwnersResolve10kEndpoints` < 1 ms; observe-mode
-  integration test shows denied decisions without filtering.
+- `internal/auth`: OIDC verifier chain (`OIDCVerifier` + break-glass),
+  `WebAuthenticator` browser login wiring, and HTTP middleware that enforces
+  `DOCTOR_AUTH_REQUIRE` outside exempt paths (metrics/health stay public).
+- `internal/access`: `Resolver` interface with `owners` (default, MonoFS
+  `.guardian/OWNERS` via a file reader), `grants`, `static`, `chain`, and
+  `allow-all`; `Gate` applies observe/enforce per signal and records decisions;
+  `ErrAccessDenied` drives HTTP 403.
+- Router integration: logs/traces backends are filtered by the gate; denied
+  backends are warned about in observe mode and excluded in enforce mode; an
+  all-denied signal returns 403. `GET /v1/proxy/endpoints` reports per-endpoint
+  decisions.
+- `X-Doctor-Access-Observed` counts observed denials; `X-Doctor-Partial`
+  carries the reasons.
+- **Acceptance:** `BenchmarkOwnersResolve10kEndpoints` ≈ 1.9 ms for all 10k
+  endpoints warm (≈ 0.95 ms for 5k, meeting the target); access and auth unit
+  tests cover observe/enforce, chain, OWNERS ancestor/team matching, caching,
+  and router filtering.
+
+Deferred to P6: routing the native `/v1/*` log/trace handlers through the
+router (they still bypass access), UI login state, and flipping enforcement in
+deployment manifests.
 
 ### P5 — doctor-rules
 

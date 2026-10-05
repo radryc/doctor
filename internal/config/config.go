@@ -90,6 +90,32 @@ type QueryConfig struct {
 	GuardianDiscoveryEnabled  bool
 	GuardianDiscoveryInterval time.Duration
 	GuardianToken             string
+
+	AuthRequire      bool
+	AuthExemptPaths  []string
+	OIDCIssuer       string
+	OIDCAudience     string
+	OIDCJWKSURL      string
+	OIDCClientID     string
+	OIDCClientSecret string
+	OIDCRedirectURL  string
+	OIDCScopes       []string
+	SessionDir       string
+	BreakGlassToken  string
+
+	AccessResolver          string
+	AccessMode              string
+	AccessEnforceLogs       bool
+	AccessEnforceTraces     bool
+	AccessTeamMapping       string
+	AccessGrantsPath        string
+	AccessOwnersRoot        string
+	AccessCacheTTL          time.Duration
+	AccessStaticAllow       string
+	AccessStaticAllowGroups string
+	AccessStaticDeny        string
+	MonoFSFileToken         string
+	MonoFSClientID          string
 }
 
 func LoadIngest(service string) (IngestConfig, error) {
@@ -167,7 +193,52 @@ func LoadQuery(service string) QueryConfig {
 		GuardianDiscoveryEnabled:  envBool("DOCTOR_GUARDIAN_DISCOVERY_ENABLED", false),
 		GuardianDiscoveryInterval: envDuration("DOCTOR_GUARDIAN_DISCOVERY_INTERVAL", 30*time.Second),
 		GuardianToken:             envString("DOCTOR_GUARDIAN_TOKEN", ""),
+
+		AuthRequire:      envBool("DOCTOR_AUTH_REQUIRE", false),
+		AuthExemptPaths:  envCSV("DOCTOR_AUTH_EXEMPT_PATHS", nil),
+		OIDCIssuer:       envString("DOCTOR_OIDC_ISSUER", ""),
+		OIDCAudience:     envString("DOCTOR_OIDC_AUDIENCE", ""),
+		OIDCJWKSURL:      envString("DOCTOR_OIDC_JWKS_URL", ""),
+		OIDCClientID:     envString("DOCTOR_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret: envString("DOCTOR_OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURL:  envString("DOCTOR_OIDC_REDIRECT_URL", ""),
+		OIDCScopes:       envCSV("DOCTOR_OIDC_SCOPES", nil),
+		SessionDir:       envString("DOCTOR_SESSION_DIR", ".doctor/sessions"),
+		BreakGlassToken:  envString("DOCTOR_BREAK_GLASS_TOKEN", ""),
+
+		AccessResolver:          envString("DOCTOR_ACCESS_RESOLVER", "owners"),
+		AccessMode:              envString("DOCTOR_ACCESS_MODE", "observe"),
+		AccessEnforceLogs:       envBool("DOCTOR_ACCESS_ENFORCE_LOGS", false),
+		AccessEnforceTraces:     envBool("DOCTOR_ACCESS_ENFORCE_TRACES", false),
+		AccessTeamMapping:       envString("DOCTOR_ACCESS_TEAM_MAPPING", ""),
+		AccessGrantsPath:        envString("DOCTOR_ACCESS_GRANTS_PATH", ""),
+		AccessOwnersRoot:        envString("DOCTOR_ACCESS_OWNERS_ROOT", "/doctor/v1/endpoints"),
+		AccessCacheTTL:          envDuration("DOCTOR_ACCESS_CACHE_TTL", 60*time.Second),
+		AccessStaticAllow:       envString("DOCTOR_ACCESS_STATIC_ALLOW", ""),
+		AccessStaticAllowGroups: envString("DOCTOR_ACCESS_STATIC_ALLOW_GROUPS", ""),
+		AccessStaticDeny:        envString("DOCTOR_ACCESS_STATIC_DENY", ""),
+		MonoFSFileToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
+		MonoFSClientID:          envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-query"),
 	}
+}
+
+// envCSV parses a comma-separated environment variable.
+func envCSV(key string, fallback []string) []string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }
 
 func envString(key, fallback string) string {

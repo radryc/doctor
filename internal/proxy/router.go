@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/radryc/monofs/pkg/authz"
+	"github.com/rydzu/ainfra/doctor/internal/access"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
 
@@ -47,6 +49,8 @@ type RouterConfig struct {
 	BackendTimeout time.Duration
 	// Logger receives upstream failures.
 	Logger *log.Logger
+	// Access applies endpoint authorization. Nil allows everything.
+	Access *access.Gate
 }
 
 // Upstreams groups the adapters registered for one backend.
@@ -69,6 +73,7 @@ type Router struct {
 	cfg      RouterConfig
 	registry Registry
 	logger   *log.Logger
+	access   *access.Gate
 
 	mu       sync.RWMutex
 	explicit map[string]upstreamEntry
@@ -91,13 +96,47 @@ func NewRouter(cfg RouterConfig, registry Registry) *Router {
 			MaxInflight:    maxInflight,
 			BackendTimeout: timeout,
 			Logger:         cfg.Logger,
+			Access:         cfg.Access,
 		},
 		registry: registry,
 		logger:   cfg.Logger,
+		access:   cfg.Access,
 		explicit: make(map[string]upstreamEntry),
 		built:    make(map[string]upstreamEntry),
 		breakers: make(map[string]*breaker),
 	}
+}
+
+// EndpointFor converts a backend into its access-control endpoint.
+func EndpointFor(backend Backend) access.Endpoint {
+	signals := make([]access.Signal, 0, len(backend.Signals))
+	for _, signal := range backend.Signals {
+		signals = append(signals, access.Signal(signal))
+	}
+	return access.Endpoint{
+		Name:       backend.Name,
+		Signals:    signals,
+		OwnersPath: backend.OwnersPath,
+		Public:     backend.Public,
+	}
+}
+
+// accessDecision evaluates the gate for a backend and signal.
+func (r *Router) accessDecision(ctx context.Context, backend Backend, signal access.Signal) (bool, access.Decision, bool) {
+	if r.access == nil {
+		return true, access.Decision{Endpoint: backend.Name, Signal: signal, Allowed: true, Resolver: "none"}, false
+	}
+	identity, _ := authz.IdentityFromContext(ctx)
+	return r.access.Allowed(ctx, identity, EndpointFor(backend), signal)
+}
+
+func accessWarning(decision access.Decision) Warning {
+	mode := "observed"
+	if !decision.Observed {
+		mode = "enforced"
+	}
+	message := fmt.Sprintf("access denied (%s): %s", mode, decision.Reason)
+	return Warning{Backend: decision.Endpoint, Message: message}
 }
 
 // Register installs explicit upstreams for a backend (local storage, AWS, ...).
@@ -112,13 +151,13 @@ func (r *Router) Register(backend Backend, upstreams Upstreams) error {
 	return nil
 }
 
-// Endpoints returns the registry snapshot with health state.
-func (r *Router) Endpoints() []EndpointInfo {
+// Endpoints returns the registry snapshot with health and access state.
+func (r *Router) Endpoints(ctx context.Context) []EndpointInfo {
 	now := time.Now()
 	backends := r.snapshot()
 	out := make([]EndpointInfo, 0, len(backends))
 	for _, backend := range backends {
-		out = append(out, EndpointInfo{
+		info := EndpointInfo{
 			Name:       backend.Name,
 			Kind:       backend.Kind,
 			Signals:    append([]Signal(nil), backend.Signals...),
@@ -126,7 +165,17 @@ func (r *Router) Endpoints() []EndpointInfo {
 			Origin:     backend.Origin,
 			Public:     backend.Public,
 			Healthy:    r.breakerFor(backend.Name).allow(now),
-		})
+			Allowed:    true,
+			Resolver:   "none",
+		}
+		if r.access != nil {
+			identity, _ := authz.IdentityFromContext(ctx)
+			decision := r.access.Decide(ctx, identity, EndpointFor(backend), gatedSignal(backend))
+			info.Allowed = decision.Allowed
+			info.Resolver = decision.Resolver
+			info.Reason = decision.Reason
+		}
+		out = append(out, info)
 	}
 	return out
 }
@@ -140,6 +189,21 @@ type EndpointInfo struct {
 	Origin     string   `json:"origin,omitempty"`
 	Public     bool     `json:"public"`
 	Healthy    bool     `json:"healthy"`
+	Allowed    bool     `json:"allowed"`
+	Resolver   string   `json:"resolver,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+}
+
+// gatedSignal picks the signal used for endpoint-list decisions: logs and
+// traces are gated, metrics are public.
+func gatedSignal(backend Backend) access.Signal {
+	if backend.Supports(SignalLogs) {
+		return access.SignalLogs
+	}
+	if backend.Supports(SignalTraces) {
+		return access.SignalTraces
+	}
+	return access.SignalMetrics
 }
 
 // MetricsInstant fans an instant PromQL query out and merges the results.
@@ -158,19 +222,12 @@ func (r *Router) MetricsRange(ctx context.Context, tenant, query string, start, 
 
 // Logs fans a reduced LogQL query out and merges the records.
 func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, from, to time.Time, limit int) ([]segment.LogRecord, []Warning, error) {
-	targets := make([]logTarget, 0)
-	for _, backend := range r.snapshot() {
-		if !backend.Supports(SignalLogs) {
-			continue
-		}
-		upstream := r.logsUpstream(backend)
-		if upstream == nil {
-			continue
-		}
-		targets = append(targets, logTarget{backend: backend, upstream: upstream})
+	targets, accessWarnings, err := r.logTargets(ctx)
+	if err != nil {
+		return nil, accessWarnings, err
 	}
 	if len(targets) == 0 {
-		return nil, nil, nil
+		return nil, accessWarnings, nil
 	}
 	// Local storage is merged first so its records retain their original order.
 	sort.SliceStable(targets, func(i, j int) bool {
@@ -212,7 +269,7 @@ func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, 
 	var (
 		localRecords []segment.LogRecord
 		remotes      []LogRemote
-		warnings     []Warning
+		warnings     = append([]Warning(nil), accessWarnings...)
 	)
 	for _, res := range results {
 		target := targets[res.index]
@@ -237,6 +294,40 @@ func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, 
 type logTarget struct {
 	backend  Backend
 	upstream LogsUpstream
+}
+
+// logTargets selects logs backends, applying access enforcement. Denied
+// backends produce warnings in observe mode and are excluded in enforce mode.
+func (r *Router) logTargets(ctx context.Context) ([]logTarget, []Warning, error) {
+	targets := make([]logTarget, 0)
+	var warnings []Warning
+	enforced := 0
+	denied := 0
+	for _, backend := range r.snapshot() {
+		if !backend.Supports(SignalLogs) {
+			continue
+		}
+		upstream := r.logsUpstream(backend)
+		if upstream == nil {
+			continue
+		}
+		_, decision, isEnforced := r.accessDecision(ctx, backend, access.SignalLogs)
+		if isEnforced {
+			enforced++
+		}
+		if !decision.Allowed {
+			warnings = append(warnings, accessWarning(decision))
+			if isEnforced {
+				denied++
+				continue
+			}
+		}
+		targets = append(targets, logTarget{backend: backend, upstream: upstream})
+	}
+	if enforced > 0 && denied == enforced {
+		return nil, warnings, access.ErrAccessDenied
+	}
+	return targets, warnings, nil
 }
 
 type metricsTarget struct {

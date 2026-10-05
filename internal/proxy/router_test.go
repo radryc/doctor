@@ -347,7 +347,7 @@ func TestRouterEndpointsIncludesExplicitBackends(t *testing.T) {
 		},
 		map[string]Upstreams{"doctor": {Metrics: &fakeMetricsUpstream{name: "doctor"}}},
 	)
-	endpoints := router.Endpoints()
+	endpoints := router.Endpoints(context.Background())
 	if len(endpoints) != 1 || endpoints[0].Name != "doctor" || !endpoints[0].Healthy {
 		t.Fatalf("endpoints = %#v", endpoints)
 	}

@@ -7,15 +7,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rydzu/ainfra/doctor/internal/access"
 	"github.com/rydzu/ainfra/doctor/internal/proxy/translate"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
 
 // ListServices returns the union of trace service names across backends.
 func (r *Router) ListServices(ctx context.Context, tenant string) ([]string, []Warning, error) {
-	targets := r.traceTargets()
+	targets, accessWarnings, err := r.traceTargets(ctx)
+	if err != nil {
+		return nil, accessWarnings, err
+	}
 	names := make(map[string]struct{})
-	var warnings []Warning
+	warnings := append([]Warning(nil), accessWarnings...)
 	for _, target := range targets {
 		upstream := target.upstreams.Traces
 		if upstream == nil {
@@ -46,7 +50,10 @@ func (r *Router) ListServices(ctx context.Context, tenant string) ([]string, []W
 
 // SearchTraces fans a trace search out and merges the summaries.
 func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSearch) ([]TraceSummary, []Warning, error) {
-	targets := r.traceTargets()
+	targets, accessWarnings, err := r.traceTargets(ctx)
+	if err != nil {
+		return nil, accessWarnings, err
+	}
 	if search.TraceQL != "" {
 		capable := false
 		for _, target := range targets {
@@ -57,7 +64,7 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 		}
 		if capable {
 			groups := make([][]TraceSummary, len(targets))
-			warnings, err := r.forEachTraceTarget(ctx, targets, func(ctx context.Context, target traceTarget) error {
+			warnings, err := r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
 				upstream, ok := target.upstreams.Traces.(TraceQLUpstream)
 				if !ok {
 					return nil
@@ -94,7 +101,7 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 	}
 
 	groups := make([][]TraceSummary, len(targets))
-	warnings, err := r.forEachTraceTarget(ctx, targets, func(ctx context.Context, target traceTarget) error {
+	warnings, err := r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
 		summaries, queryErr := target.upstreams.Traces.SearchTraces(ctx, tenant, search)
 		if queryErr != nil {
 			return queryErr
@@ -111,9 +118,12 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 // GetTrace fans a trace lookup out and merges the spans. found is false when
 // no backend returned spans.
 func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segment.TraceRecord, []Warning, error) {
-	targets := r.traceTargets()
+	targets, accessWarnings, err := r.traceTargets(ctx)
+	if err != nil {
+		return nil, accessWarnings, err
+	}
 	if len(targets) == 0 {
-		return nil, nil, nil
+		return nil, accessWarnings, nil
 	}
 	type result struct {
 		index   int
@@ -150,7 +160,7 @@ func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segmen
 	var (
 		local    []segment.TraceRecord
 		remotes  []TraceRemote
-		warnings []Warning
+		warnings = append([]Warning(nil), accessWarnings...)
 	)
 	found := false
 	for _, res := range results {
@@ -186,9 +196,13 @@ func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segmen
 
 // TraceTags returns the union of tag names across tag-aware backends.
 func (r *Router) TraceTags(ctx context.Context, tenant string) ([]string, []Warning, error) {
+	targets, accessWarnings, err := r.traceTargets(ctx)
+	if err != nil {
+		return nil, accessWarnings, err
+	}
 	tags := make(map[string]struct{})
-	var warnings []Warning
-	for _, target := range r.traceTargets() {
+	warnings := append([]Warning(nil), accessWarnings...)
+	for _, target := range targets {
 		source, ok := target.upstreams.Traces.(TraceTagSource)
 		if !ok {
 			continue
@@ -217,9 +231,13 @@ func (r *Router) TraceTags(ctx context.Context, tenant string) ([]string, []Warn
 // TraceTagValues returns the union of values for one tag across tag-aware
 // backends.
 func (r *Router) TraceTagValues(ctx context.Context, tenant, tag string) ([]string, []Warning, error) {
+	targets, accessWarnings, err := r.traceTargets(ctx)
+	if err != nil {
+		return nil, accessWarnings, err
+	}
 	values := make(map[string]struct{})
-	var warnings []Warning
-	for _, target := range r.traceTargets() {
+	warnings := append([]Warning(nil), accessWarnings...)
+	for _, target := range targets {
 		source, ok := target.upstreams.Traces.(TraceTagSource)
 		if !ok {
 			continue
@@ -251,8 +269,11 @@ type traceTarget struct {
 	index int
 }
 
-func (r *Router) traceTargets() []traceTarget {
+func (r *Router) traceTargets(ctx context.Context) ([]traceTarget, []Warning, error) {
 	entries := make([]traceTarget, 0)
+	var warnings []Warning
+	enforced := 0
+	denied := 0
 	for _, backend := range r.snapshot() {
 		if !backend.Supports(SignalTraces) {
 			continue
@@ -261,17 +282,31 @@ func (r *Router) traceTargets() []traceTarget {
 		if entry.upstreams.Traces == nil {
 			continue
 		}
+		_, decision, isEnforced := r.accessDecision(ctx, backend, access.SignalTraces)
+		if isEnforced {
+			enforced++
+		}
+		if !decision.Allowed {
+			warnings = append(warnings, accessWarning(decision))
+			if isEnforced {
+				denied++
+				continue
+			}
+		}
 		entries = append(entries, traceTarget{upstreamEntry: entry, index: len(entries)})
+	}
+	if enforced > 0 && denied == enforced {
+		return nil, warnings, access.ErrAccessDenied
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		return targetRank(entries[i].backend) < targetRank(entries[j].backend)
 	})
-	return entries
+	return entries, warnings, nil
 }
 
 // forEachTraceTarget runs fn for each trace target with bounded concurrency.
 // Local backend failures are fatal; remote failures become warnings.
-func (r *Router) forEachTraceTarget(ctx context.Context, targets []traceTarget, fn func(ctx context.Context, target traceTarget) error) ([]Warning, error) {
+func (r *Router) forEachTraceTarget(ctx context.Context, targets []traceTarget, baseWarnings []Warning, fn func(ctx context.Context, target traceTarget) error) ([]Warning, error) {
 	type result struct {
 		target traceTarget
 		err    error
@@ -301,7 +336,7 @@ func (r *Router) forEachTraceTarget(ctx context.Context, targets []traceTarget, 
 	}
 	wg.Wait()
 
-	var warnings []Warning
+	warnings := append([]Warning(nil), baseWarnings...)
 	for _, res := range results {
 		if res.err == nil {
 			r.recordSuccess(res.target.backend.Name)

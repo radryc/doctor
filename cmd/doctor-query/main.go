@@ -8,9 +8,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/radryc/monofs/pkg/authz"
+	"github.com/rydzu/ainfra/doctor/internal/access"
+	"github.com/rydzu/ainfra/doctor/internal/auth"
 	"github.com/rydzu/ainfra/doctor/internal/config"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/query"
@@ -80,13 +84,26 @@ func main() {
 		log.Printf("aws federation enabled via %s", cfg.AWSBackendURL)
 	}
 
+	gate, authMiddleware, webAuth, cleanup, err := setupSecurity(ctx, cfg)
+	if err != nil {
+		log.Fatalf("setup security: %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if cfg.ProxyEnabled {
-		setupProxyRouter(ctx, cfg, svc, awsClient)
+		setupProxyRouter(ctx, cfg, svc, awsClient, gate)
+	}
+
+	handler := svc.Handler()
+	handler = authMiddleware.Wrap(handler)
+	if webAuth != nil {
+		handler = webAuth.Handler(handler)
 	}
 
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: svc.Handler(),
+		Handler: handler,
 	}
 	if telemetryHandle.Enabled() {
 		server.Handler = otelhttp.NewHandler(server.Handler, "doctor-query-http")
@@ -100,11 +117,135 @@ func main() {
 	}
 }
 
+// setupSecurity builds the authentication middleware and the access gate.
+// It returns a cleanup function for resources that must be released at
+// shutdown.
+func setupSecurity(ctx context.Context, cfg config.QueryConfig) (*access.Gate, *auth.Middleware, *authz.WebAuthenticator, func(), error) {
+	authCfg := auth.Config{
+		Issuer:          cfg.OIDCIssuer,
+		Audience:        cfg.OIDCAudience,
+		JWKSURL:         cfg.OIDCJWKSURL,
+		ClientID:        cfg.OIDCClientID,
+		ClientSecret:    cfg.OIDCClientSecret,
+		RedirectURL:     cfg.OIDCRedirectURL,
+		Scopes:          cfg.OIDCScopes,
+		SessionDir:      cfg.SessionDir,
+		BreakGlassToken: cfg.BreakGlassToken,
+		Require:         cfg.AuthRequire,
+		ExemptPaths:     cfg.AuthExemptPaths,
+	}
+	verifier, err := auth.NewVerifier(authCfg)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if verifier != nil {
+		log.Printf("authentication enabled (issuer=%q require=%v)", cfg.OIDCIssuer, cfg.AuthRequire)
+	} else {
+		log.Printf("authentication disabled: set DOCTOR_OIDC_ISSUER/AUDIENCE or DOCTOR_BREAK_GLASS_TOKEN")
+	}
+	middleware := auth.NewMiddleware(verifier, cfg.AuthRequire, cfg.AuthExemptPaths, log.Default())
+
+	webAuth, err := auth.NewWebAuthenticator(ctx, authCfg, verifier)
+	if err != nil {
+		log.Printf("browser login disabled: %v", err)
+		webAuth = nil
+	} else if webAuth != nil {
+		log.Printf("browser login enabled (client=%q)", cfg.OIDCClientID)
+	}
+
+	resolver, cleanup, err := buildAccessResolver(ctx, cfg)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	enforce := map[access.Signal]bool{}
+	if strings.EqualFold(cfg.AccessMode, "enforce") {
+		enforce[access.SignalLogs] = true
+		enforce[access.SignalTraces] = true
+	} else {
+		enforce[access.SignalLogs] = cfg.AccessEnforceLogs
+		enforce[access.SignalTraces] = cfg.AccessEnforceTraces
+	}
+	gate := access.NewGate(resolver, enforce, log.Default(), nil)
+	log.Printf("access resolver=%s mode=%s enforceLogs=%v enforceTraces=%v",
+		resolver.ResolverName(), cfg.AccessMode, enforce[access.SignalLogs], enforce[access.SignalTraces])
+	return gate, middleware, webAuth, cleanup, nil
+}
+
+func buildAccessResolver(ctx context.Context, cfg config.QueryConfig) (access.Resolver, func(), error) {
+	static := access.NewStatic(cfg.AccessStaticAllow, cfg.AccessStaticAllowGroups, cfg.AccessStaticDeny)
+	grantsResolver := func() (access.Resolver, error) {
+		store, err := authz.NewGrantStore(cfg.AccessGrantsPath)
+		if err != nil {
+			return nil, err
+		}
+		return &access.Grants{Store: store}, nil
+	}
+	ownersResolver := func() (access.Resolver, func(), error) {
+		mapping, err := loadTeamMapping(cfg.AccessTeamMapping)
+		if err != nil {
+			return nil, nil, err
+		}
+		var source access.OwnersSource
+		cleanup := func() {}
+		if strings.TrimSpace(cfg.MonoFSFileToken) != "" {
+			client, clientErr := monofsstore.NewGRPCClient(ctx, monofsstore.ClientConfig{
+				RouterAddr: cfg.MonoFSLogEngineAddr,
+				ClientID:   cfg.MonoFSClientID,
+				Token:      cfg.MonoFSFileToken,
+				Role:       "doctor",
+			})
+			if clientErr != nil {
+				return nil, nil, clientErr
+			}
+			source = &access.MonoFSSource{Reader: client}
+			cleanup = func() { _ = client.Close() }
+		}
+		return access.NewOwners(source, mapping, cfg.AccessOwnersRoot, cfg.AccessCacheTTL), cleanup, nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.AccessResolver)) {
+	case "allow-all":
+		return access.AllowAll{}, nil, nil
+	case "static":
+		return static, nil, nil
+	case "grants":
+		resolver, err := grantsResolver()
+		return resolver, nil, err
+	case "chain":
+		owners, cleanup, err := ownersResolver()
+		if err != nil {
+			return nil, nil, err
+		}
+		grants, err := grantsResolver()
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		return access.NewChain(owners, grants, static), cleanup, nil
+	default:
+		resolver, cleanup, err := ownersResolver()
+		return resolver, cleanup, err
+	}
+}
+
+func loadTeamMapping(raw string) (authz.TeamMapping, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(raw)
+	if err != nil {
+		data = []byte(raw)
+	}
+	return authz.ParseTeamMapping(data)
+}
+
 // setupProxyRouter wires the multi-backend registry and router: local MonoFS
 // storage is always the "doctor" backend, AWS is registered with the legacy
 // fallback policy, and additional backends come from the static file and
 // Guardian discovery.
-func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient *awsstore.Client) {
+func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient *awsstore.Client, gate *access.Gate) {
 	registries := make([]proxy.Registry, 0, 2)
 	if cfg.ProxyBackendsFile != "" {
 		static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
@@ -139,6 +280,7 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 		MaxInflight:    cfg.ProxyMaxInflight,
 		BackendTimeout: cfg.ProxyBackendTimeout,
 		Logger:         log.Default(),
+		Access:         gate,
 	}, proxy.NewCompositeRegistry(registries...))
 
 	localBackend := proxy.Backend{
