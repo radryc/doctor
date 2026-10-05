@@ -12,6 +12,7 @@ It accepts OTLP traffic, anonymizes sensitive data before persistence, and store
 |--------|---------|-------------|
 | `doctor-ingest` | OTLP receiver → privacy → write to MonoFS logengine | gRPC `:4317`, HTTP `:4318` |
 | `doctor-query` | HTTP query API + browser UI | `:18080` |
+| `doctor-rules` | Recording-rule evaluator with lease-based HA | `:18081` |
 
 ## Repository layout
 
@@ -271,6 +272,55 @@ series/stream/span, a `shard=<backend-name>` label is added so nothing is
 dropped. `GET /v1/proxy/endpoints` lists the configured backends and their
 health. AWS remains registered as a `fallback` backend, preserving the existing
 "query CloudWatch only when local results are empty or `source="aws"`" behavior.
+
+## Recording rules (`doctor-rules`)
+
+`doctor-rules` evaluates PromQL recording rules per shard, merges the results,
+and writes derived metrics back into MonoFS where the normal query APIs can read
+them. Rules live in MonoFS at `/doctor/v1/rules/<tenant>/<group>.yaml` and are
+managed through the HTTP API:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/v1/rules` | List groups |
+| GET | `/v1/rules/{tenant}/{group}` | Fetch a group (YAML) |
+| PUT | `/v1/rules/{tenant}/{group}` | Create or replace a group |
+| DELETE | `/v1/rules/{tenant}/{group}` | Delete a group |
+| POST | `/v1/rules/evaluate?tenant=&group=` | Evaluate once |
+
+```yaml
+version: 1
+groups:
+  - name: shard-health
+    tenant: default
+    interval: 30s
+    rules:
+      - record: doctor:shard_up:sum
+        expr: sum(up) by (job)
+        labels: { tier: edge }
+        sources: [prom-a, prom-b]
+        merge: sum   # sum|max|min|last|keep
+```
+
+Per-shard results are merged by the declared strategy; `keep` preserves the
+`shard` label. Partial sums are skipped rather than written incorrectly. One
+replica holds a MonoFS CAS lease at `<store>/.lease/leader.json`; followers
+take over after the lease expires.
+
+| Env | Default | Purpose |
+| --- | --- | --- |
+| `DOCTOR_RULES_ENABLED` | `true` | Master switch |
+| `DOCTOR_RULES_HTTP_ADDR` | `:18081` | CRUD + health |
+| `DOCTOR_RULES_QUERY_URL` | — | doctor-query base URL for evaluation |
+| `DOCTOR_RULES_QUERY_TOKEN` | — | Bearer for the query API |
+| `DOCTOR_RULES_WORKERS` | `8` | Evaluation workers |
+| `DOCTOR_RULES_EVAL_TIMEOUT` | `30s` | Per-rule timeout |
+| `DOCTOR_RULES_LEASE_TTL` / `_RENEW` | `30s` / `10s` | Leader lease timing |
+| `DOCTOR_RULES_RULER_ID` | hostname | Lease identity |
+| `DOCTOR_RULES_STORE_ROOT` | `/doctor/v1/rules` | MonoFS rule root |
+| `DOCTOR_RULES_POLL_INTERVAL` | `30s` | Rule reload interval |
+| `DOCTOR_MONOFS_TOKEN` | — | Guardian token for rule files |
+| `DOCTOR_MONOFS_CLIENT_ID` | `doctor-rules` | MonoFS client id |
 
 ## Correlation verification query
 

@@ -118,6 +118,52 @@ type QueryConfig struct {
 	MonoFSClientID          string
 }
 
+// RulesConfig holds doctor-rules settings.
+type RulesConfig struct {
+	Enabled             bool
+	HTTPAddr            string
+	QueryURL            string
+	QueryToken          string
+	Workers             int
+	EvalTimeout         time.Duration
+	LeaseTTL            time.Duration
+	LeaseRenew          time.Duration
+	RulerID             string
+	StoreRoot           string
+	PollInterval        time.Duration
+	MonoFSLogEngineAddr string
+	MonoFSToken         string
+	MonoFSClientID      string
+}
+
+// LoadRules loads the doctor-rules configuration from the environment.
+func LoadRules(service string) RulesConfig {
+	rulerID := envString("DOCTOR_RULES_RULER_ID", "")
+	if rulerID == "" {
+		if hostname, err := os.Hostname(); err == nil {
+			rulerID = hostname
+		} else {
+			rulerID = "doctor-rules"
+		}
+	}
+	return RulesConfig{
+		Enabled:             envBool("DOCTOR_RULES_ENABLED", true),
+		HTTPAddr:            envString("DOCTOR_RULES_HTTP_ADDR", ":18081"),
+		QueryURL:            envString("DOCTOR_RULES_QUERY_URL", ""),
+		QueryToken:          envString("DOCTOR_RULES_QUERY_TOKEN", ""),
+		Workers:             int(envInt64("DOCTOR_RULES_WORKERS", 8)),
+		EvalTimeout:         envDuration("DOCTOR_RULES_EVAL_TIMEOUT", 30*time.Second),
+		LeaseTTL:            envDuration("DOCTOR_RULES_LEASE_TTL", 30*time.Second),
+		LeaseRenew:          envDuration("DOCTOR_RULES_LEASE_RENEW", 10*time.Second),
+		RulerID:             rulerID,
+		StoreRoot:           envString("DOCTOR_RULES_STORE_ROOT", "/doctor/v1/rules"),
+		PollInterval:        envDuration("DOCTOR_RULES_POLL_INTERVAL", 30*time.Second),
+		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
+		MonoFSToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
+		MonoFSClientID:      envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-rules"),
+	}
+}
+
 func LoadIngest(service string) (IngestConfig, error) {
 	cfg := IngestConfig{
 		DefaultTenant:       envString("DOCTOR_DEFAULT_TENANT", "default"),

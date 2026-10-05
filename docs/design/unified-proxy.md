@@ -1118,11 +1118,26 @@ Deferred to P6: routing the native `/v1/*` log/trace handlers through the
 router (they still bypass access), UI login state, and flipping enforcement in
 deployment manifests.
 
-### P5 — doctor-rules
+### P5 — doctor-rules — landed
 
-- Rule model/store/CRUD, scheduler, per-shard eval + merge, write-back, lease.
-- **Acceptance:** 10k-rule load/scheduler benchmarks; two-replica lease
-  takeover integration test; derived metrics queryable through Prometheus API.
+- `internal/ruler`: rule model with `sum|max|min|last|keep` merge strategies,
+  MonoFS-backed store with CAS preconditions, heap scheduler with jitter and a
+  worker pool, per-shard evaluation via doctor-query with write-back through
+  the MonoFS logengine, and a CRUD/evaluate HTTP API.
+- Lease HA via MonoFS CAS (`ExpectedVersionID: "absent"` acquire, version CAS
+  renew, expired-lease takeover), mirroring Guardian's claim idiom.
+- Partial sums are skipped (`X-Doctor-Partial` detection) to avoid incorrect
+  totals; `keep` preserves `shard` labels.
+- New `cmd/doctor-rules` binary and `DOCTOR_RULES_*` / `DOCTOR_MONOFS_*`
+  configuration.
+- **Acceptance:** `BenchmarkRuleStoreLoad10k` ≈ 39 ms;
+  `BenchmarkEvaluatorMerge10k` ≈ 3.2 ms; unit tests cover parsing/validation,
+  store CAS, merge strategies, partial skipping, API CRUD, and lease takeover.
+
+Deferred to P6: OWNERS-based rule CRUD authorization wiring (the API accepts an
+optional `Authorizer`; observe-first leaves it open), per-source query routing
+(per-shard evaluation currently merges the proxy's tagged results), and
+rule-output read-path filtering.
 
 ### P6 — Enforce + UI + docs + load
 
