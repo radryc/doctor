@@ -90,6 +90,13 @@ type Backend struct {
 	Modes      map[Signal]Mode
 	Policy     QueryPolicy // always (default) or fallback
 	Origin     string      // "config" | "guardian-pusher" | "guardian-partition"
+
+	// Kind-specific configuration.
+	Index   string            // elasticsearch index pattern
+	Schema  map[string]string // field mapping overrides (elasticsearch/bigquery)
+	Project string            // bigquery project
+	Dataset string            // bigquery dataset
+	Table   string            // bigquery table (logs)
 }
 
 // Validate reports whether the backend is well-formed.

@@ -56,7 +56,7 @@ func newProxyTestRouter(t *testing.T, svc *Service) *proxy.Router {
 	if err := router.Register(proxy.Backend{
 		Name:    "doctor",
 		Kind:    proxy.KindMonoFS,
-		Signals: []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs},
+		Signals: []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs, proxy.SignalTraces},
 		Policy:  proxy.PolicyAlways,
 	}, proxy.Upstreams{
 		Metrics: svc.LocalMetricsUpstream(),

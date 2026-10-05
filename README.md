@@ -138,6 +138,13 @@ All limits are disabled by default (0 = no limit).
 | `DOCTOR_AWS_ENABLED` | Federate CloudWatch metrics/Logs Insights and X-Ray traces from guardian-pusher-aws (activates once `DOCTOR_AWS_BACKEND_URL` is set) | `true` |
 | `DOCTOR_AWS_BACKEND_URL` | Base URL of the pusher AWS read API (e.g. `http://guardian-awsread:19090`) | unset |
 | `DOCTOR_AWS_BACKEND_TOKEN` | Bearer token for the pusher AWS read API | unset |
+| `DOCTOR_PROXY_ENABLED` | Route queries through the multi-backend proxy router | `true` |
+| `DOCTOR_PROXY_BACKENDS_FILE` | YAML/JSON backend registry file (hot-reloaded) | unset |
+| `DOCTOR_PROXY_MAX_INFLIGHT` | Maximum concurrent upstream calls | `32` |
+| `DOCTOR_PROXY_BACKEND_TIMEOUT` | Per-backend query timeout | `15s` |
+| `DOCTOR_GUARDIAN_DISCOVERY_ENABLED` | Discover backends from Guardian (`/api/pushers`, partitions) | `false` |
+| `DOCTOR_GUARDIAN_DISCOVERY_INTERVAL` | Discovery poll interval | `30s` |
+| `DOCTOR_GUARDIAN_TOKEN` | Bearer token for Guardian discovery | unset |
 
 ### Self-telemetry (both services)
 
@@ -210,6 +217,46 @@ Loki exposes a curated subset of these as stream labels (`trace_id`, `span_id`, 
 `level`, and Kubernetes names) to keep stream cardinality bounded; metrics and traces carry
 the full attribute set. Metric samples that carry a `trace_id` are returned as Prometheus
 exemplars, so the provisioned Grafana datasources can link metrics -> traces -> logs.
+
+## Multi-backend proxy
+
+`doctor-query` can federate multiple PromQL, Loki, Tempo, Elasticsearch, and
+BigQuery sources into the same three dataspaces. Backends come from
+`DOCTOR_PROXY_BACKENDS_FILE` and/or Guardian discovery
+(`DOCTOR_GUARDIAN_DISCOVERY_ENABLED=true` with `DOCTOR_GUARDIAN_TOKEN`):
+
+```yaml
+version: 1
+backends:
+  - name: prom-edge
+    kind: prometheus
+    baseUrl: http://prom-edge:9090
+    signals: [metrics]
+    ownersPath: /doctor/v1/endpoints/prom-edge
+  - name: loki-shard-1
+    kind: loki
+    baseUrl: http://loki-1:3100
+    signals: [logs]
+  - name: es-logs
+    kind: elasticsearch
+    baseUrl: http://elasticsearch:9200
+    index: logs-*.otel-*
+    signals: [logs]
+  - name: bq-logs
+    kind: bigquery
+    baseUrl: https://bigquery.googleapis.com/bigquery/v2
+    project: my-project
+    dataset: observability
+    table: logs
+    signals: [logs]
+```
+
+Queries fan out to all healthy backends and merge into one result set. Records
+are tagged `source=<kind>`; when two backends of the same kind return the same
+series/stream/span, a `shard=<backend-name>` label is added so nothing is
+dropped. `GET /v1/proxy/endpoints` lists the configured backends and their
+health. AWS remains registered as a `fallback` backend, preserving the existing
+"query CloudWatch only when local results are empty or `source="aws"`" behavior.
 
 ## Correlation verification query
 

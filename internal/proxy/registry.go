@@ -205,6 +205,11 @@ type backendFile struct {
 	Priority   int               `json:"priority" yaml:"priority"`
 	Modes      map[string]string `json:"modes" yaml:"modes"`
 	Policy     string            `json:"policy" yaml:"policy"`
+	Index      string            `json:"index" yaml:"index"`
+	Schema     map[string]string `json:"schema" yaml:"schema"`
+	Project    string            `json:"project" yaml:"project"`
+	Dataset    string            `json:"dataset" yaml:"dataset"`
+	Table      string            `json:"table" yaml:"table"`
 }
 
 func (entry backendFile) toBackend() (Backend, error) {
@@ -238,6 +243,11 @@ func (entry backendFile) toBackend() (Backend, error) {
 		Modes:      modes,
 		Policy:     QueryPolicy(strings.TrimSpace(strings.ToLower(entry.Policy))),
 		Origin:     "config",
+		Index:      strings.TrimSpace(entry.Index),
+		Schema:     entry.Schema,
+		Project:    strings.TrimSpace(entry.Project),
+		Dataset:    strings.TrimSpace(entry.Dataset),
+		Table:      strings.TrimSpace(entry.Table),
 	}
 	if entry.Public != nil {
 		backend.Public = *entry.Public

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rydzu/ainfra/doctor/internal/proxy/translate"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
 
@@ -54,32 +55,42 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 				break
 			}
 		}
-		if !capable {
-			return nil, nil, fmt.Errorf("%w: traceql requires a Tempo backend", ErrUnsupported)
+		if capable {
+			groups := make([][]TraceSummary, len(targets))
+			warnings, err := r.forEachTraceTarget(ctx, targets, func(ctx context.Context, target traceTarget) error {
+				upstream, ok := target.upstreams.Traces.(TraceQLUpstream)
+				if !ok {
+					return nil
+				}
+				summaries, queryErr := upstream.SearchTraceQL(ctx, tenant, search.TraceQL, search.From, search.To, search.Limit)
+				if queryErr != nil {
+					return queryErr
+				}
+				groups[target.index] = summaries
+				return nil
+			})
+			if err != nil {
+				return nil, warnings, err
+			}
+			return MergeTraceSummaries(groups...), warnings, nil
+		}
+
+		// No TraceQL-capable backend: fall back to the shared subset matcher
+		// for local/AWS/Elasticsearch sources.
+		translated, err := translate.ParseTraceQL(search.TraceQL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", ErrUnsupported, err)
+		}
+		search.TraceQL = ""
+		if translated.Service != "" {
+			search.Service = translated.Service
+		}
+		for _, tag := range translated.Tags {
+			search.Tags = append(search.Tags, TraceTag{Key: tag.Key, Value: tag.Value})
 		}
 	}
 	if len(targets) == 0 {
 		return nil, nil, nil
-	}
-
-	if search.TraceQL != "" {
-		groups := make([][]TraceSummary, len(targets))
-		warnings, err := r.forEachTraceTarget(ctx, targets, func(ctx context.Context, target traceTarget) error {
-			upstream, ok := target.upstreams.Traces.(TraceQLUpstream)
-			if !ok {
-				return nil
-			}
-			summaries, queryErr := upstream.SearchTraceQL(ctx, tenant, search.TraceQL, search.From, search.To, search.Limit)
-			if queryErr != nil {
-				return queryErr
-			}
-			groups[target.index] = summaries
-			return nil
-		})
-		if err != nil {
-			return nil, warnings, err
-		}
-		return MergeTraceSummaries(groups...), warnings, nil
 	}
 
 	groups := make([][]TraceSummary, len(targets))

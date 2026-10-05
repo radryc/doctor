@@ -453,6 +453,10 @@ func (r *Router) entryFor(backend Backend) upstreamEntry {
 		entry.upstreams.Logs = NewLokiHTTPUpstream(backend, nil)
 	case KindTempo:
 		entry.upstreams.Traces = NewTempoHTTPUpstream(backend, nil)
+	case KindElasticsearch:
+		entry.upstreams.Logs = NewElasticsearchUpstream(backend, nil)
+	case KindBigQuery:
+		entry.upstreams.Logs = NewBigQueryUpstream(backend, nil)
 	}
 
 	r.mu.Lock()

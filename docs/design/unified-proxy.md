@@ -1074,12 +1074,25 @@ and trace fan-out (P2 replaces Zipkin with Tempo).
 Deferred to P3: the local TraceQL subset matcher (TraceQL currently requires a
 Tempo backend).
 
-### P3 — Tempo/Elasticsearch/BigQuery adapters + translation
+### P3 — Tempo/Elasticsearch/BigQuery adapters + translation — landed
 
-- Tempo upstream; ES|QL adapter + LogQL→ES|QL translation (strict mode);
-  BigQuery store-mode adapter + pushdown; discovery methods.
-- **Acceptance:** LogQL translation table tests; fake ES|QL server returns
-  merged logs; BigQuery adapter tested against a fake `jobs.query` endpoint.
+- Tempo upstream landed in P2.
+- `internal/proxy/translate`: LogQL selector/line-filter parsing, LogQL→ES|QL
+  translation, LogQL→BigQuery SQL translation, and the shared TraceQL subset
+  matcher. Parser stages, label filters, and metric aggregation stay local, so
+  the translators only emit selector + line-filter pushdown.
+- Elasticsearch adapter over the ES|QL `_query` API with configurable index and
+  field schema (OTel defaults). BigQuery adapter over `jobs.query` with
+  pagination, read-only SQL, and schema mapping.
+- The router builds ES/BigQuery upstreams from the registry; TraceQL requests
+  without a Tempo backend fall back to the subset matcher on local/AWS sources
+  (400 for unsupported constructs).
+- **Acceptance:** translator table tests, ES|QL fake-server test, BigQuery
+  fake `jobs.query` + pagination test, TraceQL subset filtering test.
+
+Deferred: Elasticsearch traces and metrics (logs only for now), BigQuery
+metrics/traces, ES|QL strict-mode request failure (translation errors currently
+surface as backend warnings), and `DOCTOR_PROXY_TRANSLATE_STRICT` wiring.
 
 ### P4 — SSO + access (observe-first)
 

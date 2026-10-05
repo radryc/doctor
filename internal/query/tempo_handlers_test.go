@@ -192,16 +192,47 @@ func TestTempoTraceByIDFallsBackToAWS(t *testing.T) {
 	}
 }
 
-func TestTempoSearchTraceQLRequiresTempoBackend(t *testing.T) {
+func TestTempoSearchTraceQLUnsupportedConstructFails(t *testing.T) {
 	svc := &Service{defaultTenant: "default", logEngine: &fakeLogEngineBackend{}}
 	svc.SetProxyRouter(newProxyTestRouter(t, svc))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/search?q=%7B%20.name%20%3D%20%22x%22%20%7D", nil)
+	// Regex matchers are outside the shared subset matcher and no Tempo backend
+	// is configured, so the request must fail with a clear error.
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=%7B%20.name%20%3D~%20%22x%22%20%7D", nil)
 	rec := httptest.NewRecorder()
 	svc.handleTempoSearch(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTempoSearchTraceQLSubsetFiltersLocalTraces(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{
+		{TraceID: "trace-a", SpanID: "span-a", Name: "GET /a", Service: "api", StartTime: base, EndTime: base.Add(time.Second)},
+		{TraceID: "trace-b", SpanID: "span-b", Name: "GET /b", Service: "worker", StartTime: base, EndTime: base.Add(time.Second)},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	svc.SetProxyRouter(newProxyTestRouter(t, svc))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=%7B%20.service.name%20%3D%20%22api%22%20%7D", nil)
+	rec := httptest.NewRecorder()
+	svc.handleTempoSearch(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Traces []struct {
+			TraceID string `json:"traceID"`
+		} `json:"traces"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Traces) != 1 || resp.Traces[0].TraceID != "trace-a" {
+		t.Fatalf("traces = %#v", resp.Traces)
 	}
 }
 
