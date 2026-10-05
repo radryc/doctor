@@ -474,14 +474,35 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
 	from := time.Now().UTC().Add(-24 * time.Hour)
 	to := time.Now().UTC()
-	spans, err := s.logEngine.QueryTraces(r.Context(), tenant, traceID, "", from, to, 1000)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if len(spans) == 0 {
-		http.Error(w, "trace not found", http.StatusNotFound)
-		return
+
+	var spans []segment.TraceRecord
+	if s.proxyRouter != nil {
+		records, warnings, err := s.proxyRouter.GetTrace(r.Context(), tenant, traceID)
+		if err != nil {
+			if isAccessDenied(err) {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(records) == 0 {
+			http.Error(w, "trace not found", http.StatusNotFound)
+			return
+		}
+		writeProxyWarnings(w, warnings)
+		spans = records
+	} else {
+		var err error
+		spans, err = s.logEngine.QueryTraces(r.Context(), tenant, traceID, "", from, to, 1000)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(spans) == 0 {
+			http.Error(w, "trace not found", http.StatusNotFound)
+			return
+		}
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].StartTime.Before(spans[j].StartTime) })
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -505,10 +526,25 @@ func (s *Service) handleSpanSearch(w http.ResponseWriter, r *http.Request) {
 		to = time.Now().UTC()
 	}
 
-	spans, err := s.logEngine.QueryTraces(r.Context(), tenant, traceID, service, from, to, limit)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	var spans []segment.TraceRecord
+	if s.proxyRouter != nil {
+		var err error
+		spans, err = s.searchSpansViaRouter(r, tenant, service, traceID, from, to, limit)
+		if err != nil {
+			if isAccessDenied(err) {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		var err error
+		spans, err = s.logEngine.QueryTraces(r.Context(), tenant, traceID, service, from, to, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	sort.Slice(spans, func(i, j int) bool {
 		if spans[i].StartTime.Equal(spans[j].StartTime) {
@@ -539,10 +575,26 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 		to = time.Now().UTC()
 	}
 
-	results, err := s.logEngine.QueryLogs(r.Context(), tenant, query, service, from, to, limit)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	var results []segment.LogRecord
+	if s.proxyRouter != nil {
+		records, warnings, err := s.proxyRouter.Logs(r.Context(), tenant, logSearchPushdown(service, query), from, to, limit)
+		if err != nil {
+			if isAccessDenied(err) {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeProxyWarnings(w, warnings)
+		results = records
+	} else {
+		var err error
+		results, err = s.logEngine.QueryLogs(r.Context(), tenant, query, service, from, to, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].Timestamp.After(results[j].Timestamp) })
 

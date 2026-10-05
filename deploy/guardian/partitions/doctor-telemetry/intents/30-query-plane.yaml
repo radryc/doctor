@@ -20,6 +20,13 @@ spec:
           DOCTOR_DEFAULT_TENANT: default
           DOCTOR_MONOFS_LOGENGINE_ADDR: host.docker.internal:9090
           DOCTOR_QUERY_GUARDIAN_HEALTH_ENABLED: "true"
+          # Federation proxy (observe-first access control).
+          DOCTOR_PROXY_ENABLED: "true"
+          DOCTOR_PROXY_BACKENDS_FILE: /etc/doctor/backends.yaml
+          DOCTOR_GUARDIAN_DISCOVERY_ENABLED: "false"
+          DOCTOR_ACCESS_RESOLVER: owners
+          DOCTOR_ACCESS_MODE: observe
+          DOCTOR_AUTH_REQUIRE: "false"
         ports:
           - name: http
             containerPort: 18080

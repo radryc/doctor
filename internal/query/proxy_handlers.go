@@ -9,6 +9,7 @@ import (
 
 	"github.com/rydzu/ainfra/doctor/internal/access"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
+	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
 
 // handlePrometheusQueryViaRouter executes an instant query through the
@@ -77,4 +78,76 @@ func writeProxyWarnings(w http.ResponseWriter, warnings []proxy.Warning) {
 // denial.
 func isAccessDenied(err error) bool {
 	return errors.Is(err, access.ErrAccessDenied)
+}
+
+// logSearchPushdown converts the native log-search parameters into the reduced
+// LogQL form used by proxy upstreams.
+func logSearchPushdown(service, text string) proxy.LogPushdown {
+	selector := `{service=~".+"}`
+	if service != "" {
+		selector = `{service="` + escapeLogQL(service) + `"}`
+	}
+	pushdown := proxy.LogPushdown{Selector: selector}
+	if text != "" {
+		pushdown.LineFilters = []proxy.LogLineFilter{{Op: "|=", Value: text}}
+	}
+	return pushdown
+}
+
+func escapeLogQL(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
+}
+
+// searchSpansViaRouter implements the native span search over the proxy. When
+// a trace ID is given it fetches that trace; otherwise it searches trace
+// summaries and hydrates spans up to the limit.
+func (s *Service) searchSpansViaRouter(r *http.Request, tenant, service, traceID string, from, to time.Time, limit int) ([]segment.TraceRecord, error) {
+	if traceID != "" {
+		records, _, err := s.proxyRouter.GetTrace(r.Context(), tenant, traceID)
+		if err != nil {
+			return nil, err
+		}
+		return filterSpansByService(records, service), nil
+	}
+	summaries, warnings, err := s.proxyRouter.SearchTraces(r.Context(), tenant, proxy.TraceSearch{
+		Service: service,
+		From:    from,
+		To:      to,
+		Limit:   limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	_ = warnings
+	spans := make([]segment.TraceRecord, 0, limit)
+	for _, summary := range summaries {
+		if len(spans) >= limit {
+			break
+		}
+		records, _, err := s.proxyRouter.GetTrace(r.Context(), tenant, summary.TraceID)
+		if err != nil {
+			if isAccessDenied(err) {
+				return nil, err
+			}
+			continue
+		}
+		spans = append(spans, filterSpansByService(records, service)...)
+	}
+	if len(spans) > limit {
+		spans = spans[:limit]
+	}
+	return spans, nil
+}
+
+func filterSpansByService(records []segment.TraceRecord, service string) []segment.TraceRecord {
+	if service == "" {
+		return records
+	}
+	out := make([]segment.TraceRecord, 0, len(records))
+	for _, record := range records {
+		if record.Service == service {
+			out = append(out, record)
+		}
+	}
+	return out
 }

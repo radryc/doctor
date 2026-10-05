@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rydzu/ainfra/doctor/internal/access"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
@@ -188,6 +189,55 @@ func TestProxyRouterMergesLogsThroughLokiHandler(t *testing.T) {
 	}
 	if total != 2 {
 		t.Fatalf("stream values = %d, want 2 (body=%s)", total, rec.Body.String())
+	}
+}
+
+func TestEnforcedAccessDeniesNativeTraceAndLogHandlers(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	local := &fakeLogEngineBackend{
+		traces: []segment.TraceRecord{{
+			TraceID: "trace-1", SpanID: "span-1", Service: "api",
+			StartTime: base, EndTime: base.Add(time.Second),
+		}},
+		logs: []segment.LogRecord{{Service: "api", Timestamp: base, Body: "x"}},
+	}
+	svc := &Service{defaultTenant: "default", logEngine: local}
+
+	gate := access.NewGate(
+		access.NewStatic("", "", ""),
+		map[access.Signal]bool{access.SignalTraces: true, access.SignalLogs: true},
+		nil, nil,
+	)
+	router := proxy.NewRouter(proxy.RouterConfig{
+		MaxInflight:    4,
+		BackendTimeout: time.Second,
+		Access:         gate,
+	}, proxy.NewCompositeRegistry())
+	if err := router.Register(proxy.Backend{
+		Name:    "doctor",
+		Kind:    proxy.KindMonoFS,
+		Signals: []proxy.Signal{proxy.SignalTraces, proxy.SignalLogs},
+		Policy:  proxy.PolicyAlways,
+	}, proxy.Upstreams{
+		Traces: svc.LocalTracesUpstream(),
+		Logs:   svc.LocalLogsUpstream(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	svc.SetProxyRouter(router)
+
+	traceReq := httptest.NewRequest(http.MethodGet, "/v1/traces/trace-1", nil)
+	traceRec := httptest.NewRecorder()
+	svc.handleTraceByID(traceRec, traceReq)
+	if traceRec.Code != http.StatusForbidden {
+		t.Fatalf("trace status = %d, want 403 (body=%s)", traceRec.Code, traceRec.Body.String())
+	}
+
+	logReq := httptest.NewRequest(http.MethodGet, "/v1/logs/search?q=x", nil)
+	logRec := httptest.NewRecorder()
+	svc.handleLogSearch(logRec, logReq)
+	if logRec.Code != http.StatusForbidden {
+		t.Fatalf("log status = %d, want 403 (body=%s)", logRec.Code, logRec.Body.String())
 	}
 }
 

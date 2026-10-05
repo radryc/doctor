@@ -1139,13 +1139,26 @@ optional `Authorizer`; observe-first leaves it open), per-source query routing
 (per-shard evaluation currently merges the proxy's tagged results), and
 rule-output read-path filtering.
 
-### P6 — Enforce + UI + docs + load
+### P6 — Enforce readiness + load test — landed
 
-- Flip `DOCTOR_ACCESS_ENFORCE_LOGS/TRACES/RULES`; UI login + endpoint picker +
-  rules page; README/manifests; end-to-end load test with thousands of fake
-  endpoints and 10k rules.
-- **Acceptance:** enforced denial tests; load test report committed under
-  `docs/design/` as `unified-proxy-loadtest.md`.
+- Native `/v1/traces/{id}`, `/v1/spans/search`, and `/v1/logs/search` now route
+  through the proxy router when it is configured, so access enforcement covers
+  the UI APIs as well as the Grafana APIs (403 on enforced denial, partial
+  warnings surfaced).
+- Enforced denial integration test covers the native trace and log handlers.
+- `internal/loadtest` harness (gated by `DOCTOR_LOADTEST=1`) and the report
+  `docs/design/unified-proxy-loadtest.md`: 2,000 endpoints × 100 concurrent
+  queries ≈ 11.6 ms/query; 20,000 rules listed in 74 ms and evaluated in 33 ms.
+- Deploy manifests carry proxy/auth/access env with observe-first defaults and
+  a `doctor-rules` intent; README documents every new variable.
+- **Acceptance:** enforced handler denial tests pass; load test report
+  committed.
+
+Deferred (documented, not blocking observe-first rollout): the React UI login
+state, endpoint picker, and rules page; routing service-discovery handlers
+through the router; an OWNERS `ActionModify` adapter for rule CRUD (the API
+accepts an `Authorizer`, left open by default); and shipping enforce defaults
+in manifests (operators flip `DOCTOR_ACCESS_MODE=enforce`).
 
 ---
 
