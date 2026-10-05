@@ -2,242 +2,52 @@ package query
 
 import (
 	"context"
-	"regexp"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/prometheus/prometheus/promql"
+	"github.com/rydzu/ainfra/doctor/internal/proxy"
 )
 
 // This file federates CloudWatch metrics into the Prometheus API using
 // CloudWatch's Prometheus-compatible endpoints (SigV4-signed via the AWS
-// pusher). Unlike a selector translation this preserves the full PromQL
-// language, including functions, aggregations and histogram_quantile.
+// pusher). The query classification and result merging live in internal/proxy;
+// the wrappers below keep the handler call sites and tests stable while the
+// multi-backend router is built out.
 
 const (
-	awsQueryNone = iota
-	awsQueryOnly
-	awsQueryMixed
+	awsQueryNone  = proxy.AWSQueryNone
+	awsQueryOnly  = proxy.AWSQueryOnly
+	awsQueryMixed = proxy.AWSQueryMixed
 )
 
-var (
-	awsSourceExactRe  = regexp.MustCompile(`\bsource\s*=\s*"aws"`)
-	awsSourceRegexRe  = regexp.MustCompile(`\bsource\s*=~\s*"([^"]*)"`)
-	selectorLeadComma = regexp.MustCompile(`\{\s*,`)
-	selectorTailComma = regexp.MustCompile(`,\s*\}`)
-	selectorLeadSpace = regexp.MustCompile(`\{\s+`)
-	selectorTailSpace = regexp.MustCompile(`\s+\}`)
-)
-
-// awsQueryMode classifies a query and returns it with the source matcher removed
-// (CloudWatch has no `source` label).
-func awsQueryMode(query string) (string, int) {
-	if awsSourceExactRe.MatchString(query) {
-		return stripAWSSourceMatcher(query), awsQueryOnly
-	}
-	if match := awsSourceRegexRe.FindStringSubmatch(query); len(match) == 2 {
-		value := match[1]
-		if strings.Contains(value, "aws") {
-			mode := awsQueryMixed
-			if value == "aws" {
-				mode = awsQueryOnly
-			}
-			return stripAWSSourceMatcher(query), mode
-		}
-	}
-	return query, awsQueryNone
-}
-
-func stripAWSSourceMatcher(query string) string {
-	out := awsSourceExactRe.ReplaceAllString(query, "")
-	out = awsSourceRegexRe.ReplaceAllString(out, "")
-	out = selectorLeadComma.ReplaceAllString(out, "{")
-	out = selectorTailComma.ReplaceAllString(out, "}")
-	out = strings.ReplaceAll(out, ",,", ",")
-	out = selectorLeadSpace.ReplaceAllString(out, "{")
-	out = selectorTailSpace.ReplaceAllString(out, "}")
-	// A metric selector that becomes empty should collapse to the bare metric
-	// name (CloudWatch accepts `Metric` but not `Metric{}`).
-	out = strings.ReplaceAll(out, "{}", "")
-	return out
-}
+// awsQueryMode classifies a query and returns it with the source matcher removed.
+func awsQueryMode(query string) (string, int) { return proxy.AWSQueryMode(query) }
 
 // awsMatches splits match[] selectors into whether any targets AWS and the
 // AWS-forwardable (source-stripped) selectors.
-func awsMatches(matches []string) (bool, []string) {
-	hasAWS := false
-	forwarded := make([]string, 0, len(matches))
-	for _, match := range matches {
-		stripped, mode := awsQueryMode(match)
-		if mode != awsQueryNone {
-			hasAWS = true
-			forwarded = append(forwarded, stripped)
-		} else {
-			forwarded = append(forwarded, match)
-		}
-	}
-	return hasAWS, forwarded
+func awsMatches(matches []string) (bool, []string) { return proxy.AWSMatches(matches) }
+
+// mergePrometheusQueryData merges the AWS result into the local result,
+// tagging AWS series with source="aws".
+func mergePrometheusQueryData(local, aws map[string]any, defaultType string) map[string]any {
+	return proxy.MergePrometheusQueryData(local, defaultType, proxy.PromRemote{Source: proxy.SourceAWS, Data: aws})
 }
 
 func extractPrometheusData(response map[string]any) map[string]any {
-	if response == nil {
-		return nil
-	}
-	data, _ := response["data"].(map[string]any)
-	return data
+	return proxy.ExtractPrometheusData(response)
 }
 
-// extractPrometheusStringList decodes label/label-value discovery responses.
-// Prometheus returns these as a bare JSON array under "data"
-// (`{"status":"success","data":["a","b"]}`), but some backends wrap the array
-// in an object with a "result" field, so both shapes are accepted.
 func extractPrometheusStringList(response map[string]any) []string {
-	if response == nil {
-		return nil
-	}
-	out := make([]string, 0)
-	appendValue := func(value any) {
-		if str, ok := value.(string); ok {
-			out = append(out, str)
-		}
-	}
-	switch data := response["data"].(type) {
-	case []any:
-		for _, value := range data {
-			appendValue(value)
-		}
-	case map[string]any:
-		if result, ok := data["result"].([]any); ok {
-			for _, value := range result {
-				appendValue(value)
-			}
-		}
-	}
-	return out
+	return proxy.ExtractPrometheusStringList(response)
 }
 
-// extractPrometheusSeries decodes a series-discovery response, accepting both
-// the Prometheus array-of-label-maps shape and a wrapped "result" object.
 func extractPrometheusSeries(response map[string]any) []map[string]string {
-	if response == nil {
-		return nil
-	}
-	out := make([]map[string]string, 0)
-	appendSeries := func(item any) {
-		m, ok := item.(map[string]any)
-		if !ok {
-			return
-		}
-		labels := make(map[string]string, len(m)+1)
-		for key, raw := range m {
-			if str, ok := raw.(string); ok {
-				labels[key] = str
-			}
-		}
-		if _, exists := labels[labelSource]; !exists {
-			labels[labelSource] = awsSourceLabel
-		}
-		out = append(out, labels)
-	}
-	switch data := response["data"].(type) {
-	case []any:
-		for _, item := range data {
-			appendSeries(item)
-		}
-	case map[string]any:
-		if result, ok := data["result"].([]any); ok {
-			for _, item := range result {
-				appendSeries(item)
-			}
-		}
-	}
-	return out
+	return proxy.ExtractPrometheusSeries(response)
 }
 
-// mergePrometheusQueryData merges CloudWatch vector/matrix data into the local
-// result, tagging AWS series with source="aws".
-func mergePrometheusQueryData(local, aws map[string]any, defaultType string) map[string]any {
-	if local == nil && aws == nil {
-		return map[string]any{"resultType": defaultType, "result": []any{}}
-	}
-	if local == nil {
-		return tagPrometheusData(aws)
-	}
-	if aws == nil {
-		return local
-	}
-	localType, _ := local["resultType"].(string)
-	awsType, _ := aws["resultType"].(string)
-	if localType != "" && awsType != "" && localType != awsType {
-		return local
-	}
-	localResult := prometheusResultSlice(local)
-	awsResult := prometheusResultSlice(aws)
-	for _, item := range awsResult {
-		localResult = append(localResult, tagPrometheusItem(item))
-	}
-	local["result"] = localResult
-	return local
-}
-
-// prometheusResultSlice returns data["result"] as a []any regardless of whether
-// it was built in-process (concrete slices) or decoded from JSON ([]any).
-func prometheusResultSlice(data map[string]any) []any {
-	if data == nil {
-		return nil
-	}
-	switch result := data["result"].(type) {
-	case []any:
-		return result
-	case []map[string]any:
-		out := make([]any, 0, len(result))
-		for _, item := range result {
-			out = append(out, item)
-		}
-		return out
-	default:
-		return nil
-	}
-}
-
-// prometheusResultEmpty reports whether a Prometheus query result contains no
-// series. A nil result is treated as empty.
 func prometheusResultEmpty(data map[string]any) bool {
-	return len(prometheusResultSlice(data)) == 0
-}
-
-func tagPrometheusData(data map[string]any) map[string]any {
-	if data == nil {
-		return nil
-	}
-	if result := prometheusResultSlice(data); result != nil {
-		tagged := make([]any, 0, len(result))
-		for _, item := range result {
-			tagged = append(tagged, tagPrometheusItem(item))
-		}
-		data["result"] = tagged
-	}
-	return data
-}
-
-func tagPrometheusItem(item any) any {
-	m, ok := item.(map[string]any)
-	if !ok {
-		return item
-	}
-	if metric, ok := m["metric"].(map[string]any); ok {
-		if _, exists := metric[labelSource]; !exists {
-			metric[labelSource] = awsSourceLabel
-		}
-		m["metric"] = metric
-		return m
-	}
-	// series-style item: the map itself is the label set
-	if _, exists := m[labelSource]; !exists {
-		m[labelSource] = awsSourceLabel
-	}
-	return m
+	return proxy.PrometheusResultEmpty(data)
 }
 
 // execPrometheusInstant runs an instant query against local storage. parseErr is

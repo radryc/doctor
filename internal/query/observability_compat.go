@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
 
@@ -452,7 +453,7 @@ func (s *Service) fetchLokiRecords(ctx context.Context, tenant string, plan loki
 		return nil, err
 	}
 	if awsLogs := s.queryAWSLogsForLoki(ctx, tenant, plan, from, to, limit); len(awsLogs) > 0 {
-		local = append(local, awsLogs...)
+		local = proxy.MergeLogs(local, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
 	}
 	return local, nil
 }

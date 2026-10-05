@@ -1,0 +1,184 @@
+package proxy
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
+)
+
+type fakeAWSClient struct {
+	enabled      bool
+	logs         []awsstore.LogRecord
+	lastLogQuery awsstore.LogQuery
+	metrics      []awsstore.MetricDescriptor
+	services     []awsstore.ServiceInfo
+}
+
+func (f *fakeAWSClient) Enabled() bool { return f.enabled }
+
+func (f *fakeAWSClient) ListMetrics(context.Context, string, string) ([]awsstore.MetricDescriptor, error) {
+	return f.metrics, nil
+}
+
+func (f *fakeAWSClient) ListServices(context.Context) ([]awsstore.ServiceInfo, error) {
+	return f.services, nil
+}
+
+func (f *fakeAWSClient) QueryLogs(_ context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error) {
+	f.lastLogQuery = q
+	return f.logs, nil
+}
+
+func (f *fakeAWSClient) QueryTraces(context.Context, awsstore.TraceQuery) ([]awsstore.TraceSummary, error) {
+	return nil, nil
+}
+
+func (f *fakeAWSClient) GetTrace(context.Context, string) ([]awsstore.Span, error) {
+	return nil, nil
+}
+
+func (f *fakeAWSClient) PrometheusQuery(context.Context, string, time.Time) (map[string]any, error) {
+	return nil, nil
+}
+
+func (f *fakeAWSClient) PrometheusQueryRange(context.Context, string, time.Time, time.Time, time.Duration) (map[string]any, error) {
+	return nil, nil
+}
+
+func (f *fakeAWSClient) PrometheusSeries(context.Context, []string, time.Time, time.Time) (map[string]any, error) {
+	return nil, nil
+}
+
+func (f *fakeAWSClient) PrometheusLabels(context.Context, []string, time.Time, time.Time) (map[string]any, error) {
+	return nil, nil
+}
+
+func (f *fakeAWSClient) PrometheusLabelValues(context.Context, string, []string, time.Time, time.Time) (map[string]any, error) {
+	return nil, nil
+}
+
+func TestAWSQueryModeAndStripping(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantQuery string
+		wantMode  int
+	}{
+		{`CPUUtilization`, `CPUUtilization`, AWSQueryNone},
+		{`CPUUtilization{source="aws"}`, `CPUUtilization`, AWSQueryOnly},
+		{`sum(rate({CPUUtilization, source="aws"}[5m]))`, `sum(rate({CPUUtilization}[5m]))`, AWSQueryOnly},
+		{`X{source="aws", InstanceId="i-1"}`, `X{InstanceId="i-1"}`, AWSQueryOnly},
+		{`X{source=~"aws|doctor"}`, `X`, AWSQueryMixed},
+	}
+	for _, tc := range cases {
+		forwarded, mode := AWSQueryMode(tc.in)
+		if forwarded != tc.wantQuery || mode != tc.wantMode {
+			t.Fatalf("AWSQueryMode(%q) = %q, %d; want %q, %d", tc.in, forwarded, mode, tc.wantQuery, tc.wantMode)
+		}
+	}
+}
+
+func TestAWSMatchesStripsForwardedSelectors(t *testing.T) {
+	hasAWS, forwarded := AWSMatches([]string{`X{source="aws", a="b"}`, `Y{a="b"}`})
+	if !hasAWS {
+		t.Fatal("hasAWS = false, want true")
+	}
+	want := []string{`X{a="b"}`, `Y{a="b"}`}
+	if len(forwarded) != len(want) {
+		t.Fatalf("forwarded = %#v, want %#v", forwarded, want)
+	}
+	for i := range want {
+		if forwarded[i] != want[i] {
+			t.Fatalf("forwarded[%d] = %q, want %q", i, forwarded[i], want[i])
+		}
+	}
+}
+
+func TestAWSLogsForLokiConvertsRecords(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	client := &fakeAWSClient{
+		enabled: true,
+		logs: []awsstore.LogRecord{{
+			Timestamp: base,
+			LogGroup:  "/ecs/api",
+			LogStream: "stream-1",
+			Message:   "boom",
+			Fields:    map[string]string{"service": "api"},
+			Region:    "eu-west-1",
+			Account:   "123456789012",
+		}},
+	}
+
+	records := AWSLogsForLoki(context.Background(), client, "default", LogPushdown{
+		Selector:    `{source="aws",aws_log_group="/ecs/api"}`,
+		LineFilters: []LogLineFilter{{Op: "|=", Value: "boom"}},
+	}, base.Add(-time.Hour), base, 100)
+
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	record := records[0]
+	if record.Service != "api" {
+		t.Fatalf("service = %q, want api", record.Service)
+	}
+	if record.Attributes[LabelSource] != SourceAWS {
+		t.Fatalf("source = %q, want aws", record.Attributes[LabelSource])
+	}
+	if record.Attributes["aws_log_group"] != "/ecs/api" {
+		t.Fatalf("aws_log_group = %q", record.Attributes["aws_log_group"])
+	}
+	if record.Attributes[AttrAWSRegion] != "eu-west-1" {
+		t.Fatalf("aws_region = %q, want eu-west-1", record.Attributes[AttrAWSRegion])
+	}
+	if record.Attributes[AWSPartitionLabel] != "eu-west-1" {
+		t.Fatalf("partition = %q, want eu-west-1", record.Attributes[AWSPartitionLabel])
+	}
+	if client.lastLogQuery.Limit != 100 {
+		t.Fatalf("limit = %d, want 100", client.lastLogQuery.Limit)
+	}
+	if got := client.lastLogQuery.Query; got != `fields @timestamp, @message, @logStream, @log | filter @message like /boom/ | sort @timestamp desc` {
+		t.Fatalf("insights query = %q", got)
+	}
+}
+
+func TestAWSLogsForLokiSkipsNonAWSSelector(t *testing.T) {
+	client := &fakeAWSClient{enabled: true}
+	records := AWSLogsForLoki(context.Background(), client, "default", LogPushdown{
+		Selector: `{service="api"}`,
+	}, time.Time{}, time.Now(), 10)
+	if records != nil {
+		t.Fatalf("records = %#v, want nil", records)
+	}
+	if client.lastLogQuery.LogGroups != nil {
+		t.Fatalf("client was queried for a non-AWS selector")
+	}
+}
+
+func TestAWSPartitionPrefersRegion(t *testing.T) {
+	if got := AWSPartition("eu-west-1", "123"); got != "eu-west-1" {
+		t.Fatalf("partition = %q, want eu-west-1", got)
+	}
+	if got := AWSPartition("", "123"); got != "123" {
+		t.Fatalf("partition = %q, want 123", got)
+	}
+	if got := AWSPartition("", ""); got != SourceAWS {
+		t.Fatalf("partition = %q, want aws", got)
+	}
+}
+
+func TestAWSMetricNamesSortedAndDeduped(t *testing.T) {
+	client := &fakeAWSClient{
+		enabled: true,
+		metrics: []awsstore.MetricDescriptor{
+			{MetricName: "b"},
+			{MetricName: "a"},
+			{MetricName: "a"},
+			{MetricName: " "},
+		},
+	}
+	names := AWSMetricNames(context.Background(), client)
+	if len(names) != 2 || names[0] != "a" || names[1] != "b" {
+		t.Fatalf("names = %#v, want [a b]", names)
+	}
+}

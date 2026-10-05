@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
 	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
@@ -35,7 +36,7 @@ type Service struct {
 	guardianAPIURL   string
 	defaultPartition string
 	logEngine        LogEngineBackend
-	aws              awsBackend
+	aws              proxy.AWSClient
 	guardianClient   *http.Client
 }
 
