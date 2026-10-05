@@ -59,6 +59,19 @@ const (
 	SourceRecording = "recording"
 )
 
+// QueryPolicy controls when a backend participates in a query.
+type QueryPolicy string
+
+const (
+	// PolicyAlways queries the backend on every request (default for proxy
+	// backends). Results are merged with the local dataspace.
+	PolicyAlways QueryPolicy = "always"
+	// PolicyFallback queries the backend only when the local result is empty,
+	// or when the query explicitly selects the backend's source. This preserves
+	// the legacy AWS federation behavior.
+	PolicyFallback QueryPolicy = "fallback"
+)
+
 var backendNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // Backend describes one configured upstream source.
@@ -75,7 +88,8 @@ type Backend struct {
 	Timeout    time.Duration // per-request timeout; 0 means the router default
 	Priority   int           // merge order (lower first); ties broken by Name
 	Modes      map[Signal]Mode
-	Origin     string // "config" | "guardian-pusher" | "guardian-partition"
+	Policy     QueryPolicy // always (default) or fallback
+	Origin     string      // "config" | "guardian-pusher" | "guardian-partition"
 }
 
 // Validate reports whether the backend is well-formed.
@@ -97,7 +111,30 @@ func (b Backend) Validate() error {
 			return fmt.Errorf("proxy: backend %q has invalid mode %q for signal %q", b.Name, mode, signal)
 		}
 	}
+	switch b.QueryPolicy() {
+	case PolicyAlways, PolicyFallback:
+	default:
+		return fmt.Errorf("proxy: backend %q has invalid query policy %q", b.Name, b.Policy)
+	}
+	switch b.Kind {
+	case KindPrometheus, KindLoki, KindTempo, KindElasticsearch:
+		baseURL := strings.TrimSpace(b.BaseURL)
+		if baseURL == "" {
+			return fmt.Errorf("proxy: backend %q kind %q requires a baseUrl", b.Name, b.Kind)
+		}
+		if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+			return fmt.Errorf("proxy: backend %q baseUrl %q must be http(s)", b.Name, baseURL)
+		}
+	}
 	return nil
+}
+
+// QueryPolicy returns the configured query policy, defaulting to PolicyAlways.
+func (b Backend) QueryPolicy() QueryPolicy {
+	if b.Policy == "" {
+		return PolicyAlways
+	}
+	return b.Policy
 }
 
 // Valid reports whether the signal is recognized.

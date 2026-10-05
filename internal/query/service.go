@@ -37,6 +37,7 @@ type Service struct {
 	defaultPartition string
 	logEngine        LogEngineBackend
 	aws              proxy.AWSClient
+	proxyRouter      *proxy.Router
 	guardianClient   *http.Client
 }
 
@@ -437,6 +438,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/metrics/range", s.handleMetricRange)
 	mux.HandleFunc("/v1/services/discover", s.handleServiceDiscovery)
 	mux.HandleFunc("/v1/services/suggest", s.handleServiceSuggest)
+	mux.HandleFunc("/v1/proxy/endpoints", s.handleProxyEndpoints)
 	mux.HandleFunc("/v1/guardian/topology", s.handleGuardianTopology)
 	mux.HandleFunc("/v1/guardian/events", s.handleGuardianEvents)
 	mux.HandleFunc("/v1/guardian/health", s.handleGuardianHealth)

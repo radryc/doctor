@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -43,6 +44,33 @@ func BenchmarkMergePrometheusSeriesOverlap(b *testing.B) {
 		local := benchmarkVector(SourceDoctor, seriesCount)
 		b.StartTimer()
 		_ = MergePrometheusQueryData(local, "vector", remotes...)
+	}
+}
+
+func BenchmarkRouterFanout256Backends(b *testing.B) {
+	const backendCount = 256
+	router := NewRouter(RouterConfig{MaxInflight: 32, BackendTimeout: time.Second}, NewCompositeRegistry())
+	for i := 0; i < backendCount; i++ {
+		name := fmt.Sprintf("prom-%d", i)
+		backend := Backend{
+			Name:    name,
+			Kind:    KindPrometheus,
+			BaseURL: "http://" + name,
+			Signals: []Signal{SignalMetrics},
+			Policy:  PolicyAlways,
+		}
+		upstream := &fakeMetricsUpstream{name: name, instant: vectorWithSeries("prometheus")}
+		if err := router.Register(backend, Upstreams{Metrics: upstream}); err != nil {
+			b.Fatalf("register: %v", err)
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := router.MetricsInstant(context.Background(), "default", "up", time.Now()); err != nil {
+			b.Fatalf("MetricsInstant: %v", err)
+		}
 	}
 }
 

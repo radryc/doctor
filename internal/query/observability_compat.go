@@ -441,6 +441,10 @@ func (s *Service) queryLogsForLoki(ctx context.Context, tenant, query string, fr
 // fetchLokiRecords reduces a parsed LogQL plan to the storage subset, queries
 // local storage plus any federated AWS backend, and returns the raw records.
 func (s *Service) fetchLokiRecords(ctx context.Context, tenant string, plan lokiPlan, from, to time.Time, limit int) ([]segment.LogRecord, error) {
+	if s.proxyRouter != nil {
+		records, _, err := s.proxyRouter.Logs(ctx, tenant, logPushdown(plan), from, to, limit)
+		return records, err
+	}
 	storageQuery := plan.storageQuery()
 	var local []segment.LogRecord
 	var err error

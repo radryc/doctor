@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/config"
+	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/query"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
 	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
@@ -71,9 +72,16 @@ func main() {
 	svc.SetGuardianURL(cfg.GuardianURL)
 	svc.SetGuardianAPIURL(cfg.GuardianAPIURL)
 	svc.SetDefaultPartition(cfg.DefaultPartition)
+
+	var awsClient *awsstore.Client
 	if cfg.AWSEnabled && cfg.AWSBackendURL != "" {
-		svc.SetAWSBackend(awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken))
+		awsClient = awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
+		svc.SetAWSBackend(awsClient)
 		log.Printf("aws federation enabled via %s", cfg.AWSBackendURL)
+	}
+
+	if cfg.ProxyEnabled {
+		setupProxyRouter(ctx, cfg, svc, awsClient)
 	}
 
 	server := &http.Server{
@@ -90,4 +98,80 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+// setupProxyRouter wires the multi-backend registry and router: local MonoFS
+// storage is always the "doctor" backend, AWS is registered with the legacy
+// fallback policy, and additional backends come from the static file and
+// Guardian discovery.
+func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient *awsstore.Client) {
+	registries := make([]proxy.Registry, 0, 2)
+	if cfg.ProxyBackendsFile != "" {
+		static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
+			Path:     cfg.ProxyBackendsFile,
+			Interval: cfg.ProxyRegistryInterval,
+			Logger:   log.Default(),
+		})
+		if err != nil {
+			log.Fatalf("load proxy backends: %v", err)
+		}
+		registries = append(registries, static)
+		go static.Run(ctx)
+		log.Printf("proxy backends loaded from %s", cfg.ProxyBackendsFile)
+	}
+	if cfg.GuardianDiscoveryEnabled {
+		if cfg.GuardianAPIURL == "" {
+			log.Printf("guardian discovery enabled but DOCTOR_GUARDIAN_API_URL is unset; discovery disabled")
+		} else {
+			discovery := proxy.NewGuardianDiscovery(proxy.GuardianDiscoveryConfig{
+				BaseURL:  cfg.GuardianAPIURL,
+				Token:    cfg.GuardianToken,
+				Interval: cfg.GuardianDiscoveryInterval,
+				Logger:   log.Default(),
+			})
+			registries = append(registries, discovery)
+			go discovery.Run(ctx)
+			log.Printf("guardian backend discovery enabled via %s", cfg.GuardianAPIURL)
+		}
+	}
+
+	router := proxy.NewRouter(proxy.RouterConfig{
+		MaxInflight:    cfg.ProxyMaxInflight,
+		BackendTimeout: cfg.ProxyBackendTimeout,
+		Logger:         log.Default(),
+	}, proxy.NewCompositeRegistry(registries...))
+
+	localBackend := proxy.Backend{
+		Name:    "doctor",
+		Kind:    proxy.KindMonoFS,
+		Signals: []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs, proxy.SignalTraces},
+		Policy:  proxy.PolicyAlways,
+		Origin:  "local",
+	}
+	if err := router.Register(localBackend, proxy.Upstreams{
+		Metrics: svc.LocalMetricsUpstream(),
+		Logs:    svc.LocalLogsUpstream(),
+	}); err != nil {
+		log.Fatalf("register local proxy backend: %v", err)
+	}
+	if awsClient != nil {
+		awsBackend := proxy.Backend{
+			Name:       "aws",
+			Kind:       proxy.KindAWS,
+			Signals:    []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs, proxy.SignalTraces},
+			Policy:     proxy.PolicyFallback,
+			OwnersPath: "/doctor/v1/endpoints/aws",
+			Origin:     "config",
+		}
+		awsUpstream := &proxy.AWSUpstream{Client: awsClient}
+		if err := router.Register(awsBackend, proxy.Upstreams{
+			Metrics: awsUpstream,
+			Logs:    awsUpstream,
+			Traces:  awsUpstream,
+		}); err != nil {
+			log.Fatalf("register aws proxy backend: %v", err)
+		}
+	}
+	svc.SetProxyRouter(router)
+	log.Printf("proxy router enabled (max inflight %d, backend timeout %s)", cfg.ProxyMaxInflight, cfg.ProxyBackendTimeout)
 }

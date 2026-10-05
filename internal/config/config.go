@@ -81,6 +81,15 @@ type QueryConfig struct {
 	AWSEnabled          bool
 	AWSBackendURL       string
 	AWSBackendToken     string
+
+	ProxyEnabled              bool
+	ProxyBackendsFile         string
+	ProxyRegistryInterval     time.Duration
+	ProxyMaxInflight          int
+	ProxyBackendTimeout       time.Duration
+	GuardianDiscoveryEnabled  bool
+	GuardianDiscoveryInterval time.Duration
+	GuardianToken             string
 }
 
 func LoadIngest(service string) (IngestConfig, error) {
@@ -149,6 +158,15 @@ func LoadQuery(service string) QueryConfig {
 		AWSEnabled:          envBool("DOCTOR_AWS_ENABLED", true),
 		AWSBackendURL:       envString("DOCTOR_AWS_BACKEND_URL", ""),
 		AWSBackendToken:     envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
+
+		ProxyEnabled:              envBool("DOCTOR_PROXY_ENABLED", true),
+		ProxyBackendsFile:         envString("DOCTOR_PROXY_BACKENDS_FILE", ""),
+		ProxyRegistryInterval:     envDuration("DOCTOR_PROXY_REGISTRY_INTERVAL", 30*time.Second),
+		ProxyMaxInflight:          int(envInt64("DOCTOR_PROXY_MAX_INFLIGHT", 32)),
+		ProxyBackendTimeout:       envDuration("DOCTOR_PROXY_BACKEND_TIMEOUT", 15*time.Second),
+		GuardianDiscoveryEnabled:  envBool("DOCTOR_GUARDIAN_DISCOVERY_ENABLED", false),
+		GuardianDiscoveryInterval: envDuration("DOCTOR_GUARDIAN_DISCOVERY_INTERVAL", 30*time.Second),
+		GuardianToken:             envString("DOCTOR_GUARDIAN_TOKEN", ""),
 	}
 }
 

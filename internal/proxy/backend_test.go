@@ -3,7 +3,7 @@ package proxy
 import "testing"
 
 func TestBackendValidate(t *testing.T) {
-	valid := Backend{Name: "prom-a", Kind: KindPrometheus, Signals: []Signal{SignalMetrics}}
+	valid := Backend{Name: "prom-a", Kind: KindPrometheus, BaseURL: "http://prom-a", Signals: []Signal{SignalMetrics}}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid backend rejected: %v", err)
 	}

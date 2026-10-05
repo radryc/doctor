@@ -1029,15 +1029,27 @@ Each phase lands on `main` independently with tests green.
 P1 wires the registry and the fan-out router on top of these primitives and
 migrates the discovery handlers.
 
-### P1 — Registry, discovery, fan-out/merge
+### P1 — Registry, discovery, fan-out/merge — landed
 
-- Static registry + hot reload; Guardian discovery (`/api/pushers`,
-  partitions) with `DOCTOR_GUARDIAN_TOKEN`.
-- Bounded fan-out, partial results, breakers, health probes.
-- `shard` labeling + dedup for all three signals; `/v1/proxy/endpoints`.
-- Prometheus/Loki HTTP adapters.
-- **Acceptance:** 3+ fake backends merged in one dataspace; benchmarks P17.3
-  merge/fan-out pass; access still allow-all.
+- Static file registry with hot reload (`DOCTOR_PROXY_BACKENDS_FILE`),
+  Guardian discovery for `/api/pushers` and `/api/m2m/partitions` with
+  `DOCTOR_GUARDIAN_TOKEN`, and a composite registry where static entries win.
+- `proxy.Router`: bounded fan-out (`DOCTOR_PROXY_MAX_INFLIGHT`), per-backend
+  timeout, circuit breaker (5 failures → 30s open), partial-failure warnings
+  (`X-Doctor-Partial` for Prometheus responses), and a query policy
+  (`always`/`fallback`) that preserves the legacy AWS fallback semantics.
+- Prometheus and Loki HTTP adapters. Query handlers use the router when
+  `DOCTOR_PROXY_ENABLED=true` (default); tests and any deployment without a
+  router keep the legacy path.
+- `/v1/proxy/endpoints` lists backends with health state.
+- **Acceptance:** integration test merges local + two Prometheus shards with
+  `shard` labels through the real handler, and local + Loki through the Loki
+  handler; `BenchmarkRouterFanout256Backends` ≈ 0.6 ms.
+
+Deferred within P1: router-backed discovery unions (Prometheus labels/series
+and Loki labels still use the legacy local+AWS path until P3 adapters land),
+active health probes (health is currently derived from the circuit breaker),
+and trace fan-out (P2 replaces Zipkin with Tempo).
 
 ### P2 — Tempo replaces Zipkin
 

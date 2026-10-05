@@ -26,9 +26,9 @@ import (
 )
 
 const (
-	doctorPrometheusLookback         = 5 * time.Minute
-	doctorPrometheusTimeout          = 30 * time.Second
-	doctorDiscoveryWindow            = 24 * time.Hour
+	doctorPrometheusLookback = 5 * time.Minute
+	doctorPrometheusTimeout  = 30 * time.Second
+	doctorDiscoveryWindow    = 24 * time.Hour
 	// doctorDiscoveryScanWindow caps how far back label/series discovery scans.
 	// The label vocabulary is stable, so a short recent window yields the same
 	// names while keeping the scan (and its memory) small even when Grafana asks
@@ -821,6 +821,11 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if s.proxyRouter != nil {
+		s.handlePrometheusQueryViaRouter(w, r, queryString, evaluationTime)
+		return
+	}
+
 	forwarded, mode := awsQueryMode(queryString)
 	tenant := s.tenantFromRequest(r)
 
@@ -887,6 +892,11 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 	}
 	if isHighCardinalityCumulativeRangeQuery(queryString) {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", "range queries over Guardian cumulative task/result totals are disabled; use an instant query to avoid materializing high-cardinality raw metric segments")
+		return
+	}
+
+	if s.proxyRouter != nil {
+		s.handlePrometheusQueryRangeViaRouter(w, r, queryString, start, end, step)
 		return
 	}
 
