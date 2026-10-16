@@ -191,6 +191,7 @@ func (c *LogEngineClient) StreamMetrics(ctx context.Context, tenant string, quer
 		ToUnixNano:    timeToNano(to),
 		Service:       query.Service,
 		LabelMatchers: protoMetricMatchers(query.LabelMatchers),
+		BatchSize:     queryResultBatchSize,
 	})
 	if err != nil {
 		return err
@@ -203,16 +204,72 @@ func (c *LogEngineClient) StreamMetrics(ctx context.Context, tenant string, quer
 		if err != nil {
 			return err
 		}
-		if item == nil || len(item.GetItemJson()) == 0 {
+		if item == nil {
 			continue
 		}
-		var raw metricStreamRecord
-		if err := json.Unmarshal(item.GetItemJson(), &raw); err != nil {
-			return fmt.Errorf("unmarshal metric results: %w", err)
+		for _, raw := range queryResultRecords(item) {
+			var record metricStreamRecord
+			if err := json.Unmarshal(raw, &record); err != nil {
+				return fmt.Errorf("unmarshal metric results: %w", err)
+			}
+			if err := yield(metricPointFromStreamRecord(tenant, record)); err != nil {
+				return err
+			}
 		}
-		if err := yield(metricPointFromStreamRecord(tenant, raw)); err != nil {
+	}
+}
+
+// queryResultBatchSize is the number of records requested per streamed message.
+// Batching cuts the per-record gRPC overhead that otherwise dominates wide
+// metric scans.
+const queryResultBatchSize = 512
+
+// StreamMetricSeries streams per-series metadata (identity plus first/last
+// sample time) from the storage chunk series index without scanning samples.
+func (c *LogEngineClient) StreamMetricSeries(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricSeriesMeta) error) error {
+	stream, err := c.router.StreamMetricSeries(ctx, &pb.QueryMetricsRequest{
+		MetricName:    query.MetricName,
+		FromUnixNano:  timeToNano(from),
+		ToUnixNano:    timeToNano(to),
+		Service:       query.Service,
+		LabelMatchers: protoMetricMatchers(query.LabelMatchers),
+	})
+	if err != nil {
+		return err
+	}
+	for {
+		item, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
+		if item == nil {
+			continue
+		}
+		if err := yield(metricSeriesMetaFromProto(tenant, item)); err != nil {
+			return err
+		}
+	}
+}
+
+func metricSeriesMetaFromProto(tenant string, item *pb.MetricSeriesItem) segment.MetricSeriesMeta {
+	labels := item.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	partition, intent, asset := labelsFromIdentity(labels)
+	return segment.MetricSeriesMeta{
+		Tenant:     tenant,
+		Service:    item.GetService(),
+		Partition:  partition,
+		Intent:     intent,
+		Asset:      asset,
+		MetricName: item.GetMetricName(),
+		Labels:     labels,
+		MinTime:    time.Unix(0, item.GetMinTimeUnixNano()).UTC(),
+		MaxTime:    time.Unix(0, item.GetMaxTimeUnixNano()).UTC(),
 	}
 }
 
@@ -275,6 +332,7 @@ func (c *LogEngineClient) QueryTraces(ctx context.Context, tenant, traceID, serv
 		FromUnixNano: timeToNano(from),
 		ToUnixNano:   timeToNano(to),
 		Limit:        int32(limit),
+		BatchSize:    queryResultBatchSize,
 	})
 	if err != nil {
 		return nil, err
@@ -304,16 +362,29 @@ func unmarshalQueryItems[T any](stream grpc.ServerStreamingClient[pb.QueryResult
 		if err != nil {
 			return nil, err
 		}
-		if item == nil || len(item.GetItemJson()) == 0 {
+		if item == nil {
 			continue
 		}
-
-		var decoded T
-		if err := json.Unmarshal(item.GetItemJson(), &decoded); err != nil {
-			return nil, err
+		for _, raw := range queryResultRecords(item) {
+			var decoded T
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				return nil, err
+			}
+			items = append(items, decoded)
 		}
-		items = append(items, decoded)
 	}
+}
+
+// queryResultRecords unwraps a stream item into its record payloads, accepting
+// both batched (items_json) and legacy single-record (item_json) messages.
+func queryResultRecords(item *pb.QueryResultItem) [][]byte {
+	if records := item.GetItemsJson(); len(records) > 0 {
+		return records
+	}
+	if raw := item.GetItemJson(); len(raw) > 0 {
+		return [][]byte{raw}
+	}
+	return nil
 }
 
 func timeToNano(t time.Time) int64 {

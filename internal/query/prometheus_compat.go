@@ -9,10 +9,12 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	promclient "github.com/prometheus/client_golang/prometheus"
@@ -44,13 +46,6 @@ const (
 	// what callers consume.
 	maxDiscoveryScannedRecords = 10000
 
-	// maxQueryLoadedSamples and maxQueryLoadedSeries bound how much a PromQL
-	// query may pull into memory. Samples stream straight into the series index
-	// (never buffered as records) and the query fails with a 422 once either
-	// budget is exhausted, so a broad selector cannot OOM the query service.
-	maxQueryLoadedSamples = 1_000_000
-	maxQueryLoadedSeries  = 100_000
-
 	// maxQueryMetricNames bounds how many stored metric names a single
 	// `__name__` matcher (e.g. a regex) may expand to before the query is
 	// rejected.
@@ -59,6 +54,43 @@ const (
 	// maxMetricRangePoints bounds the legacy /v1/metrics/range endpoint.
 	maxMetricRangePoints = 200_000
 )
+
+// maxQueryLoadedSamples and maxQueryLoadedSeries bound how much a PromQL query
+// may pull into memory. Samples stream straight into the series index (never
+// buffered as records) and the query fails with a 422 once either budget is
+// exhausted, so a broad selector cannot OOM the query service.
+//
+// The defaults accommodate whole-fleet metadata aggregations such as the
+// Metrics Drilldown landing query
+// (count by (__name__) ({__name__=~".+"})) which scans every stored series in
+// the window. Operators can tune them with DOCTOR_PROM_MAX_SAMPLES and
+// DOCTOR_PROM_MAX_SERIES.
+var (
+	maxQueryLoadedSamples = envInt64("DOCTOR_PROM_MAX_SAMPLES", 4_000_000)
+	maxQueryLoadedSeries  = int(envInt64("DOCTOR_PROM_MAX_SERIES", 100_000))
+)
+
+// maxGlobalLoadedSamples bounds the samples held across ALL concurrent PromQL
+// queries. Each querier accounts for the samples it streams and releases them
+// on Close, so a burst of broad queries cannot multiply the per-query budget
+// into an OOM. 8M samples is roughly 130MB of transient point data.
+var (
+	maxGlobalLoadedSamples = envInt64("DOCTOR_PROM_GLOBAL_MAX_SAMPLES", 8_000_000)
+	globalLoadedSamples    atomic.Int64
+)
+
+// envInt64 reads a positive integer environment variable with a fallback.
+func envInt64(name string, fallback int64) int64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
 
 // errMetricQueryTooBroad is returned internally while streaming once a query
 // exceeds its sample or series budget. It is translated to
@@ -103,6 +135,10 @@ type doctorPromQuerier struct {
 	tenant  string
 	mint    int64
 	maxt    int64
+
+	// loadedSamples counts the samples this querier holds against the global
+	// budget; released on Close.
+	loadedSamples atomic.Int64
 
 	mu      sync.Mutex
 	indexes map[string]*doctorPromIndex
@@ -386,6 +422,11 @@ func (q *doctorPromQuerier) discoverLabelNames(ctx context.Context, matchers []*
 }
 
 func (q *doctorPromQuerier) Close() error {
+	// Release the global sample budget this querier accounted for. The counter
+	// is swapped so repeated Close calls are harmless.
+	if released := q.loadedSamples.Swap(0); released > 0 {
+		globalLoadedSamples.Add(-released)
+	}
 	return nil
 }
 
@@ -427,9 +468,14 @@ func (q *doctorPromQuerier) load(ctx context.Context, matchers []*promlabels.Mat
 // buildIndex streams matching metric points straight into the PromQL series
 // index. It never buffers raw records (unlike a QueryMetrics call), and it stops
 // with errMetricQueryTooBroad once the sample or series budget is exhausted so a
-// broad selector cannot exhaust memory. `__name__` matchers are expanded to
-// exact stored names first, so `{__name__=~"guardian.*"}` only reads the
-// matching metrics instead of every metric in the store.
+// broad selector cannot exhaust memory.
+//
+// `__name__` matchers are expanded to exact stored names first. When the
+// expansion is small the store is scanned once per name so narrow selectors
+// only read matching chunks; when it is large (for example the Metrics
+// Drilldown landing query `{__name__=~".+"}`) the store is scanned once and the
+// name set is applied client-side, because per-name scans re-read every
+// candidate chunk's parquet data once per metric name.
 func (q *doctorPromQuerier) buildIndex(ctx context.Context, matchers []*promlabels.Matcher) (*doctorPromIndex, error) {
 	from := timeFromPromMillis(q.mint)
 	to := timeFromPromMillis(q.maxt)
@@ -453,9 +499,14 @@ func (q *doctorPromQuerier) buildIndex(ctx context.Context, matchers []*promlabe
 			return nil
 		}
 		samples++
-		if samples > maxQueryLoadedSamples {
+		if int64(samples) > maxQueryLoadedSamples {
 			return errMetricQueryTooBroad
 		}
+		if globalLoadedSamples.Add(1) > maxGlobalLoadedSamples {
+			globalLoadedSamples.Add(-1)
+			return errMetricQueryTooBroad
+		}
+		q.loadedSamples.Add(1)
 		labelSet := metricPointLabels(point)
 		key := string(labelSet.Bytes(nil))
 		series := builders[key]
@@ -484,6 +535,25 @@ func (q *doctorPromQuerier) buildIndex(ctx context.Context, matchers []*promlabe
 		return finalizeDoctorPromIndex(builders, labelsByKey), nil
 	}
 
+	if len(names) > singleScanMetricNameThreshold {
+		// One scan, filtered client-side: avoids re-reading every candidate
+		// chunk once per metric name.
+		nameSet := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			nameSet[name] = struct{}{}
+		}
+		filtered := func(point segment.MetricPointRecord) error {
+			if _, ok := nameSet[point.MetricName]; !ok {
+				return nil
+			}
+			return emit(point)
+		}
+		if err := q.backend.StreamMetrics(streamCtx, q.tenant, base, from, to, filtered); err != nil {
+			return nil, translateMetricLoadError(err)
+		}
+		return finalizeDoctorPromIndex(builders, labelsByKey), nil
+	}
+
 	for _, name := range names {
 		query := base
 		query.MetricName = name
@@ -493,6 +563,10 @@ func (q *doctorPromQuerier) buildIndex(ctx context.Context, matchers []*promlabe
 	}
 	return finalizeDoctorPromIndex(builders, labelsByKey), nil
 }
+
+// singleScanMetricNameThreshold is the expansion size above which a selector is
+// evaluated with one unfiltered store scan plus a client-side name filter.
+const singleScanMetricNameThreshold = 16
 
 // resolveStorageMetricNames expands the query's `__name__` matchers (exact or
 // regex) into the exact raw names the store uses. A nil result means the query

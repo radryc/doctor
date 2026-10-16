@@ -2,10 +2,12 @@ package proxy
 
 import (
 	"context"
+	"regexp"
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
+	"github.com/rydzu/ainfra/doctor/internal/tempo"
 )
 
 // MetricsUpstream executes Prometheus-compatible queries against one source.
@@ -47,6 +49,18 @@ type TraceTagSource interface {
 	TraceTagValues(ctx context.Context, tenant, tag string) ([]string, error)
 }
 
+// TraceSpanSource is implemented by upstreams that can return the matched spans
+// of a search grouped into span sets (Tempo search `spss`).
+type TraceSpanSource interface {
+	SearchSpanSets(ctx context.Context, tenant string, search TraceSearch, spss int) (map[string]tempo.SpanSet, error)
+}
+
+// TraceTagScopeSource is implemented by upstreams that can report tag scopes
+// (Tempo v2 tag discovery).
+type TraceTagScopeSource interface {
+	TraceTagScopes(ctx context.Context, tenant string) ([]tempo.TagScope, error)
+}
+
 // TraceQLUpstream is implemented by upstreams that can execute TraceQL natively.
 type TraceQLUpstream interface {
 	SearchTraceQL(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]TraceSummary, error)
@@ -62,12 +76,33 @@ type TraceSearch struct {
 	Limit       int
 	MinDuration time.Duration
 	MaxDuration time.Duration
+	// Exists/Absent filter spans by attribute presence (key != nil / key = nil).
+	Exists []string
+	Absent []string
+	// NotTags are negative matchers (!= and !~).
+	NotTags []TraceTag
+	// RootOnly selects spans without a parent (nestedSetParent<0).
+	RootOnly bool
+	// MatchNone is set when the query contains a literal `false` clause.
+	MatchNone bool
+	// MinSpanDuration/MaxSpanDuration bound span durations (duration comparisons).
+	MinSpanDuration time.Duration
+	MaxSpanDuration time.Duration
 }
 
-// TraceTag is an exact-match tag filter.
+// TraceTag is a tag filter: exact-match when Regex is nil, pattern match when set.
 type TraceTag struct {
 	Key   string
 	Value string
+	Regex *regexp.Regexp
+}
+
+// Matches reports whether value satisfies the tag filter.
+func (t TraceTag) Matches(value string) bool {
+	if t.Regex != nil {
+		return t.Regex.MatchString(value)
+	}
+	return value == t.Value
 }
 
 // TraceSummary is a source-agnostic trace search hit.

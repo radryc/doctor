@@ -26,6 +26,9 @@ type LogEngineBackend interface {
 	// StreamMetrics yields metric points incrementally so metadata-only callers
 	// (label and series discovery) never buffer the full result set in memory.
 	StreamMetrics(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricPointRecord) error) error
+	// StreamMetricSeries yields per-series metadata from the storage chunk
+	// series index without reading sample data.
+	StreamMetricSeries(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricSeriesMeta) error) error
 	QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error)
 }
 
@@ -420,17 +423,32 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/label/", s.handlePrometheusLabelValues)
 	mux.HandleFunc("/api/v1/series", s.handlePrometheusSeries)
 	mux.HandleFunc("/api/v1/metadata", s.handlePrometheusMetadata)
+	mux.HandleFunc("/api/v1/query_exemplars", s.handlePrometheusQueryExemplars)
+	mux.HandleFunc("/api/v1/rules", s.handlePrometheusRules)
 	mux.HandleFunc("/api/v1/status/buildinfo", s.handlePrometheusBuildInfo)
 	mux.HandleFunc("/loki/api/v1/query", s.handleLokiQuery)
 	mux.HandleFunc("/loki/api/v1/query_range", s.handleLokiQueryRange)
 	mux.HandleFunc("/loki/api/v1/labels", s.handleLokiLabels)
 	mux.HandleFunc("/loki/api/v1/label/", s.handleLokiLabelValues)
 	mux.HandleFunc("/loki/api/v1/series", s.handleLokiSeries)
+	mux.HandleFunc("/loki/api/v1/index/stats", s.handleLokiIndexStats)
+	mux.HandleFunc("/loki/api/v1/index/volume", s.handleLokiIndexVolume)
+	mux.HandleFunc("/loki/api/v1/index/volume_range", s.handleLokiIndexVolumeRange)
+	mux.HandleFunc("/loki/api/v1/patterns", s.handleLokiPatterns)
+	mux.HandleFunc("/loki/api/v1/detected_fields", s.handleLokiDetectedFields)
+	mux.HandleFunc("/loki/api/v1/detected_labels", s.handleLokiDetectedLabels)
+	mux.HandleFunc("/loki/api/v1/status/buildinfo", s.handleLokiBuildInfo)
 	mux.HandleFunc("/api/echo", s.handleTempoEcho)
+	mux.HandleFunc("/api/status/buildinfo", s.handleTempoBuildInfo)
 	mux.HandleFunc("/api/traces/", s.handleTempoTraceByID)
+	mux.HandleFunc("/api/v2/traces/", s.handleTempoTraceByIDV2)
 	mux.HandleFunc("/api/search", s.handleTempoSearch)
 	mux.HandleFunc("/api/search/tags", s.handleTempoTags)
 	mux.HandleFunc("/api/search/tag/", s.handleTempoTagValues)
+	mux.HandleFunc("/api/v2/search/tags", s.handleTempoTagsV2)
+	mux.HandleFunc("/api/v2/search/tag/", s.handleTempoTagValuesV2)
+	mux.HandleFunc("/api/metrics/query_range", s.handleTempoMetricsQueryRange)
+	mux.HandleFunc("/api/metrics/query", s.handleTempoMetricsQuery)
 	mux.HandleFunc("/v1/spans/search", s.handleSpanSearch)
 	mux.HandleFunc("/v1/traces/recent", s.handleRecentTraces)
 	mux.HandleFunc("/v1/traces/", s.handleTraceByID)
@@ -474,6 +492,19 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
 	from := time.Now().UTC().Add(-24 * time.Hour)
 	to := time.Now().UTC()
+	traceID, err := s.resolveTraceID(r.Context(), tenant, traceID, from, to)
+	if err != nil {
+		if isAccessDenied(err) {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if traceID == "" {
+		http.Error(w, "trace not found", http.StatusNotFound)
+		return
+	}
 
 	var spans []segment.TraceRecord
 	if s.proxyRouter != nil {
@@ -1215,10 +1246,10 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 		to = time.Now().UTC()
 	}
 
-	// Recent trace summaries must be built from the full matching span set.
-	// Sampling a fixed number of spans can hide valid traces when a few traces
-	// contribute many spans inside the same window.
-	spans, err := s.logEngine.QueryTraces(r.Context(), tenant, "", service, from, to, 0)
+	// Bound the scan: limit 0 means "no limit" in the log engine, and loading
+	// every span in the window blows up doctor-query memory on busy tenants.
+	// traceDiscoverySpanLimit still covers the trace summaries the UI needs.
+	spans, err := s.logEngine.QueryTraces(r.Context(), tenant, "", service, from, to, traceDiscoverySpanLimit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/prometheus/prometheus/promql"
+	promparser "github.com/prometheus/prometheus/promql/parser"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 )
 
@@ -52,7 +53,20 @@ func prometheusResultEmpty(data map[string]any) bool {
 
 // execPrometheusInstant runs an instant query against local storage. parseErr is
 // true when the query failed to parse (HTTP 400) rather than at execution time.
+// execPrometheusInstant runs an instant query against local storage.
 func (s *Service) execPrometheusInstant(ctx context.Context, tenant, queryString string, at time.Time) (map[string]any, error, bool) {
+	// Presence aggregations (count by (__name__)) are answered from the chunk
+	// series index instead of scanning samples.
+	if expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString); parseErr == nil {
+		if plan, ok := countByNamePlanFor(expr); ok {
+			data, fastErr := s.execCountByNameInstant(ctx, tenant, plan, at)
+			if fastErr != nil {
+				return nil, fastErr, false
+			}
+			return data, nil, false
+		}
+	}
+
 	engine := newDoctorPrometheusEngine()
 	defer func() { _ = engine.Close() }()
 
@@ -81,6 +95,18 @@ func (s *Service) execPrometheusInstant(ctx context.Context, tenant, queryString
 
 // execPrometheusRange runs a range query against local storage.
 func (s *Service) execPrometheusRange(ctx context.Context, tenant, queryString string, start, end time.Time, step time.Duration) (map[string]any, error, bool) {
+	// Presence aggregations (count by (__name__)) are answered from the chunk
+	// series index instead of scanning samples.
+	if expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString); parseErr == nil {
+		if plan, ok := countByNamePlanFor(expr); ok {
+			data, fastErr := s.execCountByNameRange(ctx, tenant, plan, start, end, step)
+			if fastErr != nil {
+				return nil, fastErr, false
+			}
+			return data, nil, false
+		}
+	}
+
 	engine := newDoctorPrometheusEngine()
 	defer func() { _ = engine.Close() }()
 

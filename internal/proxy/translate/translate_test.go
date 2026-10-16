@@ -133,11 +133,134 @@ func TestParseTraceQLSubset(t *testing.T) {
 	}
 }
 
+// TestParseTraceQLGrafanaQueries pins the exact query shapes Grafana's Tempo
+// datasource and Traces Drilldown send (see Grafana 12.4.5 search.go and
+// traces-drilldown generateMetricsQuery.ts / primary-signals.ts).
+func TestParseTraceQLGrafanaQueries(t *testing.T) {
+	cases := []struct {
+		raw   string
+		check func(t *testing.T, q TraceQuery)
+	}{
+		{
+			raw: `{}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if !q.MatchAll {
+					t.Fatalf("want MatchAll, got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{nestedSetParent<0 && true}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if !q.RootOnly {
+					t.Fatalf("want RootOnly, got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{nestedSetParent<0 && true && resource.service.name != nil}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if !q.RootOnly || len(q.Exists) != 1 || q.Exists[0] != "service.name" {
+					t.Fatalf("got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{resource.service.name != nil}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if len(q.Exists) != 1 || q.Exists[0] != "service.name" {
+					t.Fatalf("got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{span.db.system.name!=""}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if len(q.NotTags) != 1 || q.NotTags[0].Key != "span.db.system.name" || q.NotTags[0].Value != "" {
+					t.Fatalf("got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{kind=server}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if len(q.Tags) != 1 || q.Tags[0].Value != "SPAN_KIND_SERVER" {
+					t.Fatalf("got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{status=error}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if len(q.Tags) != 1 || q.Tags[0].Value != "STATUS_CODE_ERROR" {
+					t.Fatalf("got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{resource.service.name = "guardian" && duration >= 1s && duration <= 2s}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if q.Service != "guardian" || q.MinSpanDuration != time.Second || q.MaxSpanDuration != 2*time.Second {
+					t.Fatalf("got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{name =~ "GET .*"}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if len(q.Tags) != 1 || q.Tags[0].Regex == nil || !q.Tags[0].Regex.MatchString("GET /health") {
+					t.Fatalf("got %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{name="a && b"}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if len(q.Tags) != 1 || q.Tags[0].Value != "a && b" {
+					t.Fatalf("quoted separator not honoured: %#v", q)
+				}
+			},
+		},
+		{
+			raw: `{http.method="GET" || http.method="POST"}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if len(q.Tags) != 1 || q.Tags[0].Regex == nil {
+					t.Fatalf("disjunction not merged: %#v", q)
+				}
+				if !q.Tags[0].Regex.MatchString("GET") || !q.Tags[0].Regex.MatchString("POST") || q.Tags[0].Regex.MatchString("PUT") {
+					t.Fatalf("merged regex = %v", q.Tags[0].Regex)
+				}
+			},
+		},
+		{
+			raw: `{kind=server && status=error && nestedSetParent<0}`,
+			check: func(t *testing.T, q TraceQuery) {
+				if !q.RootOnly || len(q.Tags) != 2 {
+					t.Fatalf("got %#v", q)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			query, err := ParseTraceQL(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseTraceQL(%q): %v", tc.raw, err)
+			}
+			tc.check(t, query)
+		})
+	}
+}
+
 func TestParseTraceQLRejectsUnsupported(t *testing.T) {
 	for _, raw := range []string{
-		`{ .name =~ "x" }`,
 		`{ .name = "x" } | count() > 1`,
 		`not-a-brace`,
+		`{http.method="GET" || rpc.method="Ping"}`,
+		`{name !=~ "x"}`,
+		`{nestedSetParent<1}`,
+		`{name =~ "("}`,
 	} {
 		if _, err := ParseTraceQL(raw); !errors.Is(err, ErrUnsupported) {
 			t.Fatalf("ParseTraceQL(%q) err = %v, want ErrUnsupported", raw, err)

@@ -74,17 +74,46 @@ type SearchResponse struct {
 // SearchTrace is one search hit. SpanCount is internal bookkeeping and is not
 // part of the Tempo wire format.
 type SearchTrace struct {
-	TraceID           string `json:"traceID"`
-	RootServiceName   string `json:"rootServiceName,omitempty"`
-	RootTraceName     string `json:"rootTraceName,omitempty"`
-	StartTimeUnixNano string `json:"startTimeUnixNano,omitempty"`
-	DurationMs        int64  `json:"durationMs"`
-	SpanCount         int    `json:"-"`
+	TraceID           string    `json:"traceID"`
+	RootServiceName   string    `json:"rootServiceName,omitempty"`
+	RootTraceName     string    `json:"rootTraceName,omitempty"`
+	StartTimeUnixNano string    `json:"startTimeUnixNano,omitempty"`
+	DurationMs        int64     `json:"durationMs"`
+	SpanSets          []SpanSet `json:"spanSets,omitempty"`
+	SpanCount         int       `json:"-"`
 }
 
-// TagNamesResponse is the Tempo tag-names response.
+// SpanSet groups the matched spans of one trace (Tempo SearchResponse spanSets).
+type SpanSet struct {
+	Spans      []SearchSpan `json:"spans,omitempty"`
+	Matched    int          `json:"matched"`
+	Attributes []KeyValue   `json:"attributes,omitempty"`
+}
+
+// SearchSpan is one span inside a search span set (tempopb Span).
+type SearchSpan struct {
+	SpanID            string     `json:"spanID"`
+	Name              string     `json:"name,omitempty"`
+	StartTimeUnixNano string     `json:"startTimeUnixNano,omitempty"`
+	DurationNanos     string     `json:"durationNanos,omitempty"`
+	Attributes        []KeyValue `json:"attributes,omitempty"`
+}
+
+// TagNamesResponse is the Tempo v1 tag-names response.
 type TagNamesResponse struct {
 	TagNames []string `json:"tagNames"`
+}
+
+// TagScopesResponse is the Tempo v2 tag-names response
+// (GET /api/v2/search/tags).
+type TagScopesResponse struct {
+	Scopes []TagScope `json:"scopes"`
+}
+
+// TagScope is one tag scope in the Tempo v2 tag-names response.
+type TagScope struct {
+	Name string   `json:"name"`
+	Tags []string `json:"tags"`
 }
 
 // TagValuesResponse is the Tempo tag-values response.
@@ -96,4 +125,59 @@ type TagValuesResponse struct {
 type TagValue struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
+}
+
+// MetricLabel is one typed metric series label (tempopb common.v1.KeyValue).
+type MetricLabel struct {
+	Key   string           `json:"key"`
+	Value MetricLabelValue `json:"value"`
+}
+
+// MetricLabelValue is a typed label value. Proto JSON emits int64 as a string;
+// the other types keep their native JSON form.
+type MetricLabelValue struct {
+	StringValue *string  `json:"stringValue,omitempty"`
+	IntValue    *string  `json:"intValue,omitempty"`
+	DoubleValue *float64 `json:"doubleValue,omitempty"`
+	BoolValue   *bool    `json:"boolValue,omitempty"`
+}
+
+// StringLabel builds a string-valued metric label.
+func StringLabel(key, value string) MetricLabel {
+	return MetricLabel{Key: key, Value: MetricLabelValue{StringValue: &value}}
+}
+
+// FloatLabel builds a double-valued metric label.
+func FloatLabel(key string, value float64) MetricLabel {
+	return MetricLabel{Key: key, Value: MetricLabelValue{DoubleValue: &value}}
+}
+
+// MetricSample is one point of a range metric series (tempopb Sample).
+type MetricSample struct {
+	TimestampMs int64   `json:"timestampMs"`
+	Value       float64 `json:"value"`
+}
+
+// TimeSeries is one range metric series (tempopb TimeSeries).
+type TimeSeries struct {
+	Labels  []MetricLabel  `json:"labels,omitempty"`
+	Samples []MetricSample `json:"samples"`
+}
+
+// InstantSeries is one instant metric series (tempopb InstantSeries).
+type InstantSeries struct {
+	Labels []MetricLabel `json:"labels,omitempty"`
+	Value  float64       `json:"value"`
+}
+
+// QueryRangeResponse is the Tempo TraceQL metrics range response
+// (GET /api/metrics/query_range).
+type QueryRangeResponse struct {
+	Series []TimeSeries `json:"series"`
+}
+
+// QueryInstantResponse is the Tempo TraceQL metrics instant response
+// (GET /api/metrics/query).
+type QueryInstantResponse struct {
+	Series []InstantSeries `json:"series"`
 }

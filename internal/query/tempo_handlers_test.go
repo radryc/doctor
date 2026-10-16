@@ -1,12 +1,19 @@
 package query
 
 import (
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
@@ -196,9 +203,9 @@ func TestTempoSearchTraceQLUnsupportedConstructFails(t *testing.T) {
 	svc := &Service{defaultTenant: "default", logEngine: &fakeLogEngineBackend{}}
 	svc.SetProxyRouter(newProxyTestRouter(t, svc))
 
-	// Regex matchers are outside the shared subset matcher and no Tempo backend
-	// is configured, so the request must fail with a clear error.
-	req := httptest.NewRequest(http.MethodGet, "/api/search?q=%7B%20.name%20%3D~%20%22x%22%20%7D", nil)
+	// Structural operators are outside the shared subset matcher and no Tempo
+	// backend is configured, so the request must fail with a clear error.
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=%7B%20.name%20%3D%20%22x%22%20%7D%20%3E%3E%20%7B%20.name%20%3D%20%22y%22%20%7D", nil)
 	rec := httptest.NewRecorder()
 	svc.handleTempoSearch(rec, req)
 
@@ -253,5 +260,202 @@ func TestTempoTraceByIDNotFound(t *testing.T) {
 	svc.handleTempoTraceByID(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestTempoTraceByIDProtobuf(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{{
+		TraceID:   traceID,
+		SpanID:    "00f067aa0ba902b7",
+		Name:      "GET /health",
+		Kind:      "SPAN_KIND_SERVER",
+		Service:   "api",
+		StartTime: base,
+		EndTime:   base.Add(150 * time.Millisecond),
+	}}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/traces/"+traceID, nil)
+	req.Header.Set("Accept", "application/protobuf")
+	rec := httptest.NewRecorder()
+	svc.handleTempoTraceByID(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/protobuf" {
+		t.Fatalf("content-type = %q", got)
+	}
+	var tr coltracepb.ExportTraceServiceRequest
+	if err := proto.Unmarshal(rec.Body.Bytes(), &tr); err != nil {
+		t.Fatalf("proto.Unmarshal: %v", err)
+	}
+	spans := tr.GetResourceSpans()
+	if len(spans) != 1 || len(spans[0].GetScopeSpans()) != 1 || len(spans[0].GetScopeSpans()[0].GetSpans()) != 1 {
+		t.Fatalf("unexpected proto shape: %#v", spans)
+	}
+	span := spans[0].GetScopeSpans()[0].GetSpans()[0]
+	if span.GetName() != "GET /health" || span.GetKind() != tracepb.Span_SPAN_KIND_SERVER {
+		t.Fatalf("span = %#v", span)
+	}
+}
+
+func TestTempoTraceByIDLatestResolvesNewestTrace(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{
+		{
+			TraceID:   "4bf92f3577b34da6a3ce929d0e0e4736",
+			SpanID:    "00f067aa0ba902b7",
+			Name:      "GET /old",
+			Service:   "api",
+			StartTime: base.Add(-2 * time.Minute),
+			EndTime:   base.Add(-2*time.Minute + 100*time.Millisecond),
+		},
+		{
+			TraceID:   "5bf92f3577b34da6a3ce929d0e0e4736",
+			SpanID:    "11f067aa0ba902b7",
+			Name:      "GET /new",
+			Service:   "api",
+			StartTime: base.Add(-1 * time.Minute),
+			EndTime:   base.Add(-1*time.Minute + 100*time.Millisecond),
+		},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/traces/latest", nil)
+	req.Header.Set("Accept", "application/protobuf")
+	rec := httptest.NewRecorder()
+	svc.handleTempoTraceByIDV2(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	number, wireType, tagLen := protowire.ConsumeTag(rec.Body.Bytes())
+	if number != 1 || wireType != protowire.BytesType {
+		t.Fatalf("tag = (%d, %d)", number, wireType)
+	}
+	traceBody, _ := protowire.ConsumeBytes(rec.Body.Bytes()[tagLen:])
+	var tr coltracepb.ExportTraceServiceRequest
+	if err := proto.Unmarshal(traceBody, &tr); err != nil {
+		t.Fatalf("nested proto.Unmarshal: %v", err)
+	}
+	spans := tr.GetResourceSpans()
+	if len(spans) != 1 || len(spans[0].GetScopeSpans()) != 1 || len(spans[0].GetScopeSpans()[0].GetSpans()) != 1 {
+		t.Fatalf("unexpected proto shape: %#v", spans)
+	}
+	span := spans[0].GetScopeSpans()[0].GetSpans()[0]
+	if got := hex.EncodeToString(span.GetTraceId()); got != "5bf92f3577b34da6a3ce929d0e0e4736" || span.GetName() != "GET /new" {
+		t.Fatalf("span = traceId=%s name=%q", got, span.GetName())
+	}
+}
+
+func TestTraceByIDLatestResolvesNewestTrace(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{
+		{TraceID: "old", SpanID: "span-old", Name: "GET /old", Service: "api", StartTime: base.Add(-2 * time.Minute), EndTime: base.Add(-2*time.Minute + 100*time.Millisecond)},
+		{TraceID: "new", SpanID: "span-new", Name: "GET /new", Service: "api", StartTime: base.Add(-1 * time.Minute), EndTime: base.Add(-1*time.Minute + 100*time.Millisecond)},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/traces/latest", nil)
+	rec := httptest.NewRecorder()
+	svc.handleTraceByID(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"trace_id":"new"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestResolveTraceIDLatestScopedSources(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	local := &fakeLogEngineBackend{traces: []segment.TraceRecord{
+		{TraceID: "local-new", SpanID: "span-local", Name: "GET /local", Service: "monofs-server", StartTime: base.Add(-1 * time.Minute), EndTime: base},
+	}}
+	aws := &fakeAWSBackend{traces: []awsstore.TraceSummary{
+		{TraceID: "1-aws-trace", Service: "aws-demo-tracegen", StartTime: base.Add(-2 * time.Minute), EndTime: base.Add(-2 * time.Minute)},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: local, aws: aws}
+
+	from, to := base.Add(-time.Hour), base
+	cases := []struct{ magic, want string }{
+		{latestTraceID, "local-new"},
+		{latestAWSTraceID, "1-aws-trace"},
+		{latestDoctorTraceID, "local-new"},
+		{magicLatestTraceID, "local-new"},
+		{magicLatestAWSTraceID, "1-aws-trace"},
+		{magicLatestDoctorTraceID, "local-new"},
+		{"latest-service:monofs", "local-new"},
+		{"latest-service:aws-demo", "1-aws-trace"},
+		{"ad006d6f6e6f66732d00000000000000", "local-new"},
+	}
+	for _, tc := range cases {
+		got, err := svc.resolveTraceID(context.Background(), "default", tc.magic, from, to)
+		if err != nil {
+			t.Fatalf("resolveTraceID(%s) error = %v", tc.magic, err)
+		}
+		if got != tc.want {
+			t.Fatalf("resolveTraceID(%s) = %q, want %q", tc.magic, got, tc.want)
+		}
+	}
+}
+
+func TestTempoTraceByIDV2Protobuf(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{{
+		TraceID:   traceID,
+		SpanID:    "00f067aa0ba902b7",
+		Name:      "GET /health",
+		Service:   "api",
+		StartTime: base,
+		EndTime:   base.Add(150 * time.Millisecond),
+	}}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/traces/"+traceID, nil)
+	req.Header.Set("Accept", "application/protobuf")
+	rec := httptest.NewRecorder()
+	svc.handleTempoTraceByIDV2(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// TraceByIDResponse.trace is field 1; decode it and check the nested OTLP data.
+	number, wireType, tagLen := protowire.ConsumeTag(rec.Body.Bytes())
+	if number != 1 || wireType != protowire.BytesType {
+		t.Fatalf("tag = (%d, %d)", number, wireType)
+	}
+	traceBody, _ := protowire.ConsumeBytes(rec.Body.Bytes()[tagLen:])
+	var tr coltracepb.ExportTraceServiceRequest
+	if err := proto.Unmarshal(traceBody, &tr); err != nil {
+		t.Fatalf("nested proto.Unmarshal: %v", err)
+	}
+	if len(tr.GetResourceSpans()) != 1 {
+		t.Fatalf("resourceSpans = %d, want 1", len(tr.GetResourceSpans()))
+	}
+}
+
+func TestUICatchAllReturns404ForUnknownAPIPaths(t *testing.T) {
+	svc := &Service{defaultTenant: "default"}
+	req := httptest.NewRequest(http.MethodGet, "/api/v3/traces/missing", nil)
+	rec := httptest.NewRecorder()
+	svc.handleUI(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestTempoBuildInfo(t *testing.T) {
+	svc := &Service{defaultTenant: "default"}
+	req := httptest.NewRequest(http.MethodGet, "/api/status/buildinfo", nil)
+	rec := httptest.NewRecorder()
+	svc.handleTempoBuildInfo(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"version"`) {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }

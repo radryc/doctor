@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/access"
-	"github.com/rydzu/ainfra/doctor/internal/proxy/translate"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/rydzu/ainfra/doctor/internal/tempo"
 )
 
 // ListServices returns the union of trace service names across backends.
@@ -84,16 +85,11 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 
 		// No TraceQL-capable backend: fall back to the shared subset matcher
 		// for local/AWS/Elasticsearch sources.
-		translated, err := translate.ParseTraceQL(search.TraceQL)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %v", ErrUnsupported, err)
+		if err := search.ApplyTraceQL(); err != nil {
+			return nil, accessWarnings, fmt.Errorf("%w: %v", ErrUnsupported, err)
 		}
-		search.TraceQL = ""
-		if translated.Service != "" {
-			search.Service = translated.Service
-		}
-		for _, tag := range translated.Tags {
-			search.Tags = append(search.Tags, TraceTag{Key: tag.Key, Value: tag.Value})
+		if search.MatchNone {
+			return nil, accessWarnings, nil
 		}
 	}
 	if len(targets) == 0 {
@@ -261,6 +257,162 @@ func (r *Router) TraceTagValues(ctx context.Context, tenant, tag string) ([]stri
 	}
 	sort.Strings(out)
 	return out, warnings, nil
+}
+
+// SearchSpanSets returns the matched spans of a search grouped by trace ID.
+// Only span-capable upstreams contribute; the trace access gate applies.
+func (r *Router) SearchSpanSets(ctx context.Context, tenant string, search TraceSearch, spss int) (map[string]tempo.SpanSet, []Warning, error) {
+	targets, accessWarnings, err := r.traceTargets(ctx)
+	if err != nil {
+		return nil, accessWarnings, err
+	}
+	results := make([]map[string]tempo.SpanSet, len(targets))
+	warnings, err := r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
+		source, ok := target.upstreams.Traces.(TraceSpanSource)
+		if !ok {
+			return nil
+		}
+		sets, queryErr := source.SearchSpanSets(ctx, tenant, search, spss)
+		if queryErr != nil {
+			return queryErr
+		}
+		results[target.index] = sets
+		return nil
+	})
+	if err != nil {
+		return nil, warnings, err
+	}
+	merged := make(map[string]tempo.SpanSet)
+	for _, sets := range results {
+		for traceID, set := range sets {
+			merged[traceID] = set
+		}
+	}
+	return merged, warnings, nil
+}
+
+// TraceTagScopes returns the union of scoped tag names across scope-aware
+// backends, falling back to classifying the plain tag list for backends that
+// only implement TraceTagSource.
+func (r *Router) TraceTagScopes(ctx context.Context, tenant string) ([]tempo.TagScope, []Warning, error) {
+	targets, accessWarnings, err := r.traceTargets(ctx)
+	if err != nil {
+		return nil, accessWarnings, err
+	}
+	scopeTags := map[string]map[string]struct{}{
+		"intrinsic": {},
+		"resource":  {},
+		"span":      {},
+	}
+	warnings := append([]Warning(nil), accessWarnings...)
+	for _, target := range targets {
+		callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+		if scopeSource, ok := target.upstreams.Traces.(TraceTagScopeSource); ok {
+			scopes, scopeErr := scopeSource.TraceTagScopes(callCtx, tenant)
+			cancel()
+			if scopeErr != nil {
+				warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: scopeErr.Error()})
+				continue
+			}
+			for _, scope := range scopes {
+				collectTagScope(scopeTags, scope.Name, scope.Tags)
+			}
+			continue
+		}
+		if tagSource, ok := target.upstreams.Traces.(TraceTagSource); ok {
+			names, tagErr := tagSource.TraceTags(callCtx, tenant)
+			cancel()
+			if tagErr != nil {
+				warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: tagErr.Error()})
+				continue
+			}
+			for _, name := range names {
+				collectTagScope(scopeTags, classifyTagScope(name), []string{name})
+			}
+			continue
+		}
+		cancel()
+	}
+	scopes := make([]tempo.TagScope, 0, len(scopeTags))
+	for _, name := range []string{"intrinsic", "resource", "span"} {
+		tags := sortedKeys(scopeTags[name])
+		if len(tags) == 0 {
+			continue
+		}
+		scopes = append(scopes, tempo.TagScope{Name: name, Tags: tags})
+	}
+	return scopes, warnings, nil
+}
+
+func collectTagScope(scopeTags map[string]map[string]struct{}, scope string, tags []string) {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" {
+		scope = "span"
+	}
+	bucket := scopeTags[scope]
+	if bucket == nil {
+		bucket = map[string]struct{}{}
+		scopeTags[scope] = bucket
+	}
+	for _, tag := range tags {
+		if tag != "" {
+			bucket[tag] = struct{}{}
+		}
+	}
+}
+
+// intrinsicTagNames are the span intrinsics Grafana's TraceQL editors offer.
+var intrinsicTagNames = map[string]struct{}{
+	"name": {}, "status": {}, "kind": {}, "duration": {},
+}
+
+// resourceTagPrefixes are attribute prefixes that identify resource attributes
+// when an upstream can only report flat tag names.
+var resourceTagPrefixes = []string{
+	"k8s.", "host.", "os.", "cloud.", "container.", "process.", "telemetry.",
+	"guardian_", "aws_", "service.", "device.", "sdk.", "deployment.", "kube.",
+}
+
+// classifyTagScope best-effort maps a flat tag name onto a Tempo scope.
+func classifyTagScope(name string) string {
+	if _, ok := intrinsicTagNames[name]; ok {
+		return "intrinsic"
+	}
+	if name == "service.name" || name == "service" {
+		return "resource"
+	}
+	for _, prefix := range resourceTagPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return "resource"
+		}
+	}
+	return "span"
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LocalTraceAccessError returns access.ErrAccessDenied when the trace gate
+// enforces a denial for the local (doctor) backend. Handlers that read the
+// local store directly must call this before scanning.
+func (r *Router) LocalTraceAccessError(ctx context.Context) error {
+	for _, backend := range r.snapshot() {
+		if !backend.Supports(SignalTraces) || !isLocalBackend(backend) {
+			continue
+		}
+		allowed, _, enforced := r.accessDecision(ctx, backend, access.SignalTraces)
+		if enforced && !allowed {
+			return access.ErrAccessDenied
+		}
+		return nil
+	}
+	return nil
 }
 
 // traceTarget is an upstreamEntry with its position for deterministic merging.

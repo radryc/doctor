@@ -197,6 +197,41 @@ func TagKeysFromRecords(records []segment.TraceRecord) []string {
 	return out
 }
 
+// TagScopesFromRecords collects tag names from recent spans, grouped into the
+// Tempo v2 scopes (intrinsic, resource, span).
+func TagScopesFromRecords(records []segment.TraceRecord) []TagScope {
+	intrinsic := map[string]struct{}{"name": {}, "status": {}, "kind": {}, "duration": {}}
+	resource := map[string]struct{}{"service.name": {}}
+	span := map[string]struct{}{}
+	for _, record := range records {
+		for key := range record.Attributes {
+			span[key] = struct{}{}
+		}
+		for key := range record.ResourceAttributes {
+			resource[key] = struct{}{}
+		}
+	}
+	scopes := make([]TagScope, 0, 3)
+	for _, scope := range []struct {
+		name string
+		tags map[string]struct{}
+	}{
+		{"intrinsic", intrinsic},
+		{"resource", resource},
+		{"span", span},
+	} {
+		tags := make([]string, 0, len(scope.tags))
+		for tag := range scope.tags {
+			tags = append(tags, tag)
+		}
+		sort.Strings(tags)
+		if len(tags) > 0 {
+			scopes = append(scopes, TagScope{Name: scope.name, Tags: tags})
+		}
+	}
+	return scopes
+}
+
 // TagValuesFromRecords collects values for one tag from recent spans.
 func TagValuesFromRecords(records []segment.TraceRecord, tag string) []string {
 	values := map[string]struct{}{}

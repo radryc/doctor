@@ -43,6 +43,15 @@ fi
 trace_url="${BASE_URL}/v1/traces/${TRACE_ID}?tenant=$(enc "${TENANT}")"
 trace_json="$(curl -fsS "${trace_url}")"
 trace_span_count="$(jq '[.spans[]?] | length' <<<"${trace_json}")"
+
+# Grafana's Tempo datasource fetches traces with Accept: application/protobuf
+# (v2 first, then v1). Both must return a non-empty OTLP protobuf body.
+tempo_trace_bytes="$(curl -fsS -H 'Accept: application/protobuf' \
+  "${BASE_URL}/api/traces/${TRACE_ID}?tenant=$(enc "${TENANT}")" | wc -c)"
+[[ "${tempo_trace_bytes}" -gt 0 ]] || fail "Tempo /api/traces/${TRACE_ID} returned an empty protobuf body"
+tempo_v2_trace_bytes="$(curl -fsS -H 'Accept: application/protobuf' \
+  "${BASE_URL}/api/v2/traces/${TRACE_ID}?tenant=$(enc "${TENANT}")" | wc -c)"
+[[ "${tempo_v2_trace_bytes}" -gt 0 ]] || fail "Tempo /api/v2/traces/${TRACE_ID} returned an empty protobuf body"
 service_detected="$(jq -r '.spans[0].service // ""' <<<"${trace_json}")"
 span_id="$(jq -r '.spans[]? | .span_id // empty' <<<"${trace_json}" | head -n1)"
 
@@ -85,6 +94,8 @@ loki_streams="$(jq '.data.result | length' <<<"${loki_json}")"
 echo "trace_id: ${TRACE_ID}"
 echo "service: ${SERVICE:-unknown}"
 echo "spans_in_trace: ${trace_span_count}"
+echo "tempo_protobuf_bytes: ${tempo_trace_bytes}"
+echo "tempo_v2_protobuf_bytes: ${tempo_v2_trace_bytes}"
 echo "logs_returned: ${log_returned}"
 echo "logs_with_exact_trace_id: ${log_trace_exact}"
 if [[ -n "${span_id}" ]]; then

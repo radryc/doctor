@@ -114,6 +114,7 @@ type QueryConfig struct {
 	AccessStaticAllow       string
 	AccessStaticAllowGroups string
 	AccessStaticDeny        string
+	AccessTrustTenantHeader bool
 	MonoFSFileToken         string
 	MonoFSClientID          string
 }
@@ -263,6 +264,7 @@ func LoadQuery(service string) QueryConfig {
 		AccessStaticAllow:       envString("DOCTOR_ACCESS_STATIC_ALLOW", ""),
 		AccessStaticAllowGroups: envString("DOCTOR_ACCESS_STATIC_ALLOW_GROUPS", ""),
 		AccessStaticDeny:        envString("DOCTOR_ACCESS_STATIC_DENY", ""),
+		AccessTrustTenantHeader: envBool("DOCTOR_ACCESS_TRUST_TENANT_HEADER", false),
 		MonoFSFileToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
 		MonoFSClientID:          envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-query"),
 	}

@@ -312,6 +312,23 @@ func (u *AWSUpstream) ListServices(ctx context.Context, _ string) ([]string, err
 	return AWSServices(ctx, u.Client), nil
 }
 
+// TraceTags implements TraceTagSource so federated X-Ray traces contribute tag
+// names to the Tempo discovery endpoints.
+func (u *AWSUpstream) TraceTags(_ context.Context, _ string) ([]string, error) {
+	return []string{"service.name", "aws.region", "aws.account"}, nil
+}
+
+// TraceTagValues implements TraceTagSource. X-Ray only supports service name
+// discovery, which is what the Tempo service list asks for.
+func (u *AWSUpstream) TraceTagValues(ctx context.Context, tenant, tag string) ([]string, error) {
+	switch tag {
+	case "service.name", "service":
+		return u.ListServices(ctx, tenant)
+	default:
+		return nil, nil
+	}
+}
+
 // SearchTraces implements TracesUpstream.
 func (u *AWSUpstream) SearchTraces(ctx context.Context, _ string, search TraceSearch) ([]TraceSummary, error) {
 	if u.Client == nil || !u.Client.Enabled() {
@@ -329,7 +346,7 @@ func (u *AWSUpstream) SearchTraces(ctx context.Context, _ string, search TraceSe
 	out := make([]TraceSummary, 0, len(summaries))
 	for _, summary := range summaries {
 		out = append(out, TraceSummary{
-			TraceID:         summary.TraceID,
+			TraceID:         normalizeXRayTraceID(summary.TraceID),
 			RootServiceName: firstNonEmpty(summary.Service, SourceAWS),
 			RootTraceName:   firstNonEmpty(summary.Service, "xray"),
 			Service:         firstNonEmpty(summary.Service, SourceAWS),
@@ -349,7 +366,7 @@ func (u *AWSUpstream) GetTrace(ctx context.Context, _ string, traceID string) ([
 	if u.Client == nil || !u.Client.Enabled() {
 		return nil, false, nil
 	}
-	spans, err := u.Client.GetTrace(ctx, traceID)
+	spans, err := u.Client.GetTrace(ctx, xrayTraceID(traceID))
 	if err != nil {
 		return nil, false, err
 	}
@@ -368,7 +385,7 @@ func (u *AWSUpstream) GetTrace(ctx context.Context, _ string, traceID string) ([
 		attrs[LabelSource] = SourceAWS
 		ApplyAWSPartition(attrs, span.Region, span.Account)
 		out = append(out, segment.TraceRecord{
-			TraceID:      span.TraceID,
+			TraceID:      normalizeXRayTraceID(span.TraceID),
 			SpanID:       span.SpanID,
 			ParentSpanID: span.ParentSpanID,
 			Name:         span.Name,
@@ -389,4 +406,35 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// normalizeXRayTraceID converts an X-Ray trace ID (1-<8hex>-<24hex>) into the
+// W3C 32-hex form Grafana's Tempo plugin expects. Other IDs pass through.
+func normalizeXRayTraceID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	parts := strings.SplitN(trimmed, "-", 3)
+	if len(parts) != 3 || parts[0] != "1" || len(parts[1]) != 8 || len(parts[2]) != 24 {
+		return trimmed
+	}
+	return parts[1] + parts[2]
+}
+
+// xrayTraceID converts a W3C 32-hex trace ID back to the X-Ray format the
+// read API expects. X-Ray-formatted IDs pass through.
+func xrayTraceID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if len(trimmed) != 32 || !isHexString(trimmed) {
+		return trimmed
+	}
+	return "1-" + trimmed[:8] + "-" + trimmed[8:]
+}
+
+func isHexString(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

@@ -97,6 +97,11 @@ func main() {
 
 	handler := svc.Handler()
 	handler = authMiddleware.Wrap(handler)
+	if cfg.AccessTrustTenantHeader {
+		trust := auth.NewTenantTrust(cfg.TenantHeader, log.Default())
+		handler = trust.Wrap(handler)
+		log.Printf("access: trusting %s header as machine identity tenant:<name> (group doctor:tenant)", cfg.TenantHeader)
+	}
 	if webAuth != nil {
 		handler = webAuth.Handler(handler)
 	}

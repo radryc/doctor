@@ -79,6 +79,22 @@ type MetricPointRecord struct {
 	Raw                json.RawMessage   `json:"raw,omitempty"`
 }
 
+// MetricSeriesMeta describes one distinct metric series: its identity and the
+// first/last sample times. It is served from the storage chunk series index so
+// presence aggregations (count by __name__) and series discovery never scan
+// sample data.
+type MetricSeriesMeta struct {
+	Tenant     string            `json:"tenant"`
+	Service    string            `json:"service"`
+	Partition  string            `json:"partition,omitempty"`
+	Intent     string            `json:"intent,omitempty"`
+	Asset      string            `json:"asset,omitempty"`
+	MetricName string            `json:"metric_name"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	MinTime    time.Time         `json:"min_time"`
+	MaxTime    time.Time         `json:"max_time"`
+}
+
 // unboundedMetricLabels are per-record correlation identifiers. They must never
 // become metric series labels: every sample would form its own series, which
 // explodes cardinality and makes label/series discovery impossible to serve.

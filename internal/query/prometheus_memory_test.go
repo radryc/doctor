@@ -30,6 +30,10 @@ func (f *floodBackend) QueryMetrics(context.Context, string, segment.MetricQuery
 	return nil, nil
 }
 
+func (f *floodBackend) StreamMetricSeries(context.Context, string, segment.MetricQuery, time.Time, time.Time, func(segment.MetricSeriesMeta) error) error {
+	return nil
+}
+
 func (f *floodBackend) StreamMetrics(_ context.Context, _ string, query segment.MetricQuery, _, _ time.Time, yield func(segment.MetricPointRecord) error) error {
 	for _, matcher := range query.LabelMatchers {
 		if matcher.Name == doctorMetricDiscoveryMatcherName && matcher.Value == doctorMetricDiscoveryModeNames {
@@ -52,8 +56,13 @@ func (f *floodBackend) QueryTraces(context.Context, string, string, string, time
 }
 
 func TestPrometheusQueryRejectsOverlyBroadMetricQuery(t *testing.T) {
+	// Lower the budget so the test does not materialise millions of points.
+	previous := maxQueryLoadedSamples
+	maxQueryLoadedSamples = 100
+	defer func() { maxQueryLoadedSamples = previous }()
+
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	backend := &floodBackend{name: "flood_metric", samples: maxQueryLoadedSamples + 1, ts: base}
+	backend := &floodBackend{name: "flood_metric", samples: int(maxQueryLoadedSamples) + 1, ts: base}
 	svc := &Service{defaultTenant: "default", logEngine: backend}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/query?query=flood_metric&time="+url.QueryEscape(base.Format(time.RFC3339)), nil)

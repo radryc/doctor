@@ -194,6 +194,66 @@ func (f *fakeLogEngineBackend) StreamMetrics(ctx context.Context, tenant string,
 	return nil
 }
 
+// StreamMetricSeries synthesizes the chunk series index from the fake's stored
+// points: one entry per name/service/label-set with first/last sample times.
+func (f *fakeLogEngineBackend) StreamMetricSeries(_ context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricSeriesMeta) error) error {
+	type seriesKey struct {
+		name string
+		key  string
+	}
+	byKey := make(map[seriesKey]*segment.MetricSeriesMeta)
+	order := make([]seriesKey, 0)
+	for _, metric := range f.metrics {
+		if metric.MetricName == "" || metric.Timestamp.IsZero() {
+			continue
+		}
+		if !from.IsZero() && metric.Timestamp.Before(from) {
+			continue
+		}
+		if !to.IsZero() && metric.Timestamp.After(to) {
+			continue
+		}
+		if query.MetricName != "" && metric.MetricName != query.MetricName {
+			continue
+		}
+		if query.Service != "" && metric.Service != query.Service {
+			continue
+		}
+		labelsKey := metricLabelMapString(metric.Attributes)
+		key := seriesKey{name: metric.MetricName, key: metric.Service + "\x00" + labelsKey}
+		entry := byKey[key]
+		if entry == nil {
+			labels := make(map[string]string, len(metric.Attributes))
+			for name, value := range metric.Attributes {
+				labels[name] = value
+			}
+			entry = &segment.MetricSeriesMeta{
+				Tenant:     tenant,
+				Service:    metric.Service,
+				MetricName: metric.MetricName,
+				Labels:     labels,
+				MinTime:    metric.Timestamp.UTC(),
+				MaxTime:    metric.Timestamp.UTC(),
+			}
+			byKey[key] = entry
+			order = append(order, key)
+			continue
+		}
+		if metric.Timestamp.Before(entry.MinTime) {
+			entry.MinTime = metric.Timestamp.UTC()
+		}
+		if metric.Timestamp.After(entry.MaxTime) {
+			entry.MaxTime = metric.Timestamp.UTC()
+		}
+	}
+	for _, key := range order {
+		if err := yield(*byKey[key]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func fakeMetricDiscoveryMode(query segment.MetricQuery) string {
 	for _, matcher := range query.LabelMatchers {
 		if matcher.Name == fakeMetricDiscoveryMatcherName && matcher.Type == segment.MetricMatchEqual {
@@ -271,7 +331,7 @@ func (f *fakeLogEngineBackend) QueryTraces(_ context.Context, _, traceID, servic
 	return filtered, nil
 }
 
-func TestHandleRecentTracesQueriesFullSpanSet(t *testing.T) {
+func TestHandleRecentTracesQueriesBoundedSpanSet(t *testing.T) {
 	t.Helper()
 
 	base := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
@@ -313,8 +373,8 @@ func TestHandleRecentTracesQueriesFullSpanSet(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if backend.lastLimit != 0 {
-		t.Fatalf("QueryTraces limit = %d, want 0", backend.lastLimit)
+	if backend.lastLimit != traceDiscoverySpanLimit {
+		t.Fatalf("QueryTraces limit = %d, want %d", backend.lastLimit, traceDiscoverySpanLimit)
 	}
 
 	var resp struct {

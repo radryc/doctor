@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -164,6 +165,9 @@ func (l localLogsUpstream) Name() string { return proxy.SourceDoctor }
 
 func (l localLogsUpstream) QueryLogs(ctx context.Context, tenant string, pushdown proxy.LogPushdown, from, to time.Time, limit int) ([]segment.LogRecord, error) {
 	query := pushdown.Query()
+	if limit <= 0 || limit > logQueryRecordLimit {
+		limit = logQueryRecordLimit
+	}
 	if backend, ok := l.svc.logEngine.(rawLogQueryBackend); ok {
 		return backend.QueryLogsRaw(ctx, tenant, query, from, to, limit)
 	}
@@ -175,7 +179,11 @@ func (s *Service) LocalTracesUpstream() proxy.TracesUpstream {
 	return localTracesUpstream{svc: s}
 }
 
-const traceDiscoverySpanLimit = 5000
+const (
+	traceDiscoverySpanLimit = 5000
+	traceGetSpanLimit       = 20000
+	logQueryRecordLimit     = 5000
+)
 
 type localTracesUpstream struct {
 	svc *Service
@@ -198,18 +206,36 @@ func (l localTracesUpstream) ListServices(ctx context.Context, tenant string) ([
 }
 
 func (l localTracesUpstream) SearchTraces(ctx context.Context, tenant string, search proxy.TraceSearch) ([]proxy.TraceSummary, error) {
-	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, "", search.Service, search.From, search.To, search.Limit)
+	limit := search.Limit
+	if limit <= 0 || limit > traceDiscoverySpanLimit {
+		limit = traceDiscoverySpanLimit
+	}
+	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, "", search.Service, search.From, search.To, limit)
 	if err != nil {
 		return nil, err
 	}
 	records = canonicalizeTraceRecords(records)
-	filtered := make([]segment.TraceRecord, 0, len(records))
+
+	// First pass: find the traces that have at least one matching span. The
+	// summaries are then built from every span of those traces so root service
+	// and duration reflect the trace, not the matched subset.
+	matchedTraces := make(map[string]struct{})
 	for _, record := range records {
-		if traceRecordMatchesTags(record, search.Tags) {
-			filtered = append(filtered, record)
+		if proxy.MatchTraceRecord(record, search) {
+			matchedTraces[record.TraceID] = struct{}{}
 		}
 	}
-	summaries := tempo.SummariesFromRecords(filtered, nil)
+	if len(matchedTraces) == 0 {
+		return nil, nil
+	}
+	full := make([]segment.TraceRecord, 0, len(records))
+	for _, record := range records {
+		if _, ok := matchedTraces[record.TraceID]; ok {
+			full = append(full, record)
+		}
+	}
+
+	summaries := tempo.SummariesFromRecords(full, nil)
 	out := make([]proxy.TraceSummary, 0, len(summaries))
 	for _, summary := range summaries {
 		start := time.Time{}
@@ -239,7 +265,7 @@ func (l localTracesUpstream) SearchTraces(ctx context.Context, tenant string, se
 }
 
 func (l localTracesUpstream) GetTrace(ctx context.Context, tenant, traceID string) ([]segment.TraceRecord, bool, error) {
-	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, traceID, "", time.Time{}, time.Time{}, 0)
+	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, traceID, "", time.Time{}, time.Time{}, traceGetSpanLimit)
 	if err != nil {
 		return nil, false, err
 	}
@@ -277,6 +303,93 @@ func (l localTracesUpstream) TraceTags(ctx context.Context, tenant string) ([]st
 	return tempo.TagKeysFromRecords(records), nil
 }
 
+// TraceTagScopes implements proxy.TraceTagScopeSource (Tempo v2 tags).
+func (l localTracesUpstream) TraceTagScopes(ctx context.Context, tenant string) ([]tempo.TagScope, error) {
+	records, err := l.recentRecords(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+	return tempo.TagScopesFromRecords(records), nil
+}
+
+// SearchSpanSets implements proxy.TraceSpanSource: it returns the matched spans
+// of a search grouped by trace ID, capped at spss spans per trace.
+func (l localTracesUpstream) SearchSpanSets(ctx context.Context, tenant string, search proxy.TraceSearch, spss int) (map[string]tempo.SpanSet, error) {
+	if spss <= 0 {
+		return nil, nil
+	}
+	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, "", search.Service, search.From, search.To, traceDiscoverySpanLimit)
+	if err != nil {
+		return nil, err
+	}
+	records = canonicalizeTraceRecords(records)
+
+	sets := make(map[string]tempo.SpanSet)
+	resourceAttrs := make(map[string]map[string]string)
+	for _, record := range records {
+		if !proxy.MatchTraceRecord(record, search) {
+			continue
+		}
+		set := sets[record.TraceID]
+		set.Matched++
+		if len(set.Spans) < spss {
+			set.Spans = append(set.Spans, searchSpanFromRecord(record))
+		}
+		sets[record.TraceID] = set
+
+		attrs := resourceAttrs[record.TraceID]
+		if attrs == nil {
+			attrs = make(map[string]string)
+			resourceAttrs[record.TraceID] = attrs
+		}
+		for key, value := range record.ResourceAttributes {
+			if _, exists := attrs[key]; !exists {
+				attrs[key] = value
+			}
+		}
+	}
+	for traceID, attrs := range resourceAttrs {
+		set := sets[traceID]
+		set.Attributes = stringAttributes(attrs)
+		sets[traceID] = set
+	}
+	return sets, nil
+}
+
+// searchSpanFromRecord converts a span record into a Tempo search span.
+func searchSpanFromRecord(record segment.TraceRecord) tempo.SearchSpan {
+	duration := int64(0)
+	if !record.StartTime.IsZero() && !record.EndTime.IsZero() {
+		if delta := record.EndTime.Sub(record.StartTime); delta > 0 {
+			duration = delta.Nanoseconds()
+		}
+	}
+	return tempo.SearchSpan{
+		SpanID:            record.SpanID,
+		Name:              record.Name,
+		StartTimeUnixNano: strconv.FormatInt(record.StartTime.UTC().UnixNano(), 10),
+		DurationNanos:     strconv.FormatInt(duration, 10),
+		Attributes:        stringAttributes(record.Attributes),
+	}
+}
+
+// stringAttributes renders a string map as sorted OTLP-JSON key/value pairs.
+func stringAttributes(attrs map[string]string) []tempo.KeyValue {
+	if len(attrs) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(attrs))
+	for key := range attrs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]tempo.KeyValue, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, tempo.KeyValue{Key: key, Value: tempo.Value{StringValue: attrs[key]}})
+	}
+	return out
+}
+
 func (l localTracesUpstream) TraceTagValues(ctx context.Context, tenant, tag string) ([]string, error) {
 	records, err := l.recentRecords(ctx, tenant)
 	if err != nil {
@@ -293,35 +406,4 @@ func (l localTracesUpstream) recentRecords(ctx context.Context, tenant string) (
 		return nil, err
 	}
 	return canonicalizeTraceRecords(records), nil
-}
-
-func traceRecordMatchesTags(record segment.TraceRecord, tags []proxy.TraceTag) bool {
-	for _, tag := range tags {
-		var value string
-		switch tag.Key {
-		case "service.name", "service":
-			value = record.Service
-		case "name":
-			value = record.Name
-		case "kind":
-			value = record.Kind
-		case "status", "status.code":
-			value = record.StatusCode
-		case "guardian_partition":
-			value = record.Partition
-		case "guardian_intent":
-			value = record.Intent
-		case "guardian_asset":
-			value = record.Asset
-		default:
-			value = record.Attributes[tag.Key]
-			if value == "" {
-				value = record.ResourceAttributes[tag.Key]
-			}
-		}
-		if value != tag.Value {
-			return false
-		}
-	}
-	return true
 }

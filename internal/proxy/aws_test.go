@@ -167,6 +167,27 @@ func TestAWSPartitionPrefersRegion(t *testing.T) {
 	}
 }
 
+func TestAWSUpstreamTraceTagValuesExposeXRayServices(t *testing.T) {
+	client := &fakeAWSClient{
+		enabled:  true,
+		services: []awsstore.ServiceInfo{{Name: "telemetrygen-server"}, {Name: "telemetrygen-client"}},
+	}
+	upstream := &AWSUpstream{Client: client}
+
+	values, err := upstream.TraceTagValues(context.Background(), "default", "service.name")
+	if err != nil {
+		t.Fatalf("TraceTagValues: %v", err)
+	}
+	if len(values) != 2 || values[0] != "telemetrygen-client" || values[1] != "telemetrygen-server" {
+		t.Fatalf("values = %#v", values)
+	}
+
+	other, err := upstream.TraceTagValues(context.Background(), "default", "http.status_code")
+	if err != nil || other != nil {
+		t.Fatalf("unexpected values for unknown tag: %#v, err=%v", other, err)
+	}
+}
+
 func TestAWSMetricNamesSortedAndDeduped(t *testing.T) {
 	client := &fakeAWSClient{
 		enabled: true,
