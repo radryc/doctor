@@ -115,8 +115,14 @@ type QueryConfig struct {
 	AccessStaticAllowGroups string
 	AccessStaticDeny        string
 	AccessTrustTenantHeader bool
-	MonoFSFileToken         string
-	MonoFSClientID          string
+
+	// Repo-managed access policy: per-partition filtering for logs and traces.
+	AccessPolicyURL      string
+	AccessPolicyFile     string
+	AccessPolicyToken    string
+	AccessPolicyInterval time.Duration
+	MonoFSFileToken      string
+	MonoFSClientID       string
 }
 
 // RulesConfig holds doctor-rules settings.
@@ -265,6 +271,10 @@ func LoadQuery(service string) QueryConfig {
 		AccessStaticAllowGroups: envString("DOCTOR_ACCESS_STATIC_ALLOW_GROUPS", ""),
 		AccessStaticDeny:        envString("DOCTOR_ACCESS_STATIC_DENY", ""),
 		AccessTrustTenantHeader: envBool("DOCTOR_ACCESS_TRUST_TENANT_HEADER", false),
+		AccessPolicyURL:         envString("DOCTOR_ACCESS_POLICY_URL", ""),
+		AccessPolicyFile:        envString("DOCTOR_ACCESS_POLICY_FILE", ""),
+		AccessPolicyToken:       envString("DOCTOR_ACCESS_POLICY_TOKEN", ""),
+		AccessPolicyInterval:    envDuration("DOCTOR_ACCESS_POLICY_INTERVAL", 30*time.Second),
 		MonoFSFileToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
 		MonoFSClientID:          envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-query"),
 	}

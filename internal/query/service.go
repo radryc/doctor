@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/radryc/monofs/pkg/authz/policy"
+	"github.com/rydzu/ainfra/doctor/internal/access"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
@@ -42,6 +44,17 @@ type Service struct {
 	aws              proxy.AWSClient
 	proxyRouter      *proxy.Router
 	guardianClient   *http.Client
+	policyGate       *access.PolicyGate
+}
+
+// SetPolicyGate installs the repo-managed access policy. Logs and traces are
+// filtered per partition by the caller's identity; metrics are never filtered.
+func (s *Service) SetPolicyGate(gate *access.PolicyGate) {
+	if gate == nil {
+		return
+	}
+	s.policyGate = gate
+	s.logEngine = &policyBackend{inner: s.logEngine, gate: gate}
 }
 
 // SetAWSBackend configures the optional AWS (CloudWatch/X-Ray) federation
@@ -1309,6 +1322,11 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 				if _, exists := traceMap[summary.TraceID]; exists {
 					continue
 				}
+				partition, allowed := s.policyPartitionAllowed(r.Context(), summary.Account, summary.Region,
+					awsPartition(summary.Region, summary.Account), policy.SignalTraces)
+				if !allowed {
+					continue
+				}
 				spanCount := summary.SpanCount
 				if spanCount <= 0 {
 					spanCount = 1
@@ -1316,7 +1334,7 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 				traceMap[summary.TraceID] = &TraceSummary{
 					TraceID:   summary.TraceID,
 					Service:   firstNonEmpty(summary.Service, awsSourceLabel),
-					Partition: awsPartition(summary.Region, summary.Account),
+					Partition: partition,
 					MinTime:   summary.StartTime,
 					MaxTime:   summary.EndTime,
 					SpanCount: spanCount,

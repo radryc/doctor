@@ -37,7 +37,11 @@ func awsPartition(region, account string) string {
 // it targets the AWS federated source. Errors are swallowed so native logs still
 // return.
 func (s *Service) queryAWSLogsForLoki(ctx context.Context, tenant string, plan lokiPlan, from, to time.Time, limit int) []segment.LogRecord {
-	return proxy.AWSLogsForLoki(ctx, s.aws, tenant, logPushdown(plan), from, to, limit)
+	records := proxy.AWSLogsForLoki(ctx, s.aws, tenant, logPushdown(plan), from, to, limit)
+	if s.policyGate != nil {
+		records = s.policyGate.FilterLogs(identityFromContext(ctx), records)
+	}
+	return records
 }
 
 // logPushdown reduces a parsed LogQL plan to the selector plus line filters

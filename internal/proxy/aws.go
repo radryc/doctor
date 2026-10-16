@@ -249,9 +249,14 @@ func AWSServices(ctx context.Context, client AWSClient) []string {
 	return out
 }
 
-// AWSUpstream adapts an AWSClient to the upstream interfaces.
+// AWSUpstream adapts an AWSClient to the upstream interfaces. The optional
+// filters apply the repo-managed access policy to federated records after
+// conversion (AWS partition bindings + per-partition visibility).
 type AWSUpstream struct {
-	Client AWSClient
+	Client          AWSClient
+	FilterLogs      func(ctx context.Context, records []segment.LogRecord) []segment.LogRecord
+	FilterSpans     func(ctx context.Context, records []segment.TraceRecord) []segment.TraceRecord
+	FilterSummaries func(ctx context.Context, summaries []TraceSummary) []TraceSummary
 }
 
 // Name implements MetricsUpstream/LogsUpstream/TracesUpstream.
@@ -304,7 +309,11 @@ func (u *AWSUpstream) PromLabelValues(ctx context.Context, _, label string, matc
 
 // QueryLogs implements LogsUpstream.
 func (u *AWSUpstream) QueryLogs(ctx context.Context, tenant string, pushdown LogPushdown, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	return AWSLogsForLoki(ctx, u.Client, tenant, pushdown, from, to, limit), nil
+	records := AWSLogsForLoki(ctx, u.Client, tenant, pushdown, from, to, limit)
+	if u.FilterLogs != nil {
+		records = u.FilterLogs(ctx, records)
+	}
+	return records, nil
 }
 
 // ListServices implements TracesUpstream.
@@ -358,6 +367,9 @@ func (u *AWSUpstream) SearchTraces(ctx context.Context, _ string, search TraceSe
 			Status:          summary.Status,
 		})
 	}
+	if u.FilterSummaries != nil {
+		out = u.FilterSummaries(ctx, out)
+	}
 	return out, nil
 }
 
@@ -395,6 +407,12 @@ func (u *AWSUpstream) GetTrace(ctx context.Context, _ string, traceID string) ([
 			Attributes:   attrs,
 			StatusCode:   span.StatusCode,
 		})
+	}
+	if u.FilterSpans != nil {
+		out = u.FilterSpans(ctx, out)
+	}
+	if len(out) == 0 {
+		return nil, false, nil
 	}
 	return out, true, nil
 }

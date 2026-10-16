@@ -82,7 +82,7 @@ func (s *Service) serveTempoTraceByID(w http.ResponseWriter, r *http.Request, pr
 		local := localTracesUpstream{svc: s}
 		records, found, queryErr = local.GetTrace(r.Context(), tenant, traceID)
 		if queryErr == nil && !found && s.awsReady() {
-			records, found, queryErr = (&proxy.AWSUpstream{Client: s.aws}).GetTrace(r.Context(), tenant, traceID)
+			records, found, queryErr = (s.AWSUpstream()).GetTrace(r.Context(), tenant, traceID)
 		}
 	}
 	if queryErr != nil {
@@ -231,7 +231,7 @@ func (s *Service) resolveTraceID(ctx context.Context, tenant, traceID string, fr
 		if !s.awsReady() {
 			return "", nil
 		}
-		awsSummaries, err := (&proxy.AWSUpstream{Client: s.aws}).SearchTraces(ctx, tenant, search)
+		awsSummaries, err := (s.AWSUpstream()).SearchTraces(ctx, tenant, search)
 		if err != nil {
 			return "", err
 		}
@@ -249,7 +249,7 @@ func (s *Service) resolveTraceID(ctx context.Context, tenant, traceID string, fr
 		}
 		groups := [][]proxy.TraceSummary{localSummaries}
 		if s.awsReady() {
-			if awsSummaries, awsErr := (&proxy.AWSUpstream{Client: s.aws}).SearchTraces(ctx, tenant, search); awsErr == nil {
+			if awsSummaries, awsErr := (s.AWSUpstream()).SearchTraces(ctx, tenant, search); awsErr == nil {
 				groups = append(groups, awsSummaries)
 			}
 		}
@@ -272,7 +272,7 @@ func (s *Service) latestServiceTraceID(ctx context.Context, tenant, service stri
 	}
 	groups := [][]proxy.TraceSummary{localSummaries}
 	if s.awsReady() {
-		if awsSummaries, awsErr := (&proxy.AWSUpstream{Client: s.aws}).SearchTraces(ctx, tenant, search); awsErr == nil {
+		if awsSummaries, awsErr := (s.AWSUpstream()).SearchTraces(ctx, tenant, search); awsErr == nil {
 			groups = append(groups, awsSummaries)
 		}
 	}
@@ -328,7 +328,7 @@ func (s *Service) handleTempoSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		groups := [][]proxy.TraceSummary{localSummaries}
 		if s.awsReady() {
-			if awsSummaries, awsErr := (&proxy.AWSUpstream{Client: s.aws}).SearchTraces(r.Context(), tenant, search); awsErr == nil {
+			if awsSummaries, awsErr := (s.AWSUpstream()).SearchTraces(r.Context(), tenant, search); awsErr == nil {
 				groups = append(groups, awsSummaries)
 			}
 		}

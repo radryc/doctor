@@ -77,6 +77,23 @@ func main() {
 	svc.SetGuardianAPIURL(cfg.GuardianAPIURL)
 	svc.SetDefaultPartition(cfg.DefaultPartition)
 
+	// Repo-managed access policy: filter logs and traces per partition. The
+	// gate is nil (feature disabled) unless a policy URL or file is set.
+	policyGate := access.NewPolicyGate(access.PolicyOptions{
+		URL:      cfg.AccessPolicyURL,
+		File:     cfg.AccessPolicyFile,
+		Token:    cfg.AccessPolicyToken,
+		Interval: cfg.AccessPolicyInterval,
+		Enforce:  strings.EqualFold(strings.TrimSpace(cfg.AccessMode), "enforce"),
+		Logger:   log.Default(),
+	})
+	if policyGate != nil {
+		go policyGate.Run(ctx)
+		svc.SetPolicyGate(policyGate)
+		log.Printf("access policy enabled (url=%q file=%q enforce=%v)",
+			cfg.AccessPolicyURL, cfg.AccessPolicyFile, policyGate.Enforced())
+	}
+
 	var awsClient *awsstore.Client
 	if cfg.AWSEnabled && cfg.AWSBackendURL != "" {
 		awsClient = awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
@@ -96,6 +113,11 @@ func main() {
 	}
 
 	handler := svc.Handler()
+	// Request-level policy gate runs inside auth so identity is available;
+	// record-level filtering lives in the backend decorator.
+	if policyGate != nil {
+		handler = policyGate.Middleware(handler)
+	}
 	handler = authMiddleware.Wrap(handler)
 	if cfg.AccessTrustTenantHeader {
 		trust := auth.NewTenantTrust(cfg.TenantHeader, log.Default())
@@ -311,7 +333,7 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 			OwnersPath: "/doctor/v1/endpoints/aws",
 			Origin:     "config",
 		}
-		awsUpstream := &proxy.AWSUpstream{Client: awsClient}
+		awsUpstream := svc.AWSUpstream()
 		if err := router.Register(awsBackend, proxy.Upstreams{
 			Metrics: awsUpstream,
 			Logs:    awsUpstream,
