@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -300,6 +301,9 @@ func (c *GRPCClient) ReadFile(ctx context.Context, mountPath string) ([]byte, er
 	var lastErr error
 	for _, node := range nodes {
 		callCtx, cancel := c.withTimeout(ctx)
+		if c.token != "" {
+			callCtx = metadata.AppendToOutgoingContext(callCtx, "x-monofs-internal", c.token)
+		}
 		stream, err := node.client.Read(callCtx, &pb.ReadRequest{
 			Path:   mountPath,
 			Offset: 0,
@@ -336,6 +340,9 @@ func (c *GRPCClient) ListDir(ctx context.Context, mountPath string) ([]store.Dir
 	)
 	for _, node := range nodes {
 		callCtx, cancel := c.withTimeout(ctx)
+		if c.token != "" {
+			callCtx = metadata.AppendToOutgoingContext(callCtx, "x-monofs-internal", c.token)
+		}
 		stream, err := node.client.ReadDir(callCtx, &pb.ReadDirRequest{Path: mountPath})
 		if err != nil {
 			cancel()
