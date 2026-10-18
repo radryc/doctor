@@ -19,15 +19,19 @@ COPY go.mod go.sum ./
 COPY --from=monofs go.mod /monofs/go.mod
 RUN go mod download
 
+ARG OTELC_VERSION=v1.0.0
+RUN GOBIN=/usr/local/bin go install go.opentelemetry.io/otelc/tool/cmd/otelc@${OTELC_VERSION}
+
 COPY . .
 COPY --from=monofs . /monofs
 COPY --from=frontend /internal/query/ui/dist ./internal/query/ui/dist
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 otelc go build \
 	-trimpath \
 	-ldflags "-s -w -X github.com/rydzu/ainfra/doctor/internal/buildinfo.Version=${BUILD_VERSION} -X github.com/rydzu/ainfra/doctor/internal/buildinfo.Commit=${BUILD_COMMIT} -X github.com/rydzu/ainfra/doctor/internal/buildinfo.BuildTime=${BUILD_TIME}" \
 	-o /out/doctor ./cmd/${DOCTOR_SERVICE}
 
 FROM gcr.io/distroless/base-debian12
+ENV OTEL_GO_DISABLED_INSTRUMENTATIONS=nethttp,grpc
 
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=unknown
