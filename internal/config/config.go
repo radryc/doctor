@@ -99,6 +99,8 @@ type QueryConfig struct {
 	OIDCClientID     string
 	OIDCClientSecret string
 	OIDCRedirectURL  string
+	OIDCAuthURL      string
+	OIDCRequireLogin bool
 	OIDCScopes       []string
 	SessionDir       string
 	BreakGlassToken  string
@@ -255,6 +257,8 @@ func LoadQuery(service string) QueryConfig {
 		OIDCClientID:     envString("DOCTOR_OIDC_CLIENT_ID", ""),
 		OIDCClientSecret: envString("DOCTOR_OIDC_CLIENT_SECRET", ""),
 		OIDCRedirectURL:  envString("DOCTOR_OIDC_REDIRECT_URL", ""),
+		OIDCAuthURL:      envString("DOCTOR_OIDC_AUTH_URL", ""),
+		OIDCRequireLogin: envBool("DOCTOR_OIDC_REQUIRE_LOGIN", false),
 		OIDCScopes:       envCSV("DOCTOR_OIDC_SCOPES", nil),
 		SessionDir:       envString("DOCTOR_SESSION_DIR", ".doctor/sessions"),
 		BreakGlassToken:  envString("DOCTOR_BREAK_GLASS_TOKEN", ""),

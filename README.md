@@ -70,8 +70,16 @@ export DOCTOR_MONOFS_LOGENGINE_ADDR=localhost:9090
 go run ./cmd/doctor-query
 ```
 
-Open `http://localhost:18080/` for the UI. Recording rules run as a third
-service (it needs a MonoFS token for rule files and the leader lease):
+Open `http://localhost:18080/` for the UI. The UI is designed for on-call and
+SRE use: the landing page prioritises failing and drifting partitions, every
+row deep-links into pre-filtered logs, traces, metrics, and assets, and
+`Copy triage` produces a handoff-ready summary. Press `Ctrl/Cmd+K` (or `/`) for
+the command palette, or `g` followed by `d`/`s`/`t`/`l`/`m`/`f` to jump between
+pages. The theme picker in the sidebar uses the same Midnight, Graphite, Ocean,
+Forest, and Daylight palettes as Guardian and MonoFS.
+
+Recording rules run as a third service (it needs a MonoFS token for rule files
+and the leader lease):
 
 ```bash
 export DOCTOR_MONOFS_LOGENGINE_ADDR=localhost:9090
@@ -147,6 +155,8 @@ flushes on size or time boundaries.
 | `DOCTOR_AUTH_EXEMPT_PATHS` | Comma-separated unauthenticated paths | health/ready/metrics/Prometheus |
 | `DOCTOR_OIDC_ISSUER` / `DOCTOR_OIDC_AUDIENCE` | OIDC verification | unset |
 | `DOCTOR_OIDC_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URL` | Browser login client | unset |
+| `DOCTOR_OIDC_AUTH_URL` | Public IdP authorization URL when it differs from discovery | unset |
+| `DOCTOR_OIDC_REQUIRE_LOGIN` | Redirect browser navigations to SSO login | `false` |
 | `DOCTOR_BREAK_GLASS_TOKEN` | Static admin bearer token | unset |
 | `DOCTOR_SESSION_DIR` | Persistent browser session directory | `.doctor/sessions` |
 | `DOCTOR_ACCESS_RESOLVER` | `owners`, `grants`, `static`, `chain`, or `allow-all` | `owners` |

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/radryc/monofs/pkg/authz"
 )
@@ -20,10 +22,12 @@ type Config struct {
 	ClientID        string
 	ClientSecret    string
 	RedirectURL     string
+	AuthURL         string
 	Scopes          []string
 	SessionDir      string
 	BreakGlassToken string
 	Require         bool
+	RequireLogin    bool
 	ExemptPaths     []string
 }
 
@@ -67,15 +71,29 @@ func NewWebAuthenticator(ctx context.Context, cfg Config, verifier authz.TokenVe
 	if !cfg.BrowserLoginEnabled() {
 		return nil, nil
 	}
-	return authz.NewWebAuthenticator(ctx, authz.WebAuthConfig{
-		Issuer:       cfg.Issuer,
-		ClientID:     cfg.ClientID,
-		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  cfg.RedirectURL,
-		Scopes:       cfg.Scopes,
-		Verifier:     verifier,
-		RequireLogin: false,
-	})
+	webCfg := authz.WebAuthConfig{
+		Issuer:            cfg.Issuer,
+		ClientID:          cfg.ClientID,
+		ClientSecret:      cfg.ClientSecret,
+		RedirectURL:       cfg.RedirectURL,
+		Scopes:            cfg.Scopes,
+		Verifier:          verifier,
+		RequireLogin:      cfg.RequireLogin || cfg.Require,
+		CookieName:        "doctor_session",
+		PostLoginRedirect: "/",
+		ExemptPaths:       cfg.ExemptPaths,
+	}
+	if strings.TrimSpace(cfg.AuthURL) != "" {
+		webCfg.Endpoints.AuthURL = strings.TrimSpace(cfg.AuthURL)
+	}
+	if dir := strings.TrimSpace(cfg.SessionDir); dir != "" {
+		sessions, err := authz.NewPersistentSessionStore(filepath.Clean(dir), 12*time.Hour)
+		if err != nil {
+			return nil, fmt.Errorf("auth: open session store: %w", err)
+		}
+		webCfg.Sessions = sessions
+	}
+	return authz.NewWebAuthenticator(ctx, webCfg)
 }
 
 // DefaultExemptPaths are always reachable without a bearer token. Metrics

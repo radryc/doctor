@@ -74,6 +74,23 @@ func TestMiddlewareObserveModeNeverRejects(t *testing.T) {
 	}
 }
 
+func TestBrowserLoginEnabled(t *testing.T) {
+	cfg := Config{
+		Issuer:       "https://idp.example.com",
+		Audience:     "doctor",
+		ClientID:     "doctor",
+		ClientSecret: "secret",
+		RedirectURL:  "http://localhost:18080/auth/callback",
+	}
+	if !cfg.BrowserLoginEnabled() {
+		t.Fatal("expected browser login to be enabled")
+	}
+	cfg.ClientSecret = ""
+	if cfg.BrowserLoginEnabled() {
+		t.Fatal("expected browser login to be disabled without a client secret")
+	}
+}
+
 func TestNewVerifierBreakGlass(t *testing.T) {
 	verifier, err := NewVerifier(Config{BreakGlassToken: "admin-token"})
 	if err != nil {

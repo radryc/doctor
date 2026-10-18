@@ -155,10 +155,12 @@ func setupSecurity(ctx context.Context, cfg config.QueryConfig) (*access.Gate, *
 		ClientID:        cfg.OIDCClientID,
 		ClientSecret:    cfg.OIDCClientSecret,
 		RedirectURL:     cfg.OIDCRedirectURL,
+		AuthURL:         cfg.OIDCAuthURL,
 		Scopes:          cfg.OIDCScopes,
 		SessionDir:      cfg.SessionDir,
 		BreakGlassToken: cfg.BreakGlassToken,
 		Require:         cfg.AuthRequire,
+		RequireLogin:    cfg.OIDCRequireLogin,
 		ExemptPaths:     cfg.AuthExemptPaths,
 	}
 	verifier, err := auth.NewVerifier(authCfg)
