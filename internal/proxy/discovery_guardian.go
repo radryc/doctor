@@ -165,12 +165,18 @@ func (d *GuardianDiscovery) setError(err error) {
 
 type guardianPusher struct {
 	Name           string            `json:"name"`
+	Provider       string            `json:"provider"`
+	Version        string            `json:"version"`
+	Cluster        string            `json:"cluster"`
+	Account        string            `json:"account"`
+	Region         string            `json:"region"`
+	Capabilities   []string          `json:"capabilities"`
+	Status         string            `json:"status"`
+	LastHeartbeat  string            `json:"lastHeartbeat"`
 	ObservedAPIURL string            `json:"observedApiUrl"`
 	Token          string            `json:"token"`
 	TokenEnv       string            `json:"tokenEnv"`
 	Labels         map[string]string `json:"labels"`
-	Region         string            `json:"region"`
-	Account        string            `json:"account"`
 }
 
 type guardianPusherList struct {
@@ -236,9 +242,15 @@ func (d *GuardianDiscovery) backendFromPusher(pusher guardianPusher) (Backend, e
 		return Backend{}, fmt.Errorf("empty pusher name")
 	}
 	labels := pusher.Labels
-	kind := strings.TrimSpace(strings.ToLower(labels["kind"]))
+	kind := strings.TrimSpace(strings.ToLower(pusher.Provider))
 	if kind == "" {
+		kind = strings.TrimSpace(strings.ToLower(labels["kind"]))
+	}
+	if kind == "" && strings.TrimSpace(pusher.Account) != "" {
 		kind = KindAWS
+	}
+	if kind == "" {
+		return Backend{}, fmt.Errorf("pusher %q has no provider", pusher.Name)
 	}
 	signals := signalsFromLabels(labels, kind)
 	ownersPath := strings.TrimSpace(labels["ownersPath"])
@@ -250,15 +262,25 @@ func (d *GuardianDiscovery) backendFromPusher(pusher guardianPusher) (Backend, e
 		token = os.Getenv(pusher.TokenEnv)
 	}
 	backend := Backend{
-		Name:       name,
-		Kind:       kind,
-		BaseURL:    strings.TrimRight(strings.TrimSpace(pusher.ObservedAPIURL), "/"),
-		Token:      token,
-		Labels:     labels,
-		Signals:    signals,
-		OwnersPath: ownersPath,
-		Policy:     policyFromLabels(labels, kind),
-		Origin:     "guardian-pusher",
+		Name:         name,
+		Kind:         kind,
+		BaseURL:      strings.TrimRight(strings.TrimSpace(pusher.ObservedAPIURL), "/"),
+		Token:        token,
+		Labels:       labels,
+		Signals:      signals,
+		OwnersPath:   ownersPath,
+		Policy:       policyFromLabels(labels, kind),
+		Origin:       "guardian-pusher",
+		Provider:     pusher.Provider,
+		Version:      pusher.Version,
+		Cluster:      pusher.Cluster,
+		Account:      pusher.Account,
+		Region:       pusher.Region,
+		Capabilities: append([]string(nil), pusher.Capabilities...),
+		Status:       pusher.Status,
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(pusher.LastHeartbeat)); err == nil {
+		backend.LastHeartbeat = parsed
 	}
 	if err := backend.Validate(); err != nil {
 		return Backend{}, err

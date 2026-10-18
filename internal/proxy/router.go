@@ -158,15 +158,23 @@ func (r *Router) Endpoints(ctx context.Context) []EndpointInfo {
 	out := make([]EndpointInfo, 0, len(backends))
 	for _, backend := range backends {
 		info := EndpointInfo{
-			Name:       backend.Name,
-			Kind:       backend.Kind,
-			Signals:    append([]Signal(nil), backend.Signals...),
-			OwnersPath: backend.OwnersPath,
-			Origin:     backend.Origin,
-			Public:     backend.Public,
-			Healthy:    r.breakerFor(backend.Name).allow(now),
-			Allowed:    true,
-			Resolver:   "none",
+			Name:          backend.Name,
+			Kind:          backend.Kind,
+			Signals:       append([]Signal(nil), backend.Signals...),
+			OwnersPath:    backend.OwnersPath,
+			Origin:        backend.Origin,
+			Public:        backend.Public,
+			Healthy:       r.breakerFor(backend.Name).allow(now),
+			Allowed:       true,
+			Resolver:      "none",
+			Provider:      backend.Provider,
+			Version:       backend.Version,
+			Cluster:       backend.Cluster,
+			Account:       backend.Account,
+			Region:        backend.Region,
+			Capabilities:  append([]string(nil), backend.Capabilities...),
+			Status:        backend.Status,
+			LastHeartbeat: backend.LastHeartbeat,
 		}
 		if r.access != nil {
 			identity, _ := authz.IdentityFromContext(ctx)
@@ -182,16 +190,24 @@ func (r *Router) Endpoints(ctx context.Context) []EndpointInfo {
 
 // EndpointInfo is the public view of a backend.
 type EndpointInfo struct {
-	Name       string   `json:"name"`
-	Kind       string   `json:"kind"`
-	Signals    []Signal `json:"signals"`
-	OwnersPath string   `json:"ownersPath,omitempty"`
-	Origin     string   `json:"origin,omitempty"`
-	Public     bool     `json:"public"`
-	Healthy    bool     `json:"healthy"`
-	Allowed    bool     `json:"allowed"`
-	Resolver   string   `json:"resolver,omitempty"`
-	Reason     string   `json:"reason,omitempty"`
+	Name          string    `json:"name"`
+	Kind          string    `json:"kind"`
+	Signals       []Signal  `json:"signals"`
+	OwnersPath    string    `json:"ownersPath,omitempty"`
+	Origin        string    `json:"origin,omitempty"`
+	Public        bool      `json:"public"`
+	Healthy       bool      `json:"healthy"`
+	Allowed       bool      `json:"allowed"`
+	Resolver      string    `json:"resolver,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	Provider      string    `json:"provider,omitempty"`
+	Version       string    `json:"version,omitempty"`
+	Cluster       string    `json:"cluster,omitempty"`
+	Account       string    `json:"account,omitempty"`
+	Region        string    `json:"region,omitempty"`
+	Capabilities  []string  `json:"capabilities,omitempty"`
+	Status        string    `json:"status,omitempty"`
+	LastHeartbeat time.Time `json:"lastHeartbeat,omitempty"`
 }
 
 // gatedSignal picks the signal used for endpoint-list decisions: logs and

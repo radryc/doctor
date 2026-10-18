@@ -91,6 +91,16 @@ type Backend struct {
 	Policy     QueryPolicy // always (default) or fallback
 	Origin     string      // "config" | "guardian-pusher" | "guardian-partition"
 
+	// Pusher metadata surfaced by /v1/proxy/endpoints.
+	Provider      string
+	Version       string
+	Cluster       string
+	Account       string
+	Region        string
+	Capabilities  []string
+	Status        string
+	LastHeartbeat time.Time
+
 	// Kind-specific configuration.
 	Index   string            // elasticsearch index pattern
 	Schema  map[string]string // field mapping overrides (elasticsearch/bigquery)
