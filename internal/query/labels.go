@@ -11,13 +11,14 @@ import (
 // identically regardless of the source record type.
 
 const (
-	labelService     = "service"
-	labelServiceFull = "service_full"
-	labelTenant      = "tenant"
-	labelSource      = "source"
-	labelPartition   = "guardian_partition"
-	labelIntent      = "guardian_intent"
-	labelAsset       = "guardian_asset"
+	labelService      = "service"
+	labelServiceFull  = "service_full"
+	labelServiceAlias = "service_alias"
+	labelTenant       = "tenant"
+	labelSource       = "source"
+	labelPartition    = "guardian_partition"
+	labelIntent       = "guardian_intent"
+	labelAsset        = "guardian_asset"
 
 	sourceDoctor = "doctor"
 
@@ -25,6 +26,7 @@ const (
 	attrGuardianIntent    = "guardian.intent"
 	attrGuardianAsset     = "guardian.asset"
 	attrGuardianFullName  = "guardian.service.full_name"
+	attrServiceAlias      = "service.alias"
 
 	attrK8sNamespace = "k8s.namespace.name"
 	attrK8sPod       = "k8s.pod.name"
@@ -90,6 +92,7 @@ func identityFromAttributes(attrs map[string]string) (partition, intent, asset s
 var lokiLabelAllowlist = map[string]struct{}{
 	labelService:         {},
 	labelServiceFull:     {},
+	labelServiceAlias:    {},
 	labelTenant:          {},
 	labelSource:          {},
 	labelPartition:       {},
@@ -169,6 +172,9 @@ func canonicalLabels(service, tenant, partition, intent, asset string, attrs map
 	if fullName != "" {
 		labels[labelServiceFull] = fullName
 	}
+	if alias := firstNonEmpty(attrs[attrServiceAlias], attrs["app.kubernetes.io/name"]); alias != "" {
+		labels[labelServiceAlias] = alias
+	}
 
 	for key, value := range attrs {
 		if value == "" {
@@ -179,7 +185,7 @@ func canonicalLabels(service, tenant, partition, intent, asset string, attrs map
 			continue
 		}
 		switch normalized {
-		case promlabels.MetricName, labelService, labelServiceFull, labelTenant, labelSource, labelPartition, labelIntent, labelAsset:
+		case promlabels.MetricName, labelService, labelServiceFull, labelServiceAlias, labelTenant, labelSource, labelPartition, labelIntent, labelAsset:
 			continue
 		}
 		labels[normalized] = value
