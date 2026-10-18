@@ -71,6 +71,10 @@ func NewWebAuthenticator(ctx context.Context, cfg Config, verifier authz.TokenVe
 	if !cfg.BrowserLoginEnabled() {
 		return nil, nil
 	}
+	exempt := cfg.ExemptPaths
+	if len(exempt) == 0 {
+		exempt = DefaultExemptPaths()
+	}
 	webCfg := authz.WebAuthConfig{
 		Issuer:            cfg.Issuer,
 		ClientID:          cfg.ClientID,
@@ -81,7 +85,7 @@ func NewWebAuthenticator(ctx context.Context, cfg Config, verifier authz.TokenVe
 		RequireLogin:      cfg.RequireLogin || cfg.Require,
 		CookieName:        "doctor_session",
 		PostLoginRedirect: "/",
-		ExemptPaths:       cfg.ExemptPaths,
+		ExemptPaths:       exempt,
 	}
 	if strings.TrimSpace(cfg.AuthURL) != "" {
 		webCfg.Endpoints.AuthURL = strings.TrimSpace(cfg.AuthURL)
