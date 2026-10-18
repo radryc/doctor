@@ -11,18 +11,20 @@ import (
 // identically regardless of the source record type.
 
 const (
-	labelService   = "service"
-	labelTenant    = "tenant"
-	labelSource    = "source"
-	labelPartition = "guardian_partition"
-	labelIntent    = "guardian_intent"
-	labelAsset     = "guardian_asset"
+	labelService     = "service"
+	labelServiceFull = "service_full"
+	labelTenant      = "tenant"
+	labelSource      = "source"
+	labelPartition   = "guardian_partition"
+	labelIntent      = "guardian_intent"
+	labelAsset       = "guardian_asset"
 
 	sourceDoctor = "doctor"
 
 	attrGuardianPartition = "guardian.partition"
 	attrGuardianIntent    = "guardian.intent"
 	attrGuardianAsset     = "guardian.asset"
+	attrGuardianFullName  = "guardian.service.full_name"
 
 	attrK8sNamespace = "k8s.namespace.name"
 	attrK8sPod       = "k8s.pod.name"
@@ -87,11 +89,14 @@ func identityFromAttributes(attrs map[string]string) (partition, intent, asset s
 // log body / line filters but do not fragment streams.
 var lokiLabelAllowlist = map[string]struct{}{
 	labelService:         {},
+	labelServiceFull:     {},
 	labelTenant:          {},
 	labelSource:          {},
 	labelPartition:       {},
 	labelIntent:          {},
 	labelAsset:           {},
+	"guardian_cluster":   {},
+	"k8s_cluster_name":   {},
 	"level":              {},
 	"trace_id":           {},
 	"span_id":            {},
@@ -157,6 +162,13 @@ func canonicalLabels(service, tenant, partition, intent, asset string, attrs map
 	if asset != "" {
 		labels[labelAsset] = asset
 	}
+	fullName := firstNonEmpty(attrs[attrGuardianFullName], attrs[labelServiceFull])
+	if fullName == "" && partition != "" && intent != "" && asset != "" {
+		fullName = partition + "." + intent + "." + asset
+	}
+	if fullName != "" {
+		labels[labelServiceFull] = fullName
+	}
 
 	for key, value := range attrs {
 		if value == "" {
@@ -167,7 +179,7 @@ func canonicalLabels(service, tenant, partition, intent, asset string, attrs map
 			continue
 		}
 		switch normalized {
-		case promlabels.MetricName, labelService, labelTenant, labelSource, labelPartition, labelIntent, labelAsset:
+		case promlabels.MetricName, labelService, labelServiceFull, labelTenant, labelSource, labelPartition, labelIntent, labelAsset:
 			continue
 		}
 		labels[normalized] = value

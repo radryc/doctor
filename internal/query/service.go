@@ -1410,14 +1410,34 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type svcInfo struct {
+	hasTraces   bool
+	hasMetrics  bool
+	hasLogs     bool
+	fullName    string
+	partition   string
+	intent      string
+	asset       string
+	cluster     string
+	pusher      string
+	lastSeen    time.Time
+	traceCount  int
+	metricNames map[string]struct{}
+}
+
 type discoveredService struct {
 	Name          string   `json:"name"`
+	FullName      string   `json:"full_name,omitempty"`
+	Truncated     bool     `json:"truncated,omitempty"`
 	HasMetrics    bool     `json:"has_metrics"`
 	HasTraces     bool     `json:"has_traces"`
 	HasLogs       bool     `json:"has_logs"`
 	MetricNames   []string `json:"metric_names,omitempty"`
 	Partition     string   `json:"partition,omitempty"`
 	Intent        string   `json:"intent,omitempty"`
+	Asset         string   `json:"asset,omitempty"`
+	Cluster       string   `json:"cluster,omitempty"`
+	Pusher        string   `json:"pusher,omitempty"`
 	LastSeen      string   `json:"last_seen"`
 	TraceCount    int      `json:"trace_count"`
 	LogCount      int      `json:"log_count"`
@@ -1431,6 +1451,38 @@ type serviceSuggestion struct {
 	Description string `json:"description"`
 	Type        string `json:"type"` // "rate", "latency", "errors", "saturation"
 	Window      string `json:"window"`
+}
+
+func mergeServiceIdentity(info *svcInfo, primary, secondary map[string]string, partition, intent, asset string) {
+	if info == nil {
+		return
+	}
+	if partition != "" {
+		info.partition = partition
+	}
+	if intent != "" {
+		info.intent = intent
+	}
+	if asset != "" {
+		info.asset = asset
+	}
+	attr := func(key string) string {
+		if value := strings.TrimSpace(primary[key]); value != "" {
+			return value
+		}
+		return strings.TrimSpace(secondary[key])
+	}
+	if fullName := firstNonEmpty(attr(attrGuardianFullName), attr(labelServiceFull)); fullName != "" {
+		info.fullName = fullName
+	} else if info.partition != "" && info.intent != "" && info.asset != "" {
+		info.fullName = info.partition + "." + info.intent + "." + info.asset
+	}
+	if cluster := firstNonEmpty(attr("guardian.cluster"), attr("k8s.cluster.name")); cluster != "" {
+		info.cluster = cluster
+	}
+	if pusher := attr("guardian.pusher"); pusher != "" {
+		info.pusher = pusher
+	}
 }
 
 func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request) {
@@ -1447,17 +1499,6 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		traces = nil
 	}
 
-	type svcInfo struct {
-		hasTraces   bool
-		hasMetrics  bool
-		hasLogs     bool
-		partition   string
-		intent      string
-		lastSeen    time.Time
-		traceCount  int
-		metricNames map[string]struct{}
-	}
-
 	svcMap := make(map[string]*svcInfo)
 	for _, t := range traces {
 		if t.Service == "" {
@@ -1470,13 +1511,8 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		}
 		info.hasTraces = true
 		info.traceCount++
-		partition, intent, _ := traceIdentityLabels(t)
-		if partition != "" {
-			info.partition = partition
-		}
-		if intent != "" {
-			info.intent = intent
-		}
+		partition, intent, asset := traceIdentityLabels(t)
+		mergeServiceIdentity(info, t.ResourceAttributes, t.Attributes, partition, intent, asset)
 		if t.EndTime.After(info.lastSeen) {
 			info.lastSeen = t.EndTime
 		}
@@ -1500,6 +1536,8 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 			svcMap[l.Service] = info
 		}
 		info.hasLogs = true
+		partition, intent, asset := identityFromAttributes(l.Attributes)
+		mergeServiceIdentity(info, l.Attributes, nil, partition, intent, asset)
 		logCountBySvc[l.Service]++
 		totalLogs++
 		if l.SeverityText == "ERROR" || l.SeverityText == "FATAL" || l.SeverityNumber >= 17 {
@@ -1529,6 +1567,8 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 			svcMap[m.Service] = info
 		}
 		info.hasMetrics = true
+		partition, intent, asset := identityFromAttributes(m.Attributes)
+		mergeServiceIdentity(info, m.Attributes, nil, partition, intent, asset)
 		if m.MetricName != "" {
 			info.metricNames[m.MetricName] = struct{}{}
 		}
@@ -1577,14 +1617,23 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 			errorRate = float64(errorCountBySvc[name]) / float64(logCountBySvc[name])
 		}
 
+		fullName := info.fullName
+		if fullName == "" {
+			fullName = name
+		}
 		services = append(services, discoveredService{
 			Name:          name,
+			FullName:      fullName,
+			Truncated:     fullName != name,
 			HasMetrics:    info.hasMetrics,
 			HasTraces:     info.hasTraces,
 			HasLogs:       info.hasLogs,
 			MetricNames:   metricNames,
 			Partition:     info.partition,
 			Intent:        info.intent,
+			Asset:         info.asset,
+			Cluster:       info.cluster,
+			Pusher:        info.pusher,
 			LastSeen:      formatRFC3339OrEmpty(info.lastSeen),
 			TraceCount:    info.traceCount,
 			LogCount:      logCountBySvc[name],
