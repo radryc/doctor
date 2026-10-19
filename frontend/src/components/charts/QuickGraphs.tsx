@@ -72,16 +72,32 @@ export default function QuickGraphs({ serviceName, window = "5m", onApplyQuery }
       });
       const data = await api.queryPrometheusRange(params);
       if (data.data?.resultType === "matrix" && data.data.result?.length > 0) {
-        const series = data.data.result.map((s: any) => ({
-          label: Object.entries(s.metric || {})
-            .filter(([k]) => k !== "__name__")
-            .map(([k, v]) => `${k}="${v}"`)
-            .join(",") || suggestion.label,
-          points: s.values.map((v: [number, string]) => ({
+        const series = data.data.result.map((s: any) => {
+          const points = (s.values ?? []).map((v: [number, string]) => ({
             timestamp: new Date(v[0] * 1000).toISOString(),
             value: Number(v[1]),
-          })),
-        }));
+          }));
+          for (const [timestamp, histogram] of s.histograms ?? []) {
+            const count = Number(histogram?.count);
+            const sum = Number(histogram?.sum);
+            const value = Number.isFinite(sum) && Number.isFinite(count) && count > 0
+              ? sum / count
+              : (Number.isFinite(sum) ? sum : count);
+            if (Number.isFinite(value)) {
+              points.push({
+                timestamp: new Date(timestamp * 1000).toISOString(),
+                value,
+              });
+            }
+          }
+          return {
+            label: Object.entries(s.metric || {})
+              .filter(([k]) => k !== "__name__")
+              .map(([k, v]) => `${k}="${v}"`)
+              .join(",") || suggestion.label,
+            points,
+          };
+        });
         setExpandedData(series);
       } else {
         setExpandedData([]);

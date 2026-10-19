@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Activity, AlertTriangle, Clock3, RefreshCw } from "lucide-react";
+import { Activity, AlertTriangle, Clock3, Copy, RefreshCw } from "lucide-react";
 import { api } from "../api/client";
+import { useConfig } from "../context/ConfigContext";
+import { copyText } from "../lib/clipboard";
 import type {
   GuardianEventRecord,
   GuardianEventsResponse,
@@ -67,7 +69,9 @@ function EventsTable({ events }: { events: GuardianEventRecord[] }) {
 
 export default function PartitionViewPage() {
   const params = useParams<{ name: string }>();
-  const partitionName = params.name || "monofs";
+  const { config } = useConfig();
+  const tenant = config.default_tenant || "default";
+  const partitionName = params.name || config.default_partition || "monofs";
 
   const [topology, setTopology] = useState<GuardianTopologyResponse | null>(null);
   const [health, setHealth] = useState<GuardianHealthResponse | null>(null);
@@ -76,22 +80,23 @@ export default function PartitionViewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<Date>(new Date());
+  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const topologyParams = new URLSearchParams();
-      topologyParams.set("tenant", "default");
+      topologyParams.set("tenant", tenant);
       topologyParams.set("partition", partitionName);
 
       const healthParams = new URLSearchParams();
-      healthParams.set("tenant", "default");
+      healthParams.set("tenant", tenant);
       healthParams.set("partition", partitionName);
       healthParams.set("window", "1h");
 
       const eventsParams = new URLSearchParams();
-      eventsParams.set("tenant", "default");
+      eventsParams.set("tenant", tenant);
       eventsParams.set("partition", partitionName);
       eventsParams.set("window", "1h");
       eventsParams.set("limit", "30");
@@ -111,7 +116,7 @@ export default function PartitionViewPage() {
     } finally {
       setLoading(false);
     }
-  }, [partitionName]);
+  }, [partitionName, tenant]);
 
   useEffect(() => {
     load();
@@ -125,9 +130,38 @@ export default function PartitionViewPage() {
     return rows;
   }, [events]);
 
+  const copyDiagnostics = () => {
+    const base = window.location.href.split("#")[0];
+    const encoded = encodeURIComponent(partitionName);
+    const lines = [
+      `Doctor partition diagnostics — ${partitionName}`,
+      `Tenant: ${tenant}`,
+      `Health: ${health?.overall_health?.level ?? "unknown"} (${typeof health?.overall_health?.score === "number" ? `${Math.round(health.overall_health.score * 100)}%` : "n/a"})`,
+      `Recent failures: ${health?.recent_failures ?? 0} · recent drifts: ${health?.recent_drifts ?? 0}`,
+      health?.overall_health?.reason ? `Reason: ${health.overall_health.reason}` : "",
+      health?.recommendation ? `Recommendation: ${health.recommendation}` : "",
+      `Synced: ${refreshedAt.toLocaleString()}`,
+      "",
+      `Assets:  ${base}#/partition/${encoded}/assets`,
+      `Logs:    ${base}#/logs?partition=${encoded}&range=60`,
+      `Traces:  ${base}#/traces?partition=${encoded}&range=60`,
+      `Metrics: ${base}#/metrics?partition=${encoded}`,
+      "",
+      "Recent events:",
+      ...sortedEvents.slice(0, 8).map((event) =>
+        `- ${event.timestamp ?? "-"} ${event.kind ?? "event"} ${event.status ?? ""} ${event.asset ?? event.intent ?? ""} ${event.message ?? ""}`.trim()
+      ),
+    ].filter(Boolean);
+    void copyText(lines.join("\n")).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    });
+  };
+
   return (
     <div className="h-full flex flex-col overflow-hidden bg-dark-900">
-      <header className="shrink-0 border-b border-dark-600 bg-[radial-gradient(circle_at_15%_20%,rgba(6,182,212,0.12),transparent_40%),radial-gradient(circle_at_85%_15%,rgba(59,130,246,0.16),transparent_35%)]">
+      <header className="shrink-0 border-b border-dark-600 app-header-glow">
         <div className="px-6 py-4 flex items-center justify-between gap-4">
           <div>
             <p className="text-[11px] uppercase tracking-[0.22em] text-accent-cyan/80 font-semibold">Topology</p>
@@ -136,14 +170,23 @@ export default function PartitionViewPage() {
               {loading ? "Synchronizing partition state..." : `Synced at ${refreshedAt.toLocaleTimeString()}`}
             </p>
           </div>
-          <button
-            onClick={load}
-            disabled={loading}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-accent-blue/85 hover:bg-accent-blue border border-blue-300/20 text-sm text-white transition-colors disabled:opacity-50"
-          >
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={copyDiagnostics}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-500 text-sm text-gray-200 transition-colors"
+            >
+              <Copy size={14} />
+              {copied ? "Copied" : "Copy diagnostics"}
+            </button>
+            <button
+              onClick={load}
+              disabled={loading}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-accent-blue/85 hover:bg-accent-blue border border-blue-300/20 text-sm text-white transition-colors disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+              Refresh
+            </button>
+          </div>
         </div>
       </header>
 
@@ -174,13 +217,28 @@ export default function PartitionViewPage() {
             <div className="glass rounded-xl border border-dark-600 p-3">
               <p className="text-xs text-gray-400 flex items-center gap-2"><Clock3 size={12} /> Quick links</p>
               <div className="mt-2 grid grid-cols-1 gap-2 text-sm">
-                <Link className="px-3 py-2 rounded bg-dark-700 border border-dark-500 text-gray-200" to="/logs">
+                <Link
+                  className="px-3 py-2 rounded bg-dark-700 border border-dark-500 text-gray-200"
+                  to={`/partition/${encodeURIComponent(partitionName)}/assets`}
+                >
+                  Open Assets
+                </Link>
+                <Link
+                  className="px-3 py-2 rounded bg-dark-700 border border-dark-500 text-gray-200"
+                  to={`/logs?partition=${encodeURIComponent(partitionName)}&range=60`}
+                >
                   Open Logs
                 </Link>
-                <Link className="px-3 py-2 rounded bg-dark-700 border border-dark-500 text-gray-200" to="/traces">
+                <Link
+                  className="px-3 py-2 rounded bg-dark-700 border border-dark-500 text-gray-200"
+                  to={`/traces?partition=${encodeURIComponent(partitionName)}&range=60`}
+                >
                   Open Traces
                 </Link>
-                <Link className="px-3 py-2 rounded bg-dark-700 border border-dark-500 text-gray-200" to="/metrics">
+                <Link
+                  className="px-3 py-2 rounded bg-dark-700 border border-dark-500 text-gray-200"
+                  to={`/metrics?partition=${encodeURIComponent(partitionName)}`}
+                >
                   Open Metrics
                 </Link>
               </div>

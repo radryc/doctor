@@ -295,7 +295,15 @@ func (s *Service) queryLogsForLoki(ctx context.Context, tenant, query string, fr
 func (s *Service) fetchLokiRecords(ctx context.Context, tenant string, plan lokiPlan, from, to time.Time, limit int) ([]segment.LogRecord, error) {
 	if s.proxyRouter != nil {
 		records, _, err := s.proxyRouter.Logs(ctx, tenant, logPushdown(plan), from, to, limit)
-		return records, err
+		if err != nil {
+			return records, err
+		}
+		// The proxy router serves native storage; federate CloudWatch logs when
+		// the selector explicitly targets the AWS source.
+		if awsLogs := s.queryAWSLogsForLoki(ctx, tenant, plan, from, to, limit); len(awsLogs) > 0 {
+			records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
+		}
+		return records, nil
 	}
 	storageQuery := plan.storageQuery()
 	var local []segment.LogRecord

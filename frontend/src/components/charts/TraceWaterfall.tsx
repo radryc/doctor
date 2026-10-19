@@ -6,7 +6,7 @@ interface TraceWaterfallProps {
 
 const W = 600, H_PER_ROW = 22, pL = 165, pT = 10, pB = 28, pR = 10;
 const MAX_ROWS = 28;
-const PALETTE = ["#6d5efc", "#10b981", "#f59e0b", "#f43f5e", "#c084fc", "#14b8a6", "#38bdf8"];
+const PALETTE = ["var(--chart-1)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)", "var(--chart-8)", "var(--chart-6)", "var(--chart-2)"];
 
 function fmtDur(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
@@ -59,9 +59,9 @@ export default function TraceWaterfall({ spans }: TraceWaterfallProps) {
             <g key={i}>
               <line
                 x1={x} y1={pT} x2={x} y2={H - pB}
-                stroke="rgba(148,163,184,0.1)" strokeWidth={1} strokeDasharray="3,3"
+                stroke="var(--chart-grid)" strokeWidth={1} strokeDasharray="3,3"
               />
-              <text x={x} y={H - 4} textAnchor="middle" fill="#95a6c6" fontSize={10}>
+              <text x={x} y={H - 4} textAnchor="middle" fill="var(--chart-text)" fontSize={10}>
                 {fmtDur(ms)}
               </text>
             </g>
@@ -72,8 +72,8 @@ export default function TraceWaterfall({ spans }: TraceWaterfallProps) {
         {rows.map((span, i) => {
           const y = pT + i * H_PER_ROW;
           const color = span.status.toLowerCase().includes("error")
-            ? "#f43f5e"
-            : (svcColors[span.service] ?? "#6d5efc");
+            ? "var(--chart-5)"
+            : (svcColors[span.service] ?? "var(--chart-1)");
           const x1 = px(span.start);
           const bW = Math.max(2, ((span.end - span.start) / dur) * cW);
           const d = span.end - span.start;
@@ -85,7 +85,7 @@ export default function TraceWaterfall({ spans }: TraceWaterfallProps) {
                 x={pL - 6}
                 y={y + H_PER_ROW * 0.62}
                 textAnchor="end"
-                fill="#95a6c6"
+                fill="var(--chart-text)"
                 fontSize={10}
               >
                 {label}
@@ -102,14 +102,14 @@ export default function TraceWaterfall({ spans }: TraceWaterfallProps) {
               <text
                 x={(x1 + bW + 3).toFixed(1)}
                 y={y + H_PER_ROW * 0.62}
-                fill="#e7eefc"
+                fill="var(--ui-text)"
                 fontSize={9}
               >
                 {fmtDur(d)}
               </text>
               <line
                 x1={0} y1={y + H_PER_ROW} x2={W} y2={y + H_PER_ROW}
-                stroke="rgba(148,163,184,0.12)" strokeWidth={1}
+                stroke="var(--ui-border)" strokeWidth={1}
               />
             </g>
           );

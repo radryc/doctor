@@ -22,6 +22,7 @@ type Config struct {
 	ClientID        string
 	ClientSecret    string
 	RedirectURL     string
+	EndSessionURL   string
 	AuthURL         string
 	Scopes          []string
 	SessionDir      string
@@ -80,6 +81,7 @@ func NewWebAuthenticator(ctx context.Context, cfg Config, verifier authz.TokenVe
 		ClientID:          cfg.ClientID,
 		ClientSecret:      cfg.ClientSecret,
 		RedirectURL:       cfg.RedirectURL,
+		EndSessionURL:     cfg.EndSessionURL,
 		Scopes:            cfg.Scopes,
 		Verifier:          verifier,
 		RequireLogin:      cfg.RequireLogin || cfg.Require,

@@ -1,7 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, Upload } from "lucide-react";
-import FleetView, { type AssetGroup, type HealthStatus, type PartitionModel, type SortKey, type SortOrder } from "./FleetView";
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle,
+  Grid3X3,
+  GripHorizontal,
+  RefreshCw,
+  Search,
+  Server,
+  Upload,
+} from "lucide-react";
+import FleetView, {
+  type AssetGroup,
+  type HealthStatus,
+  type PartitionModel,
+  type SortKey,
+  type SortOrder,
+} from "./FleetView";
 import HubDetailView from "./HubDetailView";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
@@ -15,126 +31,148 @@ import type { HelperFileManifest } from "../types/observability";
 
 export { type HelperFileManifest };
 
-type SourceFilter = "all" | "asset" | "fallback";
+type Tone = "healthy" | "attention" | "critical" | "unknown";
 
 function mapLevelToHealth(level?: string): HealthStatus {
   const normalized = (level || "").toLowerCase();
-  if (normalized === "healthy") return "healthy";
-  if (normalized === "degraded" || normalized === "attention") return "degraded";
-  return "critical";
-}
-
-function makeNodeStrip(status: HealthStatus): HealthStatus[] {
-  if (status === "healthy") return Array(16).fill("healthy");
-  if (status === "degraded") {
-    return [...Array(11).fill("healthy"), ...Array(4).fill("degraded"), "critical"];
+  if (normalized.includes("fail") || normalized.includes("crit") || normalized.includes("error")) {
+    return "critical";
   }
-  return [...Array(10).fill("healthy"), ...Array(2).fill("degraded"), ...Array(4).fill("critical")];
+  if (normalized.includes("degrad") || normalized.includes("attention") || normalized.includes("drift")) {
+    return "degraded";
+  }
+  return "healthy";
 }
 
-function minutesToWindow(minutes: number): string {
-  if (minutes % (60 * 24) === 0) return `${minutes / (60 * 24)}d`;
-  if (minutes % 60 === 0) return `${minutes / 60}h`;
-  return `${minutes}m`;
+function toneFor(health: string | undefined): Tone {
+  const value = (health || "").toLowerCase();
+  if (value.includes("fail") || value.includes("crit") || value.includes("error") || value.includes("unhealthy")) {
+    return "critical";
+  }
+  if (
+    value.includes("attention") ||
+    value.includes("degrad") ||
+    value.includes("drift") ||
+    value.includes("pending")
+  ) {
+    return "attention";
+  }
+  if (value.includes("healthy") || value.includes("locked") || value.includes("stable") || value.includes("ok")) {
+    return "healthy";
+  }
+  return "unknown";
 }
 
-function rangeLabel(minutes: number): string {
-  if (minutes < 60) return `${minutes}m`;
-  if (minutes < 60 * 24) return `${minutes / 60}h`;
-  return `${minutes / (60 * 24)}d`;
+function toneRank(tone: Tone): number {
+  if (tone === "critical") return 0;
+  if (tone === "attention") return 1;
+  if (tone === "healthy") return 2;
+  return 3;
 }
 
 function buildFleetModel(
   overview: GuardianOverview | null,
   topology: GuardianTopologyResponse | null
 ): PartitionModel[] {
-  if (!overview?.partitions?.length) return [];
+  const topologyNodes = topology?.nodes ?? [];
+  const intentsByPartition = new Map<string, Map<string, AssetGroup[]>>();
 
-  const partitionOrder = overview.partitions.map((p) => p.name);
-  const partitionMap = new Map<string, PartitionModel>();
-
-  for (const part of overview.partitions) {
-    partitionMap.set(part.name, {
-      id: part.name,
-      region: part.name,
-      intents: [],
-    });
+  function ensureIntent(partition: string, intent: string): AssetGroup[] {
+    let byIntent = intentsByPartition.get(partition);
+    if (!byIntent) {
+      byIntent = new Map();
+      intentsByPartition.set(partition, byIntent);
+    }
+    let assets = byIntent.get(intent);
+    if (!assets) {
+      assets = [];
+      byIntent.set(intent, assets);
+    }
+    return assets;
   }
 
-  const topologyNodes = topology?.nodes || [];
-  const intentsByPartition = new Map<string, Map<string, PartitionModel["intents"][number]>>();
-
-  const intentNodes = topologyNodes.filter((n) => n.type === "intent");
-  const assetNodes = topologyNodes.filter((n) => n.type === "asset");
-
-  for (const node of intentNodes) {
-    const partitionName = node.partition || "unknown";
-    const intentName = node.name || node.intent || "Intent";
-    if (!intentsByPartition.has(partitionName)) {
-      intentsByPartition.set(partitionName, new Map());
+  for (const node of topologyNodes) {
+    if (node.type === "intent") {
+      ensureIntent(node.partition || "unknown", node.name || node.intent || "Intent");
+      continue;
     }
-    const intents = intentsByPartition.get(partitionName);
-    if (!intents) continue;
-    if (!intents.has(intentName)) {
-      intents.set(intentName, { name: intentName, assets: [] });
-    }
-  }
-
-  for (const node of assetNodes) {
-    const partitionName = node.partition || "unknown";
-    const intentName = node.intent || "Services";
-    if (!intentsByPartition.has(partitionName)) {
-      intentsByPartition.set(partitionName, new Map());
-    }
-    const intents = intentsByPartition.get(partitionName);
-    if (!intents) continue;
-    if (!intents.has(intentName)) {
-      intents.set(intentName, { name: intentName, assets: [] });
-    }
-
-    const status = mapLevelToHealth(node.health?.level);
-    intents.get(intentName)?.assets.push({
+    if (node.type !== "asset") continue;
+    const partition = node.partition || "unknown";
+    const intent = node.intent || "Services";
+    ensureIntent(partition, intent).push({
       id: node.id,
       name: node.name,
-      status,
-      nodes: makeNodeStrip(status),
-      partition: partitionName,
-      intent: intentName,
-      sourceScope: "asset",
+      status: mapLevelToHealth(node.health?.level),
+      partition,
+      intent,
     });
   }
 
-  for (const partName of partitionOrder) {
-    const model = partitionMap.get(partName);
-    if (!model) continue;
-    const intents = intentsByPartition.get(partName);
-    if (intents && intents.size > 0) {
-      model.intents = [...intents.values()].sort((a, b) => a.name.localeCompare(b.name));
-    } else {
-      const summary = overview.partitions.find((p) => p.name === partName);
-      const status = mapLevelToHealth(summary?.health);
-      model.intents = [
-        {
-          name: "Services",
-          assets: [
-            {
-              id: `${partName}-summary`,
-              name: partName,
-              status,
-              nodes: makeNodeStrip(status),
-              partition: partName,
-              intent: "Services",
-              sourceScope: "fallback",
-            },
-          ],
-        },
-      ];
-    }
-  }
+  return (overview?.partitions ?? []).map((partition) => {
+    const byIntent = intentsByPartition.get(partition.name);
+    const intents = byIntent
+      ? [...byIntent.entries()]
+          .map(([name, assets]) => ({
+            name,
+            assets: [...assets].sort((a, b) => a.name.localeCompare(b.name)),
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      : [];
 
-  return partitionOrder
-    .map((name) => partitionMap.get(name))
-    .filter((p): p is PartitionModel => Boolean(p));
+    return {
+      id: partition.name,
+      region: partition.name,
+      intents,
+      summary: {
+        health: partition.health,
+        status: partition.displayStatus || partition.status,
+        assetCount: partition.assetCount,
+        intentCount: partition.intentCount,
+        healthyAssets: partition.healthyAssets,
+        attentionAssets: partition.attentionAssets,
+        failingAssets: partition.failingAssets,
+      },
+    };
+  });
+}
+
+function minutesLabel(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60 * 24) return `${minutes / 60}h`;
+  return `${minutes / (60 * 24)}d`;
+}
+
+function KpiCard({
+  icon: Icon,
+  label,
+  value,
+  sub,
+  tone = "neutral",
+}: {
+  icon: React.ElementType;
+  label: string;
+  value: number | string;
+  sub: string;
+  tone?: "neutral" | "healthy" | "attention" | "critical";
+}) {
+  const color =
+    tone === "healthy"
+      ? "text-emerald-300"
+      : tone === "attention"
+        ? "text-amber-300"
+        : tone === "critical"
+          ? "text-rose-300"
+          : "text-gray-100";
+  return (
+    <div className="rounded-xl border border-dark-600 bg-dark-800 p-4">
+      <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-gray-500">
+        <Icon size={13} />
+        {label}
+      </div>
+      <p className={`mt-2 text-2xl font-bold tabular-nums ${color}`}>{value}</p>
+      <p className="mt-0.5 text-[11px] text-gray-500">{sub}</p>
+    </div>
+  );
 }
 
 export default function FleetDashboard() {
@@ -147,12 +185,13 @@ export default function FleetDashboard() {
   const [selectedEvents, setSelectedEvents] = useState<GuardianEventsResponse | null>(null);
   const [rangeMinutes, setRangeMinutes] = useState(60);
   const [partitionSearch, setPartitionSearch] = useState("");
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [sortKey, setSortKey] = useState<SortKey>("health");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
   const [viewMode, setViewMode] = useState<"compact" | "detailed">("detailed");
   const [loading, setLoading] = useState(true);
+  const [lastSync, setLastSync] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [topologyError, setTopologyError] = useState<string | null>(null);
   const [helperManifest, setHelperManifest] = useState<HelperFileManifest | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -161,31 +200,43 @@ export default function FleetDashboard() {
   const loadFleet = useCallback(async () => {
     setLoading(true);
     setError(null);
-    try {
-      const params = new URLSearchParams();
-      params.set("tenant", tenant);
-      const [overviewData, topologyData] = await Promise.all([
-        api.guardianOverview(),
-        api.getGuardianTopology(params),
-      ]);
-      setOverview(overviewData);
-      setTopology(topologyData);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to load fleet data");
-    } finally {
-      setLoading(false);
+    setTopologyError(null);
+    const params = new URLSearchParams();
+    params.set("tenant", tenant);
+
+    const [overviewResult, topologyResult] = await Promise.allSettled([
+      api.guardianOverview(),
+      api.getGuardianTopology(params),
+    ]);
+
+    if (overviewResult.status === "fulfilled") {
+      setOverview(overviewResult.value);
+    } else {
+      const message =
+        overviewResult.reason instanceof Error ? overviewResult.reason.message : "Failed to load fleet data";
+      setError(message);
     }
+
+    if (topologyResult.status === "fulfilled") {
+      setTopology(topologyResult.value);
+    } else {
+      setTopology(null);
+      setTopologyError("Topology details are unavailable. Partition health still comes from Guardian.");
+    }
+
+    setLastSync(new Date());
+    setLoading(false);
   }, [tenant]);
 
   useEffect(() => {
-    loadFleet();
-    const interval = setInterval(loadFleet, 30_000);
+    void loadFleet();
+    const interval = setInterval(() => void loadFleet(), 30_000);
     return () => clearInterval(interval);
   }, [loadFleet]);
 
   useEffect(() => {
     if (!selectedHub) return;
-    const window = minutesToWindow(rangeMinutes);
+    const window = minutesLabel(rangeMinutes);
 
     const healthParams = new URLSearchParams();
     healthParams.set("tenant", tenant);
@@ -198,10 +249,7 @@ export default function FleetDashboard() {
     eventParams.set("window", window);
     eventParams.set("limit", "40");
 
-    Promise.all([
-      api.getGuardianHealth(healthParams),
-      api.getGuardianEvents(eventParams),
-    ])
+    Promise.all([api.getGuardianHealth(healthParams), api.getGuardianEvents(eventParams)])
       .then(([healthData, eventData]) => {
         setSelectedHealth(healthData);
         setSelectedEvents(eventData);
@@ -231,12 +279,12 @@ export default function FleetDashboard() {
         }
         setHelperManifest(json as HelperFileManifest);
       } catch {
-        setUploadError("Failed to parse helper file. Expected JSON with version and asset, intent, or partition sections.");
+        setUploadError(
+          "Failed to parse helper file. Expected JSON with version and asset, intent, or partition sections."
+        );
       }
     };
-    reader.onerror = () => {
-      setUploadError("Failed to read file");
-    };
+    reader.onerror = () => setUploadError("Failed to read file");
     reader.readAsText(file);
     e.target.value = "";
   }, []);
@@ -247,7 +295,7 @@ export default function FleetDashboard() {
         setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
       } else {
         setSortKey(key);
-        setSortOrder(key === "health" ? "asc" : "asc");
+        setSortOrder("asc");
       }
     },
     [sortKey]
@@ -273,34 +321,18 @@ export default function FleetDashboard() {
 
   const filteredPartitions = useMemo(() => {
     const needle = partitionSearch.trim().toLowerCase();
-    return fleetPartitions
-      .map((partition) => {
-        const intents = partition.intents
-          .map((intent) => {
-            const assets = intent.assets.filter((asset) => {
-              if (sourceFilter !== "all" && asset.sourceScope !== sourceFilter) {
-                return false;
-              }
-              if (!needle) return true;
-              const haystack = [
-                partition.region,
-                partition.id,
-                intent.name,
-                asset.name,
-                asset.partition,
-                asset.intent,
-              ]
-                .join(" ")
-                .toLowerCase();
-              return haystack.includes(needle);
-            });
-            return { ...intent, assets };
-          })
-          .filter((intent) => intent.assets.length > 0);
-        return { ...partition, intents };
-      })
-      .filter((partition) => partition.intents.length > 0);
-  }, [fleetPartitions, partitionSearch, sourceFilter]);
+    if (!needle) return fleetPartitions;
+    return fleetPartitions.filter((partition) => {
+      const haystack = [
+        partition.region,
+        ...partition.intents.map((intent) => intent.name),
+        ...partition.intents.flatMap((intent) => intent.assets.map((asset) => asset.name)),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [fleetPartitions, partitionSearch]);
 
   const sortedPartitions = useMemo(() => {
     const sorted = [...filteredPartitions];
@@ -309,52 +341,44 @@ export default function FleetDashboard() {
       if (sortKey === "name") {
         cmp = a.region.localeCompare(b.region);
       } else if (sortKey === "health") {
-        const allA = a.intents.flatMap((i) => i.assets);
-        const allB = b.intents.flatMap((i) => i.assets);
-        const pctA = allA.length > 0 ? allA.filter((x) => x.status === "healthy").length / allA.length : 0;
-        const pctB = allB.length > 0 ? allB.filter((x) => x.status === "healthy").length / allB.length : 0;
-        cmp = pctA - pctB;
-      } else if (sortKey === "assets") {
-        const countA = a.intents.reduce((s, i) => s + i.assets.length, 0);
-        const countB = b.intents.reduce((s, i) => s + i.assets.length, 0);
-        cmp = countA - countB;
+        const byTone = toneRank(toneFor(a.summary.health)) - toneRank(toneFor(b.summary.health));
+        if (byTone !== 0) {
+          cmp = byTone;
+        } else {
+          cmp = b.summary.failingAssets - a.summary.failingAssets;
+          if (cmp === 0) cmp = b.summary.attentionAssets - a.summary.attentionAssets;
+        }
+      } else {
+        cmp = a.summary.assetCount - b.summary.assetCount;
       }
       return sortOrder === "desc" ? -cmp : cmp;
     });
     return sorted;
   }, [filteredPartitions, sortKey, sortOrder]);
 
-  const criticalAssets = useMemo(
-    () =>
-      sortedPartitions
-        .flatMap((p) => p.intents)
-        .flatMap((i) => i.assets)
-        .filter((a) => a.status === "critical").length,
-    [sortedPartitions]
-  );
-
-  const aggregatedRps = useMemo(() => {
-    const assets = sortedPartitions
-      .flatMap((p) => p.intents)
-      .flatMap((i) => i.assets).length;
-    return Math.max(1200, assets * 55);
-  }, [sortedPartitions]);
-
-  const totalAssets = useMemo(
-    () =>
-      fleetPartitions
-        .flatMap((p) => p.intents)
-        .flatMap((i) => i.assets).length,
-    [fleetPartitions]
-  );
-
-  const shownAssets = useMemo(
-    () =>
-      sortedPartitions
-        .flatMap((p) => p.intents)
-        .flatMap((i) => i.assets).length,
-    [sortedPartitions]
-  );
+  const summary = overview?.summary;
+  const totalAssets = summary?.assets ?? fleetPartitions.reduce((total, p) => total + p.summary.assetCount, 0);
+  const healthyAssets = summary?.healthyAssets ?? fleetPartitions.reduce((total, p) => total + p.summary.healthyAssets, 0);
+  const attentionAssets =
+    summary?.attentionAssets ?? fleetPartitions.reduce((total, p) => total + p.summary.attentionAssets, 0);
+  const failingAssets =
+    summary?.failingAssets ?? fleetPartitions.reduce((total, p) => total + p.summary.failingAssets, 0);
+  const healthyPct = totalAssets > 0 ? Math.round((healthyAssets / totalAssets) * 100) : 0;
+  const failingPartitions = fleetPartitions.filter(
+    (p) => p.summary.failingAssets > 0 || toneFor(p.summary.health) === "critical"
+  ).length;
+  const attentionPartitions = fleetPartitions.filter(
+    (p) => p.summary.attentionAssets > 0 || toneFor(p.summary.health) === "attention"
+  ).length;
+  const healthyPartitions = fleetPartitions.filter((p) => toneFor(p.summary.health) === "healthy").length;
+  const overallTone: Tone =
+    failingAssets > 0 || failingPartitions > 0
+      ? "critical"
+      : attentionAssets > 0 || attentionPartitions > 0
+        ? "attention"
+        : "healthy";
+  const shownAssets = sortedPartitions.reduce((total, p) => total + p.summary.assetCount, 0);
+  const syncedAt = lastSync ? lastSync.toLocaleTimeString() : "not yet synced";
 
   if (selectedHub) {
     return (
@@ -371,99 +395,204 @@ export default function FleetDashboard() {
   }
 
   return (
-    <div className="h-full w-full overflow-auto bg-slate-950">
-      <div className="px-6 pt-4 grid grid-cols-1 xl:grid-cols-[1fr_auto_auto_auto_auto_auto] gap-3 items-center">
-        <div className="text-xs text-slate-400 min-w-0">
-          {loading
-            ? "Refreshing fleet topology..."
-            : `Fleet topology ready - window ${rangeLabel(rangeMinutes)}`}
+    <div className="tab-panel">
+      <div className="panel-header">
+        <div className="panel-header__left">
+          <h2>Fleet</h2>
+          <p>
+            {loading && !overview
+              ? "Synchronizing partitions and topology…"
+              : `${fleetPartitions.length} partitions · ${totalAssets} assets · ${healthyPct}% healthy · synced ${syncedAt}`}
+          </p>
         </div>
-        <div className="flex items-center gap-2">
-          {[15, 60, 360, 1440].map((minutes) => (
+        <div className="xp-toolbar">
+          <div className="xp-presets" role="group" aria-label="Detail time window">
+            {[15, 60, 360, 1440].map((minutes) => (
+              <button
+                key={minutes}
+                type="button"
+                className={"xp-preset" + (rangeMinutes === minutes ? " xp-active" : "")}
+                onClick={() => setRangeMinutes(minutes)}
+                title={`Use the last ${minutes < 60 ? `${minutes} minutes` : `${minutes / 60} hours`} when inspecting an asset`}
+              >
+                {minutesLabel(minutes)}
+              </button>
+            ))}
+          </div>
+          <label className="xp-live-btn relative cursor-pointer" title="Import a helper manifest">
+            <Upload size={12} className="mr-1 inline" />
+            Helper
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleFileUpload}
+              className="absolute inset-0 cursor-pointer opacity-0"
+            />
+          </label>
+          <button
+            type="button"
+            className="xp-live-btn"
+            onClick={() => void loadFleet()}
+            disabled={loading}
+            title="Reload fleet data"
+          >
+            <RefreshCw size={12} className={"mr-1 inline " + (loading ? "animate-spin" : "")} />
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-1 min-h-0 flex-col gap-5 overflow-y-auto p-5">
+        {error && (
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+            <AlertTriangle size={16} className="shrink-0" />
+            <span className="min-w-0 flex-1">Could not load fleet data: {error}</span>
             <button
-              key={minutes}
-              onClick={() => setRangeMinutes(minutes)}
-              className={`px-2.5 py-1 rounded-md border text-xs ${
-                rangeMinutes === minutes
-                  ? "bg-sky-500/20 border-sky-400/60 text-sky-300"
-                  : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
-              }`}
+              type="button"
+              className="rounded-md border border-rose-400/40 px-2.5 py-1 text-xs font-semibold hover:bg-rose-500/10"
+              onClick={() => void loadFleet()}
             >
-              {rangeLabel(minutes)}
+              Retry
             </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-slate-400">source</span>
-          {(["all", "asset", "fallback"] as const).map((value) => (
-            <button
-              key={value}
-              onClick={() => setSourceFilter(value)}
-              className={`px-2 py-1 rounded border ${
-                sourceFilter === value
-                  ? "bg-sky-500/20 border-sky-400/60 text-sky-300"
-                  : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
-              }`}
-            >
-              {value}
-            </button>
-          ))}
-        </div>
-        <input
-          type="text"
-          value={partitionSearch}
-          onChange={(e) => setPartitionSearch(e.target.value)}
-          placeholder="Search partition, intent, asset"
-          className="w-full xl:w-64 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-400"
-        />
-        <label className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200 hover:bg-slate-800 cursor-pointer relative">
-          <Upload size={13} />
-          Helper
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json"
-            onChange={handleFileUpload}
-            className="absolute inset-0 opacity-0 cursor-pointer"
+          </div>
+        )}
+        {topologyError && !error && (
+          <div className="flex items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-300">
+            <AlertTriangle size={14} className="shrink-0" />
+            {topologyError}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <KpiCard icon={Server} label="Partitions" value={fleetPartitions.length} sub={`${healthyPartitions} healthy`} />
+          <KpiCard
+            icon={Activity}
+            label="Assets"
+            value={totalAssets}
+            sub={`${healthyPct}% healthy`}
+            tone={healthyPct >= 99 ? "healthy" : healthyPct >= 90 ? "attention" : "critical"}
           />
-        </label>
-        <button
-          onClick={loadFleet}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200 hover:bg-slate-800"
-        >
-          <RefreshCw size={13} />
-          Refresh
-        </button>
-      </div>
-      {uploadError && (
-        <div className="px-6 pt-3 text-xs text-amber-400 flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-          {uploadError}
+          <KpiCard
+            icon={AlertTriangle}
+            label="Needs attention"
+            value={attentionAssets}
+            sub={`${attentionPartitions} partition${attentionPartitions === 1 ? "" : "s"} with drift`}
+            tone={attentionAssets > 0 ? "attention" : "neutral"}
+          />
+          <KpiCard
+            icon={AlertTriangle}
+            label="Failing"
+            value={failingAssets}
+            sub={`${failingPartitions} partition${failingPartitions === 1 ? "" : "s"} failing`}
+            tone={failingAssets > 0 ? "critical" : "healthy"}
+          />
         </div>
-      )}
-      {helperManifest && (
-        <div className="px-6 pt-1.5 text-xs text-emerald-400">
-          Helper manifest loaded ({Object.keys(helperManifest.assets).length} assets configured)
+
+        {overview && (
+          <div
+            className={
+              "flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 text-sm " +
+              (overallTone === "critical"
+                ? "border-rose-500/30 bg-rose-500/10 text-rose-200"
+                : overallTone === "attention"
+                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                  : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200")
+            }
+          >
+            {overallTone === "healthy" ? <CheckCircle size={16} /> : <AlertTriangle size={16} />}
+            <span className="font-medium">
+              {overallTone === "healthy"
+                ? "Fleet is healthy"
+                : overallTone === "critical"
+                  ? `${failingAssets} asset${failingAssets === 1 ? "" : "s"} failing across ${failingPartitions} partition${failingPartitions === 1 ? "" : "s"}`
+                  : `${attentionAssets} asset${attentionAssets === 1 ? "" : "s"} need attention across ${attentionPartitions} partition${attentionPartitions === 1 ? "" : "s"}`}
+            </span>
+            <span className="text-xs opacity-75">
+              {overallTone === "healthy"
+                ? "No failing or drifted assets in the current snapshot."
+                : "Open a partition below to inspect its intents and assets."}
+            </span>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-dark-600 bg-dark-800 p-3">
+          <div className="relative min-w-[220px] flex-1">
+            <Search size={13} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input
+              type="text"
+              value={partitionSearch}
+              onChange={(event) => setPartitionSearch(event.target.value)}
+              placeholder="Search partitions, intents, or assets…"
+              className="w-full rounded-lg border border-dark-600 bg-dark-900 py-1.5 pl-8 pr-3 text-xs text-gray-200 placeholder:text-gray-600 focus:border-accent-blue focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+            />
+          </div>
+
+          <div className="flex items-center gap-1" role="group" aria-label="Sort partitions">
+            {(["health", "name", "assets"] as SortKey[]).map((key) => (
+              <button
+                key={key}
+                type="button"
+                className={"xp-preset" + (sortKey === key ? " xp-active" : "")}
+                onClick={() => handleSortChange(key)}
+                title={`Sort by ${key}`}
+              >
+                {key === "name" ? "Name" : key === "health" ? "Health" : "Assets"}
+                {sortKey === key && (sortOrder === "asc" ? " ↑" : " ↓")}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1 border-l border-dark-600 pl-2">
+            <button
+              type="button"
+              onClick={() => setViewMode("compact")}
+              className={"rounded-md p-1.5 " + (viewMode === "compact" ? "bg-accent-blue/15 text-sky-300" : "text-gray-600 hover:text-gray-300")}
+              title="Compact view"
+              aria-label="Compact view"
+            >
+              <Grid3X3 size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("detailed")}
+              className={"rounded-md p-1.5 " + (viewMode === "detailed" ? "bg-accent-blue/15 text-sky-300" : "text-gray-600 hover:text-gray-300")}
+              title="Detailed view"
+              aria-label="Detailed view"
+            >
+              <GripHorizontal size={14} />
+            </button>
+          </div>
+
+          <span className="ml-auto text-[11px] text-gray-500">
+            Showing {sortedPartitions.length}/{fleetPartitions.length} partitions · {shownAssets} assets
+          </span>
         </div>
-      )}
-      {error && <div className="px-6 pt-3 text-xs text-rose-400">{error}</div>}
-      <div className="px-6 pt-2 text-xs text-slate-500">
-        Showing {shownAssets}/{totalAssets} assets across {sortedPartitions.length}/
-        {fleetPartitions.length} partitions
+
+        {uploadError && (
+          <div className="flex items-center gap-2 text-xs text-amber-300">
+            <AlertTriangle size={13} /> {uploadError}
+          </div>
+        )}
+        {helperManifest && (
+          <div className="flex items-center gap-2 text-xs text-emerald-300">
+            <CheckCircle size={13} /> Helper manifest loaded ({Object.keys(helperManifest.assets ?? {}).length} assets configured)
+          </div>
+        )}
+
+        {loading && !overview ? (
+          <div className="rounded-xl border border-dark-600 bg-dark-800 px-6 py-16 text-center text-sm text-gray-500">
+            Loading fleet partitions…
+          </div>
+        ) : (
+          <FleetView
+            partitions={sortedPartitions}
+            viewMode={viewMode}
+            onSelectPartition={handlePartitionSelect}
+            onSelectHub={setSelectedHub}
+          />
+        )}
       </div>
-      <FleetView
-        partitions={sortedPartitions}
-        activePartitions={sortedPartitions.length}
-        criticalAssets={criticalAssets}
-        aggregatedRps={aggregatedRps}
-        sortKey={sortKey}
-        sortOrder={sortOrder}
-        viewMode={viewMode}
-        onSelectPartition={handlePartitionSelect}
-        onSelectHub={setSelectedHub}
-        onSortChange={handleSortChange}
-        onViewModeChange={setViewMode}
-      />
     </div>
   );
 }

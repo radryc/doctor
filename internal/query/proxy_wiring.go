@@ -38,7 +38,7 @@ type localMetricsUpstream struct {
 func (l localMetricsUpstream) Name() string { return proxy.SourceDoctor }
 
 func (l localMetricsUpstream) PromInstant(ctx context.Context, tenant, query string, at time.Time) (map[string]any, error) {
-	data, err, parse := l.svc.execPrometheusInstant(ctx, tenant, query, at)
+	data, err, parse := l.svc.execPrometheusInstant(ctx, tenant, "", query, at)
 	if err != nil {
 		return nil, &proxy.QueryError{Err: err, Parse: parse}
 	}
@@ -46,7 +46,7 @@ func (l localMetricsUpstream) PromInstant(ctx context.Context, tenant, query str
 }
 
 func (l localMetricsUpstream) PromRange(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration) (map[string]any, error) {
-	data, err, parse := l.svc.execPrometheusRange(ctx, tenant, query, start, end, step)
+	data, err, parse := l.svc.execPrometheusRange(ctx, tenant, "", query, start, end, step)
 	if err != nil {
 		return nil, &proxy.QueryError{Err: err, Parse: parse}
 	}

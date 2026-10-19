@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   BarChart,
   Bar,
@@ -12,33 +13,56 @@ import {
   Legend,
 } from "recharts";
 import {
-  Server,
-  Boxes,
   Activity,
-  CheckCircle,
   AlertTriangle,
-  XCircle,
-  RefreshCw,
+  ArrowUpRight,
+  BarChart3,
+  CheckCircle,
+  Copy,
+  FileText,
   GitBranch,
-  Sparkles,
+  RefreshCw,
+  Server,
   ShieldCheck,
-  Wrench,
-  BrainCircuit,
-  Image,
+  TriangleAlert,
 } from "lucide-react";
 import { api } from "../api/client";
+import { useConfig } from "../context/ConfigContext";
+import { copyText } from "../lib/clipboard";
 import type { GuardianOverview } from "../types/api";
 
-const HEALTH_GREEN = "#22c55e";
-const HEALTH_AMBER = "#f59e0b";
-const HEALTH_RED = "#ef4444";
-const HEALTH_GRAY = "#475569";
+const HEALTH_GREEN = "var(--ui-green)";
+const HEALTH_AMBER = "var(--ui-amber)";
+const HEALTH_RED = "var(--ui-red)";
+const HEALTH_GRAY = "var(--ui-faint)";
+
+type Tone = "healthy" | "attention" | "failing";
+
+function partitionTone(health: string | undefined): Tone {
+  const value = (health ?? "").toLowerCase();
+  if (value.includes("fail") || value.includes("crit") || value.includes("error")) return "failing";
+  if (
+    value.includes("attention") ||
+    value.includes("degrad") ||
+    value.includes("drift") ||
+    value.includes("pending")
+  ) {
+    return "attention";
+  }
+  return "healthy";
+}
+
+function toneRank(tone: Tone): number {
+  if (tone === "failing") return 0;
+  if (tone === "attention") return 1;
+  return 2;
+}
 
 function healthColor(health: string): string {
-  const h = health.toLowerCase();
-  if (h === "healthy") return HEALTH_GREEN;
-  if (h === "attention" || h === "degraded") return HEALTH_AMBER;
-  if (h === "failing" || h === "failed" || h === "error") return HEALTH_RED;
+  const tone = partitionTone(health);
+  if (tone === "healthy") return HEALTH_GREEN;
+  if (tone === "attention") return HEALTH_AMBER;
+  if (tone === "failing") return HEALTH_RED;
   return HEALTH_GRAY;
 }
 
@@ -46,14 +70,15 @@ function StatusBadge({ health }: { health: string }) {
   const color = healthColor(health);
   return (
     <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium"
-      style={{ backgroundColor: `${color}22`, color }}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium capitalize"
+      style={{
+        backgroundColor: `color-mix(in oklab, ${color} 14%, transparent)`,
+        color,
+        border: `1px solid color-mix(in oklab, ${color} 30%, transparent)`,
+      }}
     >
-      <span
-        className="w-1.5 h-1.5 rounded-full"
-        style={{ backgroundColor: color }}
-      />
-      {health}
+      <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />
+      {health || "unknown"}
     </span>
   );
 }
@@ -72,14 +97,14 @@ function StatCard({
   color?: string;
 }) {
   return (
-    <div className="bg-dark-800 border border-dark-600 rounded-xl p-5 flex flex-col gap-3">
+    <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex flex-col gap-2">
       <div className="flex items-center gap-2">
-        <Icon size={16} className={color} />
-        <span className="text-xs text-gray-500 uppercase tracking-wide font-medium">
+        <Icon size={15} className={color} />
+        <span className="text-[10px] text-gray-500 uppercase tracking-[0.12em] font-bold">
           {label}
         </span>
       </div>
-      <p className="text-3xl font-bold text-gray-100">{value}</p>
+      <p className="text-2xl font-bold text-gray-100 tabular-nums">{value}</p>
       {sub && <p className="text-xs text-gray-500">{sub}</p>}
     </div>
   );
@@ -87,11 +112,23 @@ function StatCard({
 
 const PIE_COLORS = [HEALTH_GREEN, HEALTH_AMBER, HEALTH_RED];
 
+function appUrl(hash: string): string {
+  return `${window.location.origin}${window.location.pathname}#${hash}`;
+}
+
+function reconciledLabel(value: string | undefined): string {
+  if (!value || value.startsWith("0001-01-01")) return "not reconciled yet";
+  return `reconciled ${new Date(value).toLocaleTimeString()}`;
+}
+
 export default function DashboardPage() {
+  const { config } = useConfig();
   const [overview, setOverview] = useState<GuardianOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<Date>(new Date());
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [copiedPartition, setCopiedPartition] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -108,10 +145,11 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    load();
+    void load();
+    if (!autoRefresh) return;
     const interval = setInterval(load, 30_000);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [autoRefresh, load]);
 
   const s = overview?.summary;
 
@@ -119,6 +157,27 @@ export default function DashboardPage() {
     s && s.assets > 0
       ? Math.round((s.healthyAssets / s.assets) * 100)
       : null;
+
+  const partitions = useMemo(() => overview?.partitions ?? [], [overview]);
+
+  const triage = useMemo(
+    () =>
+      [...partitions]
+        .filter((partition) => partitionTone(partition.health) !== "healthy")
+        .sort((a, b) => {
+          const tone = toneRank(partitionTone(a.health)) - toneRank(partitionTone(b.health));
+          if (tone !== 0) return tone;
+          const failing = (b.failingAssets ?? 0) - (a.failingAssets ?? 0);
+          if (failing !== 0) return failing;
+          return (b.attentionAssets ?? 0) - (a.attentionAssets ?? 0);
+        }),
+    [partitions]
+  );
+
+  const failingPartitions = triage.filter((p) => partitionTone(p.health) === "failing").length;
+  const attentionPartitions = triage.length - failingPartitions;
+  const overallTone: Tone =
+    failingPartitions > 0 ? "failing" : attentionPartitions > 0 ? "attention" : "healthy";
 
   const pieData = s
     ? [
@@ -128,133 +187,261 @@ export default function DashboardPage() {
       ].filter((d) => d.value > 0)
     : [];
 
-  const barData =
-    overview?.partitions.map((p) => ({
-      name: p.name.length > 14 ? p.name.slice(0, 12) + "\u2026" : p.name,
-      fullName: p.name,
-      Healthy: p.healthyAssets,
-      Attention: p.attentionAssets,
-      Failing: p.failingAssets,
-    })) ?? [];
+  const barData = useMemo(
+    () =>
+      [...partitions]
+        .sort((a, b) => {
+          const tone = toneRank(partitionTone(b.health)) - toneRank(partitionTone(a.health));
+          if (tone !== 0) return tone;
+          return b.assetCount - a.assetCount;
+        })
+        .map((p) => ({
+          name: p.name.length > 14 ? p.name.slice(0, 12) + "\u2026" : p.name,
+          fullName: p.name,
+          Healthy: p.healthyAssets,
+          Attention: p.attentionAssets,
+          Failing: p.failingAssets,
+        })),
+    [partitions]
+  );
+
+  const copyTriage = useCallback(async (partition: GuardianOverview["partitions"][number]) => {
+    const encoded = encodeURIComponent(partition.name);
+    const lines = [
+      `Doctor triage — ${partition.name}`,
+      `Health: ${partition.health || "unknown"} (${partition.displayStatus || "unknown"})`,
+      `Assets: ${partition.assetCount} total · ${partition.healthyAssets} healthy · ${partition.attentionAssets} attention · ${partition.failingAssets} failing`,
+      `Intents: ${partition.intentCount} total · ${partition.healthyIntents} healthy · ${partition.driftedIntents} drifted · ${partition.failedIntents} failed`,
+      `Last reconciled: ${!partition.lastReconciledAt || partition.lastReconciledAt.startsWith("0001-01-01") ? "unknown" : new Date(partition.lastReconciledAt).toLocaleString()}`,
+      "",
+      `Assets:   ${appUrl(`/partition/${encoded}/assets`)}`,
+      `Logs:     ${appUrl(`/logs?partition=${encoded}&range=15&sev=ERR`)}`,
+      `Traces:   ${appUrl(`/traces?partition=${encoded}&range=15`)}`,
+      `Metrics:  ${appUrl(`/metrics?partition=${encoded}`)}`,
+    ];
+    const ok = await copyText(lines.join("\n"));
+    setCopiedPartition(ok ? partition.name : "");
+    window.setTimeout(() => setCopiedPartition(""), 1800);
+  }, []);
 
   return (
     <div className="h-full flex flex-col overflow-hidden bg-dark-900">
-      <header className="shrink-0 border-b border-dark-600 bg-[radial-gradient(circle_at_15%_20%,rgba(6,182,212,0.12),transparent_40%),radial-gradient(circle_at_85%_15%,rgba(59,130,246,0.16),transparent_35%)]">
-        <div className="px-6 py-4 flex items-center justify-between gap-4">
+      <header className="shrink-0 border-b border-dark-600 app-header-glow">
+        <div className="px-6 py-4 flex items-center justify-between gap-4 flex-wrap">
           <div>
             <p className="text-[11px] uppercase tracking-[0.22em] text-accent-cyan/80 font-semibold">
-              Observability Dashboard
+              On-call workspace
             </p>
-            <h1 className="text-2xl font-bold text-gray-100 mt-1">Doctor Query Plane</h1>
+            <h1 className="text-2xl font-bold text-gray-100 mt-1">Doctor Triage</h1>
             <p className="text-xs text-gray-500 mt-1">
-              {refreshedAt && !loading
-                ? `Live telemetry synced at ${refreshedAt.toLocaleTimeString()}`
-                : "Synchronizing telemetry..."}
+              {loading && !overview
+                ? "Synchronizing telemetry…"
+                : `Live telemetry · tenant ${config.default_tenant || "default"} · synced ${refreshedAt.toLocaleTimeString()}`}
             </p>
           </div>
 
-          <button
-            onClick={load}
-            disabled={loading}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-accent-blue/85 hover:bg-accent-blue border border-blue-300/20 text-sm text-white transition-colors disabled:opacity-50"
-          >
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setAutoRefresh((value) => !value)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
+                autoRefresh
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                  : "border-dark-500 bg-dark-800 text-gray-400"
+              }`}
+              title="Toggle 30 second auto-refresh"
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${autoRefresh ? "bg-emerald-400" : "bg-gray-500"}`} />
+              {autoRefresh ? "Live · 30s" : "Paused"}
+            </button>
+            <button
+              onClick={load}
+              disabled={loading}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-accent-blue/85 hover:bg-accent-blue border border-blue-300/20 text-sm text-white transition-colors disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+              Refresh
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+      <div className="flex-1 overflow-y-auto p-6 space-y-5">
         {error && (
           <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-4 py-3 text-sm text-red-400">
             {error} — Guardian may be unreachable.
           </div>
         )}
 
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-          <div className="xl:col-span-2 glass rounded-xl p-5 border border-cyan-500/20">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
-                <BrainCircuit size={14} className="text-accent-cyan" />
-                Doctor Runtime Snapshot
-              </h2>
-              <StatusBadge health={healthPct !== null && healthPct >= 80 ? "healthy" : "attention"} />
-            </div>
-
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              <StatCard
-                icon={Server}
-                label="Partitions"
-                value={s?.partitions ?? "\u2014"}
-                color="text-accent-blue"
-              />
-              <StatCard
-                icon={Boxes}
-                label="Total Assets"
-                value={s?.assets ?? "\u2014"}
-                sub={healthPct !== null ? `${healthPct}% healthy` : undefined}
-                color="text-accent-purple"
-              />
-              <StatCard
-                icon={GitBranch}
-                label="Intents"
-                value={s?.intents ?? "\u2014"}
-                sub={
-                  s
-                    ? `${s.healthyIntents} ok \u00b7 ${s.driftedIntents} drifted \u00b7 ${s.failedIntents} failed`
-                    : undefined
-                }
-                color="text-accent-cyan"
-              />
-              <StatCard
-                icon={Activity}
-                label="Partitions"
-                value={s ? `${s.servicesHealthy + s.servicesAttention}` : "\u2014"}
-                sub={
-                  s
-                    ? `${s.servicesHealthy} healthy \u00b7 ${s.servicesAttention} degraded`
-                    : undefined
-                }
-                color="text-green-500"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
-              <div className="rounded-lg border border-dark-500 bg-dark-800/70 px-3 py-2 text-xs text-gray-300 flex items-center gap-2">
-                <ShieldCheck size={13} className="text-green-400" />
-                Guardrail status: Active
-              </div>
-              <div className="rounded-lg border border-dark-500 bg-dark-800/70 px-3 py-2 text-xs text-gray-300 flex items-center gap-2">
-                <Wrench size={13} className="text-accent-purple" />
-                Tool loop: up to 5 rounds
-              </div>
-              <div className="rounded-lg border border-dark-500 bg-dark-800/70 px-3 py-2 text-xs text-gray-300 flex items-center gap-2">
-                <Sparkles size={13} className="text-accent-cyan" />
-                Streaming mode: enabled
-              </div>
-            </div>
+        <section className={`oncall-banner oncall-banner--${overallTone}`}>
+          <span className="oncall-banner__dot" />
+          <div className="oncall-banner__copy">
+            <strong>
+              {overallTone === "healthy"
+                ? "All partitions healthy"
+                : overallTone === "failing"
+                  ? `${failingPartitions} partition${failingPartitions === 1 ? "" : "s"} failing`
+                  : `${attentionPartitions} partition${attentionPartitions === 1 ? "" : "s"} need attention`}
+            </strong>
+            <span>
+              {s
+                ? `${s.assets} assets across ${s.partitions} partitions · ${healthPct ?? 0}% healthy · ${s.failingAssets} failing assets`
+                : "Waiting for Guardian overview…"}
+            </span>
           </div>
+          <Link className="triage-action triage-action--primary" to="/fleet">
+            Open fleet <ArrowUpRight size={12} />
+          </Link>
+        </section>
 
-          <section className="glass rounded-xl p-5 border border-blue-500/20 flex flex-col">
-            <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2 mb-3">
-              <Image size={14} className="text-accent-blue" />
-              Reference Image
-            </h2>
-            <p className="text-xs text-gray-500 mb-3">
-              Prompt text hidden. Waiting for your image.
-            </p>
-            <div className="w-full h-[230px] rounded-lg border border-dashed border-dark-500 bg-dark-800/70 flex flex-col items-center justify-center gap-2">
-              <Image size={20} className="text-gray-500" />
-              <p className="text-xs text-gray-500">Share an image and I will wire it in.</p>
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <section className="xl:col-span-2 glass rounded-xl p-5">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                <TriangleAlert size={15} className="text-accent-cyan" />
+                Needs attention
+                {triage.length > 0 && (
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 font-bold">
+                    {triage.length}
+                  </span>
+                )}
+              </h2>
+              <span className="text-[11px] text-gray-500">Sorted by severity</span>
             </div>
+
+            {triage.length === 0 ? (
+              <div className="py-10 text-center">
+                <CheckCircle size={24} className="mx-auto text-green-500/70" />
+                <p className="mt-2 text-sm text-gray-300">Nothing needs attention right now.</p>
+                <p className="text-xs text-gray-500 mt-1">
+                  Doctor will keep watching; failures and drift will surface here first.
+                </p>
+              </div>
+            ) : (
+              <div className="triage-list">
+                {triage.map((partition) => {
+                  const tone = partitionTone(partition.health);
+                  const encoded = encodeURIComponent(partition.name);
+                  return (
+                    <article key={partition.name} className={`triage-row triage-row--${tone}`}>
+                      <div className="triage-row__head">
+                        <strong>{partition.name}</strong>
+                        <StatusBadge health={partition.health || partition.displayStatus} />
+                        <span className="text-[11px] text-gray-500 ml-auto">
+                          {reconciledLabel(partition.lastReconciledAt)}
+                        </span>
+                      </div>
+                      <div className="triage-row__meta">
+                        <span><b>{partition.failingAssets}</b> failing</span>
+                        <span><b>{partition.attentionAssets}</b> attention</span>
+                        <span><b>{partition.healthyAssets}</b> healthy</span>
+                        <span><b>{partition.assetCount}</b> assets</span>
+                        <span><b>{partition.intentCount}</b> intents</span>
+                        {partition.driftedIntents > 0 && <span><b>{partition.driftedIntents}</b> drifted</span>}
+                      </div>
+                      <div className="triage-row__actions">
+                        <Link className="triage-action triage-action--primary" to={`/partition/${encoded}/assets`}>
+                          Assets
+                        </Link>
+                        <Link className="triage-action" to={`/logs?partition=${encoded}&range=15&sev=ERR`}>
+                          <FileText size={11} /> Error logs
+                        </Link>
+                        <Link className="triage-action" to={`/traces?partition=${encoded}&range=15`}>
+                          <GitBranch size={11} /> Traces
+                        </Link>
+                        <Link className="triage-action" to={`/metrics?partition=${encoded}`}>
+                          <BarChart3 size={11} /> Metrics
+                        </Link>
+                        <button
+                          type="button"
+                          className={"triage-action" + (copiedPartition === partition.name ? " triage-action--primary" : "")}
+                          onClick={() => void copyTriage(partition)}
+                        >
+                          <Copy size={11} /> {copiedPartition === partition.name ? "Copied" : "Copy triage"}
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </section>
+
+          <section className="glass rounded-xl p-5">
+            <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2 mb-3">
+              <ShieldCheck size={15} className="text-accent-blue" />
+              Investigation shortcuts
+            </h2>
+            <div className="quick-actions">
+              <Link className="quick-action" to="/logs?range=15&sev=ERR">
+                <TriangleAlert size={15} />
+                <span>Errors in the last 15m</span>
+                <small>logs</small>
+              </Link>
+              <Link className="quick-action" to="/logs?range=60">
+                <FileText size={15} />
+                <span>Live log tail (1h)</span>
+                <small>logs</small>
+              </Link>
+              <Link className="quick-action" to="/traces?range=15">
+                <Activity size={15} />
+                <span>Recent traces</span>
+                <small>15m</small>
+              </Link>
+              <Link className="quick-action" to="/fleet">
+                <Server size={15} />
+                <span>Fleet topology</span>
+                <small>assets</small>
+              </Link>
+              <Link className="quick-action" to="/metrics">
+                <BarChart3 size={15} />
+                <span>Metrics explorer</span>
+                <small>PromQL</small>
+              </Link>
+              {config.guardian_url && (
+                <a className="quick-action" href={config.guardian_url} target="_blank" rel="noreferrer">
+                  <ShieldCheck size={15} />
+                  <span>Guardian control plane</span>
+                  <small>↗</small>
+                </a>
+              )}
+            </div>
+            <p className="text-[11px] text-gray-500 mt-3 leading-relaxed">
+              Press <kbd className="text-gray-400">⌘K</kbd> anywhere to jump to a partition or investigation.
+            </p>
+          </section>
+        </div>
+
+        <div className="oncall-stats">
+          <StatCard icon={Server} label="Partitions" value={s?.partitions ?? "\u2014"} color="text-accent-blue" />
+          <StatCard
+            icon={Activity}
+            label="Assets"
+            value={s?.assets ?? "\u2014"}
+            sub={healthPct !== null ? `${healthPct}% healthy` : undefined}
+            color="text-accent-cyan"
+          />
+          <StatCard
+            icon={AlertTriangle}
+            label="Failing assets"
+            value={s?.failingAssets ?? "\u2014"}
+            sub={`${s?.failedIntents ?? 0} failed intents`}
+            color="text-red-500"
+          />
+          <StatCard
+            icon={GitBranch}
+            label="Drifted intents"
+            value={s?.driftedIntents ?? "\u2014"}
+            sub={`${s?.healthyIntents ?? 0} healthy intents`}
+            color="text-amber-500"
+          />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="glass rounded-xl p-5 border border-green-500/20">
             <h2 className="text-sm font-semibold text-gray-200 mb-4 flex items-center gap-2">
               <CheckCircle size={14} className="text-green-500" />
-              Asset Health
+              Asset health
             </h2>
             {pieData.length > 0 ? (
               <ResponsiveContainer width="100%" height={200}>
@@ -274,10 +461,11 @@ export default function DashboardPage() {
                   </Pie>
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: "#12121a",
-                      border: "1px solid #252533",
+                      backgroundColor: "var(--ui-elevated)",
+                      border: "1px solid var(--ui-border)",
                       borderRadius: 8,
                       fontSize: 12,
+                      color: "var(--ui-text)",
                     }}
                   />
                   <Legend
@@ -299,7 +487,7 @@ export default function DashboardPage() {
           <div className="lg:col-span-2 glass rounded-xl p-5 border border-cyan-500/20">
             <h2 className="text-sm font-semibold text-gray-200 mb-4 flex items-center gap-2">
               <Server size={14} className="text-accent-blue" />
-              Assets per Partition
+              Assets per partition
             </h2>
             {barData.length > 0 ? (
               <ResponsiveContainer width="100%" height={200}>
@@ -311,23 +499,24 @@ export default function DashboardPage() {
                 >
                   <XAxis
                     dataKey="name"
-                    tick={{ fill: "#94a3b8", fontSize: 11 }}
+                    tick={{ fill: "var(--chart-text)", fontSize: 11 }}
                     axisLine={false}
                     tickLine={false}
                   />
                   <YAxis
-                    tick={{ fill: "#94a3b8", fontSize: 11 }}
+                    tick={{ fill: "var(--chart-text)", fontSize: 11 }}
                     axisLine={false}
                     tickLine={false}
                     allowDecimals={false}
                   />
                   <Tooltip
-                    cursor={{ fill: "#ffffff08" }}
+                    cursor={{ fill: "var(--ui-hover)" }}
                     contentStyle={{
-                      backgroundColor: "#12121a",
-                      border: "1px solid #252533",
+                      backgroundColor: "var(--ui-elevated)",
+                      border: "1px solid var(--ui-border)",
                       borderRadius: 8,
                       fontSize: 12,
+                      color: "var(--ui-text)",
                     }}
                     formatter={(v: number, name: string) => [v, name]}
                     labelFormatter={(label, payload) =>
@@ -350,13 +539,16 @@ export default function DashboardPage() {
         <div className="glass border border-dark-600 rounded-xl overflow-hidden">
           <div className="px-5 py-3 border-b border-dark-600 flex items-center gap-2">
             <Server size={14} className="text-accent-blue" />
-            <h2 className="text-sm font-semibold text-gray-200">Infrastructure Feed</h2>
+            <h2 className="text-sm font-semibold text-gray-200">Partition health feed</h2>
+            <span className="text-[11px] text-gray-500 ml-auto">
+              {partitions.length} partitions
+            </span>
           </div>
           {loading && !overview ? (
             <div className="py-12 text-center text-gray-600 text-sm">
-              Loading\u2026
+              Loading…
             </div>
-          ) : (overview?.partitions.length ?? 0) === 0 ? (
+          ) : partitions.length === 0 ? (
             <div className="py-12 text-center text-gray-600 text-sm">
               No partitions found
             </div>
@@ -367,64 +559,60 @@ export default function DashboardPage() {
                   <th className="px-5 py-2.5">Partition</th>
                   <th className="px-4 py-2.5">Health</th>
                   <th className="px-4 py-2.5 text-right">Assets</th>
-                  <th className="px-4 py-2.5 text-right">Intents</th>
-                  <th className="px-4 py-2.5 hidden md:table-cell">
-                    <span className="flex items-center gap-1">
-                      <CheckCircle size={11} className="text-green-500" />
-                      OK
-                    </span>
-                  </th>
-                  <th className="px-4 py-2.5 hidden md:table-cell">
-                    <span className="flex items-center gap-1">
-                      <AlertTriangle size={11} className="text-amber-500" />
-                      Attn
-                    </span>
-                  </th>
-                  <th className="px-4 py-2.5 hidden md:table-cell">
-                    <span className="flex items-center gap-1">
-                      <XCircle size={11} className="text-red-500" />
-                      Fail
-                    </span>
-                  </th>
+                  <th className="px-4 py-2.5 text-right">Failing</th>
+                  <th className="px-4 py-2.5 text-right">Attention</th>
                   <th className="px-4 py-2.5 hidden lg:table-cell text-right">
                     Last reconciled
                   </th>
+                  <th className="px-4 py-2.5 hidden md:table-cell">Investigate</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-dark-600">
-                {overview?.partitions.map((p) => (
-                  <tr
-                    key={p.name}
-                    className="hover:bg-dark-700 transition-colors"
-                  >
-                    <td className="px-5 py-3 font-medium text-gray-200">
-                      {p.name}
-                    </td>
-                    <td className="px-4 py-3">
-                      <StatusBadge health={p.health || p.displayStatus} />
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-300">
-                      {p.assetCount}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-300">
-                      {p.intentCount}
-                    </td>
-                    <td className="px-4 py-3 hidden md:table-cell tabular-nums text-green-500">
-                      {p.healthyAssets}
-                    </td>
-                    <td className="px-4 py-3 hidden md:table-cell tabular-nums text-amber-500">
-                      {p.attentionAssets}
-                    </td>
-                    <td className="px-4 py-3 hidden md:table-cell tabular-nums text-red-500">
-                      {p.failingAssets}
-                    </td>
-                    <td className="px-4 py-3 hidden lg:table-cell text-right text-gray-600 text-xs">
-                      {p.lastReconciledAt
-                        ? new Date(p.lastReconciledAt).toLocaleString()
-                        : "\u2014"}
-                    </td>
-                  </tr>
-                ))}
+                {[...partitions]
+                  .sort((a, b) => {
+                    const tone = toneRank(partitionTone(a.health)) - toneRank(partitionTone(b.health));
+                    if (tone !== 0) return tone;
+                    return b.failingAssets - a.failingAssets;
+                  })
+                  .map((p) => {
+                    const encoded = encodeURIComponent(p.name);
+                    return (
+                      <tr key={p.name} className="hover:bg-dark-700 transition-colors">
+                        <td className="px-5 py-2.5 font-medium text-gray-200">
+                          <Link to={`/partition/${encoded}/assets`} className="hover:text-accent-blue">
+                            {p.name}
+                          </Link>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <StatusBadge health={p.health || p.displayStatus} />
+                        </td>
+                        <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">
+                          {p.assetCount}
+                        </td>
+                        <td className="px-4 py-2.5 text-right tabular-nums text-red-500">
+                          {p.failingAssets}
+                        </td>
+                        <td className="px-4 py-2.5 text-right tabular-nums text-amber-500">
+                          {p.attentionAssets}
+                        </td>
+                        <td className="px-4 py-2.5 hidden lg:table-cell text-right text-gray-600 text-xs">
+                          {!p.lastReconciledAt || p.lastReconciledAt.startsWith("0001-01-01")
+                            ? "\u2014"
+                            : new Date(p.lastReconciledAt).toLocaleString()}
+                        </td>
+                        <td className="px-4 py-2.5 hidden md:table-cell">
+                          <div className="flex items-center gap-2 text-xs">
+                            <Link className="text-sky-400 hover:text-sky-300" to={`/logs?partition=${encoded}&range=15&sev=ERR`}>
+                              Logs
+                            </Link>
+                            <Link className="text-sky-400 hover:text-sky-300" to={`/traces?partition=${encoded}&range=15`}>
+                              Traces
+                            </Link>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           )}

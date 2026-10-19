@@ -193,6 +193,11 @@ func (g *PolicyGate) canonicalize(current string, attrs map[string]string) strin
 		region = attrs["aws_region"]
 		if current == "" {
 			current = attrs["guardian_partition"]
+			// OTel resource attributes keep the dotted form, while the
+			// Loki/AWS label paths use the underscore form.
+			if current == "" {
+				current = attrs["guardian.partition"]
+			}
 		}
 	}
 	return g.CanonicalPartition(account, region, current)
@@ -215,7 +220,7 @@ func (g *PolicyGate) FilterLogs(id authz.Identity, records []segment.LogRecord) 
 	kept := make([]segment.LogRecord, 0, len(records))
 	dropped := 0
 	for _, rec := range records {
-		canonical := g.canonicalize(rec.Partition, rec.ResourceAttributes)
+		canonical := g.canonicalize(rec.Partition, mergedAttributes(rec.ResourceAttributes, rec.Attributes))
 		if !g.PartitionVisible(id, canonical, policy.SignalLogs) {
 			dropped++
 			continue
@@ -246,7 +251,7 @@ func (g *PolicyGate) FilterSpans(id authz.Identity, spans []segment.TraceRecord)
 	kept := make([]segment.TraceRecord, 0, len(spans))
 	dropped := 0
 	for _, span := range spans {
-		canonical := g.canonicalize(span.Partition, span.ResourceAttributes)
+		canonical := g.canonicalize(span.Partition, mergedAttributes(span.ResourceAttributes, span.Attributes))
 		if !g.PartitionVisible(id, canonical, policy.SignalTraces) {
 			dropped++
 			continue
@@ -264,7 +269,8 @@ func (g *PolicyGate) FilterSpans(id authz.Identity, spans []segment.TraceRecord)
 func countLogDrops(g *PolicyGate, id authz.Identity, records []segment.LogRecord) int {
 	dropped := 0
 	for _, rec := range records {
-		if !g.PartitionVisible(id, g.canonicalize(rec.Partition, rec.ResourceAttributes), policy.SignalLogs) {
+		attrs := mergedAttributes(rec.ResourceAttributes, rec.Attributes)
+		if !g.PartitionVisible(id, g.canonicalize(rec.Partition, attrs), policy.SignalLogs) {
 			dropped++
 		}
 	}
@@ -274,11 +280,28 @@ func countLogDrops(g *PolicyGate, id authz.Identity, records []segment.LogRecord
 func countSpanDrops(g *PolicyGate, id authz.Identity, spans []segment.TraceRecord) int {
 	dropped := 0
 	for _, span := range spans {
-		if !g.PartitionVisible(id, g.canonicalize(span.Partition, span.ResourceAttributes), policy.SignalTraces) {
+		attrs := mergedAttributes(span.ResourceAttributes, span.Attributes)
+		if !g.PartitionVisible(id, g.canonicalize(span.Partition, attrs), policy.SignalTraces) {
 			dropped++
 		}
 	}
 	return dropped
+}
+
+// mergedAttributes combines resource-level and record-level attributes. The
+// partition label can arrive in either map depending on the OTel pipeline.
+func mergedAttributes(resource, attributes map[string]string) map[string]string {
+	if len(attributes) == 0 {
+		return resource
+	}
+	out := make(map[string]string, len(resource)+len(attributes))
+	for key, value := range resource {
+		out[key] = value
+	}
+	for key, value := range attributes {
+		out[key] = value
+	}
+	return out
 }
 
 // observeDrops logs observe-mode decisions without changing the payload.

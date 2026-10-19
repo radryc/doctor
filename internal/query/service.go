@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/rydzu/ainfra/doctor/internal/access"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
@@ -268,7 +269,10 @@ func (s *Service) guardianAPIBaseURL() string {
 
 func (s *Service) guardianGET(ctx context.Context, m2mPath, legacyPath string) (*http.Response, error) {
 	base := strings.TrimRight(s.guardianAPIBaseURL(), "/")
-	paths := []string{m2mPath, legacyPath}
+	// Prefer the user-facing API: it enforces the caller's repo ACL and
+	// returns the same data the Guardian UI shows. The M2M aliases are a
+	// fallback for service-to-service callers.
+	paths := []string{legacyPath, m2mPath}
 	for i, p := range paths {
 		url := base + p
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -276,6 +280,9 @@ func (s *Service) guardianGET(ctx context.Context, m2mPath, legacyPath string) (
 			return nil, err
 		}
 		req.Header.Set("Accept", "application/json")
+		if token := guardianTokenFromContext(ctx); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 		resp, err := s.guardianClient.Do(req)
 		if err != nil {
 			return nil, err
@@ -476,8 +483,46 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/guardian/health", s.handleGuardianHealth)
 	mux.HandleFunc("/v1/guardian/overview", s.handleGuardianOverview)
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
+	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
 	mux.HandleFunc("/", s.handleUI)
-	return mux
+	return s.guardianTokenMiddleware(mux)
+}
+
+// guardianTokenKey carries the caller's OIDC token to server-side Guardian
+// requests. Guardian enforces its repo ACL on /api/partitions (and the M2M
+// aliases), so the Doctor must forward the user's identity instead of calling
+// anonymously and receiving an empty overview.
+type guardianTokenKey struct{}
+
+func withGuardianToken(ctx context.Context, token string) context.Context {
+	if strings.TrimSpace(token) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, guardianTokenKey{}, strings.TrimSpace(token))
+}
+
+func guardianTokenFromContext(ctx context.Context) string {
+	token, _ := ctx.Value(guardianTokenKey{}).(string)
+	return token
+}
+
+func guardianTokenFromRequest(r *http.Request) string {
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[len("Bearer "):])
+	}
+	if cookie, err := r.Cookie("doctor_session"); err == nil {
+		return strings.TrimSpace(cookie.Value)
+	}
+	return ""
+}
+
+func (s *Service) guardianTokenMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token := guardianTokenFromRequest(r); token != "" {
+			r = r.WithContext(withGuardianToken(r.Context(), token))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -493,6 +538,26 @@ func (s *Service) handleUIConfig(w http.ResponseWriter, _ *http.Request) {
 		"default_tenant":    defaultTenant,
 		"guardian_url":      s.guardianURL,
 		"default_partition": s.defaultPartition,
+	})
+}
+
+// handleUIUser reports the signed-in caller for the header.
+func (s *Service) handleUIUser(w http.ResponseWriter, r *http.Request) {
+	identity, _ := authz.IdentityFromContext(r.Context())
+	display := identity.Email
+	if display == "" {
+		display = identity.Subject
+	}
+	if display == "" {
+		display = identity.ClientID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authenticated": !identity.IsAnonymous(),
+		"subject":       identity.Subject,
+		"email":         identity.Email,
+		"groups":        identity.Groups,
+		"client_id":     identity.ClientID,
+		"display":       display,
 	})
 }
 
@@ -606,6 +671,7 @@ func (s *Service) handleSpanSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
+	partition := partitionFromRequest(r)
 	service := strings.TrimSpace(r.URL.Query().Get("service"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	from := parseTime(r.URL.Query().Get("from"))
@@ -630,6 +696,13 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// The proxy router serves native storage. When the search explicitly
+		// selects the AWS source, also query CloudWatch and merge the records.
+		if plan, parseErr := parseLokiPlan(query); parseErr == nil {
+			if awsLogs := s.queryAWSLogsForLoki(r.Context(), tenant, plan, from, to, limit); len(awsLogs) > 0 {
+				records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
+			}
+		}
 		writeProxyWarnings(w, warnings)
 		results = records
 	} else {
@@ -640,13 +713,25 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if partition != "" {
+		filtered := results[:0]
+		for _, result := range results {
+			attrs := mergeStringMaps(result.ResourceAttributes, result.Attributes)
+			resultPartition := firstNonEmpty(result.Partition, attrs[attrGuardianPartition], attrs[labelPartition])
+			if resultPartition == partition {
+				filtered = append(filtered, result)
+			}
+		}
+		results = filtered
+	}
 	sort.Slice(results, func(i, j int) bool { return results[i].Timestamp.After(results[j].Timestamp) })
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service":  service,
-		"query":    query,
-		"returned": len(results),
-		"results":  results,
+		"service":   service,
+		"query":     query,
+		"partition": partition,
+		"returned":  len(results),
+		"results":   results,
 	})
 }
 
@@ -1196,6 +1281,18 @@ func (s *Service) tenantFromRequest(r *http.Request) string {
 	return tenant
 }
 
+// partitionFromRequest returns the optional canonical partition filter used by
+// the UI and Grafana. Both "partition" and "guardian_partition" are accepted.
+func partitionFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if value := requestParam(r, "partition"); value != "" {
+		return value
+	}
+	return requestParam(r, "guardian_partition")
+}
+
 func parseTime(value string) time.Time {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1247,6 +1344,7 @@ func writeJSON(w http.ResponseWriter, statusCode int, value any) {
 
 func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
+	partition := partitionFromRequest(r)
 	service := strings.TrimSpace(r.URL.Query().Get("service"))
 	from := parseTime(r.URL.Query().Get("from"))
 	to := parseTime(r.URL.Query().Get("to"))
@@ -1266,6 +1364,16 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if partition != "" {
+		filtered := spans[:0]
+		for _, span := range spans {
+			spanPartition, _, _ := traceIdentityLabels(span)
+			if spanPartition == partition {
+				filtered = append(filtered, span)
+			}
+		}
+		spans = filtered
 	}
 
 	type TraceSummary struct {
@@ -1322,9 +1430,12 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 				if _, exists := traceMap[summary.TraceID]; exists {
 					continue
 				}
-				partition, allowed := s.policyPartitionAllowed(r.Context(), summary.Account, summary.Region,
+				summaryPartition, allowed := s.policyPartitionAllowed(r.Context(), summary.Account, summary.Region,
 					awsPartition(summary.Region, summary.Account), policy.SignalTraces)
 				if !allowed {
+					continue
+				}
+				if partition != "" && summaryPartition != partition {
 					continue
 				}
 				spanCount := summary.SpanCount
@@ -1334,7 +1445,7 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 				traceMap[summary.TraceID] = &TraceSummary{
 					TraceID:   summary.TraceID,
 					Service:   firstNonEmpty(summary.Service, awsSourceLabel),
-					Partition: partition,
+					Partition: summaryPartition,
 					MinTime:   summary.StartTime,
 					MaxTime:   summary.EndTime,
 					SpanCount: spanCount,
@@ -1362,6 +1473,7 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
+	partition := partitionFromRequest(r)
 	from := time.Now().UTC().Add(-1 * time.Hour)
 	to := time.Now().UTC()
 
@@ -1376,28 +1488,58 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	var partitions []string
 	for _, rec := range results {
 		attrs := mergeStringMaps(rec.ResourceAttributes, rec.Attributes)
+		part := firstNonEmpty(rec.Partition, attrs[attrGuardianPartition], attrs[labelPartition])
+		if part != "" && !seenParts[part] {
+			seenParts[part] = true
+			partitions = append(partitions, part)
+		}
+		if partition != "" && part != partition {
+			continue
+		}
 		comp := firstNonEmpty(attrs["guardian.component"], attrs["guardian_component"], rec.Service)
 		if comp != "" && !seen[comp] {
 			seen[comp] = true
 			components = append(components, comp)
 		}
-		part := firstNonEmpty(rec.Partition, attrs[attrGuardianPartition], attrs[labelPartition])
-		if part != "" && !seenParts[part] {
-			seenParts[part] = true
-			partitions = append(partitions, part)
+	}
+
+	// Trace services may have no log records in the scan window. Include them
+	// when the caller asks for a trace-oriented catalog so the traces page can
+	// offer the same partition-scoped service filter as the logs page.
+	include := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include")))
+	if strings.Contains(include, "traces") {
+		if spans, spanErr := s.logEngine.QueryTraces(r.Context(), tenant, "", "", from, to, traceDiscoverySpanLimit); spanErr == nil {
+			for _, span := range spans {
+				part, _, _ := traceIdentityLabels(span)
+				if part != "" && !seenParts[part] {
+					seenParts[part] = true
+					partitions = append(partitions, part)
+				}
+				if partition != "" && part != partition {
+					continue
+				}
+				if span.Service != "" && !seen[span.Service] {
+					seen[span.Service] = true
+					components = append(components, span.Service)
+				}
+			}
 		}
 	}
 
 	// Federated X-Ray services have no local log records, but should still be
 	// selectable alongside native services and carry their AWS partition.
 	for _, svc := range s.awsServiceInfos(r.Context()) {
+		part := awsPartition(svc.Region, svc.Account)
+		if part != "" && !seenParts[part] {
+			seenParts[part] = true
+			partitions = append(partitions, part)
+		}
+		if partition != "" && part != partition {
+			continue
+		}
 		if svc.Name != "" && !seen[svc.Name] {
 			seen[svc.Name] = true
 			components = append(components, svc.Name)
-		}
-		if part := awsPartition(svc.Region, svc.Account); part != "" && !seenParts[part] {
-			seenParts[part] = true
-			partitions = append(partitions, part)
 		}
 	}
 	sort.Strings(components)
@@ -1420,6 +1562,7 @@ type svcInfo struct {
 	asset       string
 	cluster     string
 	pusher      string
+	truncated   bool
 	lastSeen    time.Time
 	traceCount  int
 	metricNames map[string]struct{}
@@ -1483,6 +1626,9 @@ func mergeServiceIdentity(info *svcInfo, primary, secondary map[string]string, p
 	if pusher := attr("guardian.pusher"); pusher != "" {
 		info.pusher = pusher
 	}
+	if truncated := attr("guardian.service.truncated"); truncated != "" {
+		info.truncated = strings.EqualFold(truncated, "true")
+	}
 }
 
 func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request) {
@@ -1536,8 +1682,9 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 			svcMap[l.Service] = info
 		}
 		info.hasLogs = true
-		partition, intent, asset := identityFromAttributes(l.Attributes)
-		mergeServiceIdentity(info, l.Attributes, nil, partition, intent, asset)
+		attrs := mergeStringMaps(l.ResourceAttributes, l.Attributes)
+		partition, intent, asset := identityFromAttributes(attrs)
+		mergeServiceIdentity(info, l.ResourceAttributes, l.Attributes, partition, intent, asset)
 		logCountBySvc[l.Service]++
 		totalLogs++
 		if l.SeverityText == "ERROR" || l.SeverityText == "FATAL" || l.SeverityNumber >= 17 {
@@ -1567,8 +1714,9 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 			svcMap[m.Service] = info
 		}
 		info.hasMetrics = true
-		partition, intent, asset := identityFromAttributes(m.Attributes)
-		mergeServiceIdentity(info, m.Attributes, nil, partition, intent, asset)
+		attrs := mergeStringMaps(m.ResourceAttributes, m.Attributes)
+		partition, intent, asset := identityFromAttributes(attrs)
+		mergeServiceIdentity(info, m.ResourceAttributes, m.Attributes, partition, intent, asset)
 		if m.MetricName != "" {
 			info.metricNames[m.MetricName] = struct{}{}
 		}
@@ -1624,7 +1772,7 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		services = append(services, discoveredService{
 			Name:          name,
 			FullName:      fullName,
-			Truncated:     fullName != name,
+			Truncated:     info.truncated,
 			HasMetrics:    info.hasMetrics,
 			HasTraces:     info.hasTraces,
 			HasLogs:       info.hasLogs,

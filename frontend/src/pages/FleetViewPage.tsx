@@ -76,7 +76,7 @@ export default function FleetViewPage() {
 
   return (
     <div className="h-full flex flex-col overflow-hidden bg-dark-900">
-      <header className="shrink-0 border-b border-dark-600 bg-[radial-gradient(circle_at_15%_20%,rgba(6,182,212,0.12),transparent_40%),radial-gradient(circle_at_85%_15%,rgba(59,130,246,0.16),transparent_35%)]">
+      <header className="shrink-0 border-b border-dark-600 app-header-glow">
         <div className="px-6 py-4 flex items-center justify-between gap-4">
           <div>
             <p className="text-[11px] uppercase tracking-[0.22em] text-accent-cyan/80 font-semibold">Topology</p>

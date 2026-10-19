@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Check, Copy, Link2 } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { copyText } from "../lib/clipboard";
 import LogHistogram from "../components/charts/LogHistogram";
 import type { LogRecord } from "../types/api";
 
@@ -31,6 +33,15 @@ function badgeClass(k: SevKey): string {
   return { ERR: "badge-err", WARN: "badge-warn", INFO: "badge-info", DBG: "badge-dbg" }[k];
 }
 
+function logPartition(record: LogRecord): string {
+  return (
+    record.partition ||
+    record.resource_attributes?.["guardian_partition"] ||
+    record.resource_attributes?.["partition"] ||
+    ""
+  );
+}
+
 interface LogRowProps {
   record: LogRecord;
   onOpenTrace: (id: string) => void;
@@ -45,6 +56,9 @@ function LogRow({ record, onOpenTrace }: LogRowProps) {
   const kv: Record<string, string> = {
     timestamp: new Date(record.timestamp).toLocaleString(),
     service: record.service ?? "",
+    partition: logPartition(record),
+    intent: record.intent ?? "",
+    asset: record.asset ?? "",
     severity: record.severity_text ?? "",
   };
   if (record.trace_id) {
@@ -70,7 +84,10 @@ function LogRow({ record, onOpenTrace }: LogRowProps) {
       <div className={"log-sev-bar " + barClass(k)} />
       <div className="log-time">{fmtTime(record.timestamp)}</div>
       <div className={"log-badge " + badgeClass(k)}>{k}</div>
-      <div className="log-comp">{comp}</div>
+      <div className="log-comp" title={comp}>
+        <span className="log-partition">{logPartition(record) || "—"}</span>
+        {comp && <span className="log-service">{comp}</span>}
+      </div>
       <div className="log-body-col">
         <div className="log-body-text">{record.body}</div>
         <div className="log-expand-detail">
@@ -85,15 +102,27 @@ function LogRow({ record, onOpenTrace }: LogRowProps) {
               ))}
           </div>
           {record.trace_id && (
-            <button
-              className="log-trace-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenTrace(record.trace_id!);
-              }}
-            >
-              &#8594; View trace {record.trace_id.slice(0, 16)}…
-            </button>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+              <button
+                className="log-trace-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenTrace(record.trace_id!);
+                }}
+              >
+                &#8594; View trace {record.trace_id.slice(0, 16)}…
+              </button>
+              <button
+                className="copy-btn"
+                title="Copy trace ID"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void copyText(record.trace_id!);
+                }}
+              >
+                <Copy size={10} /> Copy trace ID
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -109,33 +138,97 @@ const SEV_PILLS: { key: SevKey; cls: string; label: string }[] = [
   { key: "DBG", cls: "sev-pill-dbg", label: "DBG" },
 ];
 
+const PRESET_RANGES = [15, 60, 360, 1440];
+
+function parseSevParam(value: string | null): Record<SevKey, boolean> {
+  const all = { ERR: true, WARN: true, INFO: true, DBG: true };
+  if (!value) return all;
+  const requested = value
+    .split(",")
+    .map((part) => part.trim().toUpperCase())
+    .filter((part): part is SevKey => part === "ERR" || part === "WARN" || part === "INFO" || part === "DBG");
+  if (requested.length === 0) return all;
+  return {
+    ERR: requested.includes("ERR"),
+    WARN: requested.includes("WARN"),
+    INFO: requested.includes("INFO"),
+    DBG: requested.includes("DBG"),
+  };
+}
+
 export default function LogsPage() {
   const { config } = useConfig();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const initialRange = Number(searchParams.get("range"));
 
-  const [minutes, setMinutes] = useState(60);
+  const [minutes, setMinutes] = useState(PRESET_RANGES.includes(initialRange) ? initialRange : 60);
   const [componentFilter, setComponentFilter] = useState("");
-  const [sevActive, setSevActive] = useState<Record<SevKey, boolean>>({
-    ERR: true, WARN: true, INFO: true, DBG: true,
-  });
+  const [partitionFilter, setPartitionFilter] = useState(searchParams.get("partition") ?? "");
+  const [sevActive, setSevActive] = useState<Record<SevKey, boolean>>(() =>
+    parseSevParam(searchParams.get("sev"))
+  );
   const [inputVal, setInputVal] = useState("");
   const [textFilter, setTextFilter] = useState("");
-  const [queryInput, setQueryInput] = useState("");
-  const [queryApplied, setQueryApplied] = useState("");
+  const [queryInput, setQueryInput] = useState(searchParams.get("q") ?? "");
+  const [queryApplied, setQueryApplied] = useState(searchParams.get("q") ?? "");
   const [showHelp, setShowHelp] = useState(false);
   const [liveOn, setLiveOn] = useState(false);
   const [allRecords, setAllRecords] = useState<LogRecord[]>([]);
   const [services, setServices] = useState<string[]>([]);
+  const [partitions, setPartitions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("Searching…");
+  const [copiedView, setCopiedView] = useState(false);
 
-  // Load services once
+  // Load the service list for the selected partition (and the full partition
+  // list seen in telemetry). The backend returns all partitions even when the
+  // service list is filtered.
   useEffect(() => {
     api
-      .getLogServices(config.default_tenant)
-      .then((d) => setServices(d.services ?? []))
+      .getLogServices(config.default_tenant, partitionFilter)
+      .then((d) => {
+        setServices(d.services ?? []);
+        setPartitions((prev) => [...new Set([...prev, ...(d.partitions ?? [])])].sort());
+      })
       .catch(() => {});
-  }, [config.default_tenant]);
+  }, [config.default_tenant, partitionFilter]);
+
+  // Do not keep a service selected after the partition changes and that
+  // service is no longer present in the filtered catalog.
+  useEffect(() => {
+    if (componentFilter && !services.includes(componentFilter)) {
+      setComponentFilter("");
+    }
+  }, [componentFilter, services]);
+
+  // Keep the partition picker aligned with the records currently loaded. The
+  // discovery endpoint only scans a short window, so this fills in any
+  // partitions that appear in the selected range.
+  useEffect(() => {
+    const seen = new Set(partitions);
+    for (const record of allRecords) {
+      const partition = logPartition(record);
+      if (partition) seen.add(partition);
+    }
+    const next = [...seen].sort();
+    if (next.length !== partitions.length || next.some((value, index) => value !== partitions[index])) {
+      setPartitions(next);
+    }
+  }, [allRecords, partitions]);
+
+  // Keep the page in sync when another view (command palette, dashboard
+  // triage links) navigates here with a different investigation context.
+  const paramKey = searchParams.toString();
+  useEffect(() => {
+    const range = Number(searchParams.get("range"));
+    if (PRESET_RANGES.includes(range)) setMinutes(range);
+    const nextQuery = searchParams.get("q") ?? "";
+    setQueryInput(nextQuery);
+    setQueryApplied(nextQuery);
+    setPartitionFilter(searchParams.get("partition") ?? "");
+    setSevActive(parseSevParam(searchParams.get("sev")));
+  }, [paramKey]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -149,6 +242,7 @@ export default function LogsPage() {
         limit: "500",
       });
       if (queryApplied) params.set("q", queryApplied);
+      if (partitionFilter) params.set("partition", partitionFilter);
       const data = await api.searchLogs(params);
       setAllRecords(data.results ?? []);
     } catch (err) {
@@ -156,7 +250,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [config.default_tenant, minutes, queryApplied]);
+  }, [config.default_tenant, minutes, queryApplied, partitionFilter]);
 
   useEffect(() => {
     void load();
@@ -176,17 +270,15 @@ export default function LogsPage() {
 
   // Filtered records
   const tf = textFilter.toLowerCase();
+  const selectedPartition = partitionFilter.trim();
   const filtered = allRecords.filter((r) => {
     const k = sevKey(r.severity_text ?? "");
     if (!sevActive[k]) return false;
-    if (componentFilter) {
-      const comp =
-        r.resource_attributes?.["guardian.component"] ?? r.service ?? "";
-      if (comp !== componentFilter) return false;
-    }
+    const comp =
+      r.resource_attributes?.["guardian.component"] ?? r.service ?? "";
+    if (componentFilter && comp !== componentFilter) return false;
+    if (selectedPartition && logPartition(r) !== selectedPartition) return false;
     if (tf) {
-      const comp =
-        r.resource_attributes?.["guardian.component"] ?? r.service ?? "";
       if (
         !(r.body ?? "").toLowerCase().includes(tf) &&
         !(r.service ?? "").toLowerCase().includes(tf) &&
@@ -213,6 +305,21 @@ export default function LogsPage() {
     navigate("/traces?trace_id=" + encodeURIComponent(traceId));
   };
 
+  const copyViewLink = () => {
+    const params = new URLSearchParams();
+    params.set("range", String(minutes));
+    if (partitionFilter) params.set("partition", partitionFilter);
+    if (queryApplied) params.set("q", queryApplied);
+    const active = (Object.keys(sevActive) as SevKey[]).filter((key) => sevActive[key]);
+    if (active.length > 0 && active.length < 4) params.set("sev", active.join(","));
+    const base = window.location.href.split("#")[0];
+    void copyText(`${base}#/logs?${params.toString()}`).then((ok) => {
+      if (!ok) return;
+      setCopiedView(true);
+      window.setTimeout(() => setCopiedView(false), 1600);
+    });
+  };
+
   return (
     <div className="tab-panel">
       <div className="panel-header">
@@ -232,12 +339,25 @@ export default function LogsPage() {
               </button>
             ))}
           </div>
+          <label className="filter-label">
+            Partition
+            <select
+              className="xp-select"
+              value={partitionFilter}
+              onChange={(e) => setPartitionFilter(e.target.value)}
+            >
+              <option value="">All</option>
+              {partitions.map((partition) => (
+                <option key={partition} value={partition}>{partition}</option>
+              ))}
+            </select>
+          </label>
           <select
             className="xp-select"
             value={componentFilter}
             onChange={(e) => setComponentFilter(e.target.value)}
           >
-            <option value="">All partitions</option>
+            <option value="">All services</option>
             {services.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
@@ -268,6 +388,13 @@ export default function LogsPage() {
             title="Auto-refresh every 30 s"
           >
             &#9679; Live
+          </button>
+          <button
+            className="xp-live-btn"
+            onClick={copyViewLink}
+            title="Copy a shareable link to this log view"
+          >
+            {copiedView ? <><Check size={11} /> Copied</> : <><Link2 size={11} /> Copy view</>}
           </button>
         </div>
       </div>
@@ -364,7 +491,7 @@ export default function LogsPage() {
           <div className="xp-table-header log-header">
             <span>Time</span>
             <span>Sev</span>
-            <span>Partition</span>
+            <span>Partition / Service</span>
             <span>Message</span>
           </div>
           <div className="xp-rows">

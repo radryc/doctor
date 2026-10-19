@@ -7,7 +7,7 @@ interface MetricLineChartProps {
 
 const W = 600, H = 150, pL = 52, pB = 26, pT = 10, pR = 10;
 const cW = W - pL - pR, cH = H - pT - pB;
-const palette = ["#6d5efc", "#00ade4", "#22c55e", "#f59e0b", "#ef4444", "#a855f7", "#14b8a6", "#f97316"];
+const palette = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)", "var(--chart-6)", "var(--chart-7)", "var(--chart-8)"];
 
 function fmt(t: number): string {
   const d = new Date(t);
@@ -79,9 +79,9 @@ export default function MetricLineChart({ series, metricName }: MetricLineChartP
             <g key={i}>
               <line
                 x1={pL} y1={y} x2={pL + cW} y2={y}
-                stroke="rgba(148,163,184,0.1)" strokeWidth={1} strokeDasharray="3,3"
+                stroke="var(--chart-grid)" strokeWidth={1} strokeDasharray="3,3"
               />
-              <text x={pL - 4} y={y + 4} textAnchor="end" fill="#95a6c6" fontSize={10}>
+              <text x={pL - 4} y={y + 4} textAnchor="end" fill="var(--chart-text)" fontSize={10}>
                 {v.toFixed(Math.abs(v) < 10 ? 2 : 0)}
               </text>
             </g>
@@ -89,7 +89,7 @@ export default function MetricLineChart({ series, metricName }: MetricLineChartP
         })}
 
         {/* Area */}
-        {singleSeries && <path d={areaD} fill="rgba(109,94,252,0.16)" stroke="none" />}
+        {singleSeries && <path d={areaD} fill="var(--ui-secondary-soft)" stroke="none" />}
 
         {parsedSeries.map((item) => {
           const linePoints = item.points
@@ -125,7 +125,7 @@ export default function MetricLineChart({ series, metricName }: MetricLineChartP
             x={(pL + (i / 4) * cW).toFixed(1)}
             y={H - 4}
             textAnchor="middle"
-            fill="#95a6c6"
+            fill="var(--chart-text)"
             fontSize={10}
           >
             {fmt(minT + (i / 4) * (maxT - minT))}
@@ -137,7 +137,7 @@ export default function MetricLineChart({ series, metricName }: MetricLineChartP
           x={pL + cW}
           y={pT + 10}
           textAnchor="end"
-          fill="#95a6c6"
+          fill="var(--chart-text)"
           fontSize={10}
         >
           {parsedSeries.length === 1

@@ -27,10 +27,10 @@ function nodeKind(node: GuardianTopologyNode): "partition" | "intent" | "asset" 
 
 function healthColor(level?: string): string {
   const normalized = (level || "").toLowerCase();
-  if (normalized === "healthy") return "#22c55e";
-  if (normalized === "degraded" || normalized === "attention") return "#f59e0b";
-  if (normalized === "unhealthy" || normalized === "failing" || normalized === "failed") return "#ef4444";
-  return "#64748b";
+  if (normalized === "healthy") return "var(--ui-green)";
+  if (normalized === "degraded" || normalized === "attention") return "var(--ui-amber)";
+  if (normalized === "unhealthy" || normalized === "failing" || normalized === "failed") return "var(--ui-red)";
+  return "var(--ui-faint)";
 }
 
 function groupKey(node: GuardianTopologyNode): string {
@@ -139,7 +139,7 @@ export default function FleetGraph({
       >
         <defs>
           <pattern id="fleet-grid" width="40" height="40" patternUnits="userSpaceOnUse">
-            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(148,163,184,0.08)" strokeWidth="1" />
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="var(--ui-border)" strokeWidth="1" />
           </pattern>
         </defs>
         <rect width={width} height={height} fill="url(#fleet-grid)" />
@@ -156,7 +156,7 @@ export default function FleetGraph({
                 y1={from.pos.y + 22}
                 x2={to.pos.x + 65}
                 y2={to.pos.y + 22}
-                stroke="rgba(56,189,248,0.35)"
+                stroke="var(--ui-accent)"
                 strokeWidth={1.5}
               />
             );
@@ -164,15 +164,15 @@ export default function FleetGraph({
 
           {laidOut.map((node) => {
             const kind = nodeKind(node);
-            const fill = kind === "partition" ? "#0b2239" : kind === "intent" ? "#1a2e4b" : "#111827";
-            const stroke = node.id === selectedNodeId ? "#38bdf8" : "rgba(148,163,184,0.35)";
+            const fill = kind === "partition" ? "var(--ui-panel)" : kind === "intent" ? "var(--ui-elevated)" : "var(--ui-card)";
+            const stroke = node.id === selectedNodeId ? "var(--ui-accent)" : "var(--ui-border-strong)";
             const accent = healthColor(node.health?.level);
             return (
               <g key={node.id} transform={`translate(${node.pos.x} ${node.pos.y})`} onClick={() => onSelectNode?.(node)} style={{ cursor: "pointer" }}>
                 <rect x={0} y={0} rx={8} ry={8} width={130} height={44} fill={fill} stroke={stroke} strokeWidth={node.id === selectedNodeId ? 2 : 1} />
                 <circle cx={10} cy={22} r={4} fill={accent} />
-                <text x={20} y={18} fill="#cbd5e1" fontSize={10}>{kind.toUpperCase()}</text>
-                <text x={20} y={33} fill="#f8fafc" fontSize={11}>
+                <text x={20} y={18} fill="var(--ui-muted)" fontSize={10}>{kind.toUpperCase()}</text>
+                <text x={20} y={33} fill="var(--ui-text)" fontSize={11}>
                   {node.name.length > 16 ? `${node.name.slice(0, 14)}..` : node.name}
                 </text>
               </g>
