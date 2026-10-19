@@ -91,19 +91,20 @@ type QueryConfig struct {
 	GuardianDiscoveryInterval time.Duration
 	GuardianToken             string
 
-	AuthRequire      bool
-	AuthExemptPaths  []string
-	OIDCIssuer       string
-	OIDCAudience     string
-	OIDCJWKSURL      string
-	OIDCClientID     string
-	OIDCClientSecret string
-	OIDCRedirectURL  string
-	OIDCAuthURL      string
-	OIDCRequireLogin bool
-	OIDCScopes       []string
-	SessionDir       string
-	BreakGlassToken  string
+	AuthRequire       bool
+	AuthExemptPaths   []string
+	OIDCIssuer        string
+	OIDCAudience      string
+	OIDCJWKSURL       string
+	OIDCClientID      string
+	OIDCClientSecret  string
+	OIDCRedirectURL   string
+	OIDCEndSessionURL string
+	OIDCAuthURL       string
+	OIDCRequireLogin  bool
+	OIDCScopes        []string
+	SessionDir        string
+	BreakGlassToken   string
 
 	AccessResolver          string
 	AccessMode              string
@@ -249,19 +250,20 @@ func LoadQuery(service string) QueryConfig {
 		GuardianDiscoveryInterval: envDuration("DOCTOR_GUARDIAN_DISCOVERY_INTERVAL", 30*time.Second),
 		GuardianToken:             envString("DOCTOR_GUARDIAN_TOKEN", ""),
 
-		AuthRequire:      envBool("DOCTOR_AUTH_REQUIRE", false),
-		AuthExemptPaths:  envCSV("DOCTOR_AUTH_EXEMPT_PATHS", nil),
-		OIDCIssuer:       envString("DOCTOR_OIDC_ISSUER", ""),
-		OIDCAudience:     envString("DOCTOR_OIDC_AUDIENCE", ""),
-		OIDCJWKSURL:      envString("DOCTOR_OIDC_JWKS_URL", ""),
-		OIDCClientID:     envString("DOCTOR_OIDC_CLIENT_ID", ""),
-		OIDCClientSecret: envString("DOCTOR_OIDC_CLIENT_SECRET", ""),
-		OIDCRedirectURL:  envString("DOCTOR_OIDC_REDIRECT_URL", ""),
-		OIDCAuthURL:      envString("DOCTOR_OIDC_AUTH_URL", ""),
-		OIDCRequireLogin: envBool("DOCTOR_OIDC_REQUIRE_LOGIN", false),
-		OIDCScopes:       envCSV("DOCTOR_OIDC_SCOPES", nil),
-		SessionDir:       envString("DOCTOR_SESSION_DIR", ".doctor/sessions"),
-		BreakGlassToken:  envString("DOCTOR_BREAK_GLASS_TOKEN", ""),
+		AuthRequire:       envBool("DOCTOR_AUTH_REQUIRE", false),
+		AuthExemptPaths:   envCSV("DOCTOR_AUTH_EXEMPT_PATHS", nil),
+		OIDCIssuer:        envString("DOCTOR_OIDC_ISSUER", ""),
+		OIDCAudience:      envString("DOCTOR_OIDC_AUDIENCE", ""),
+		OIDCJWKSURL:       envString("DOCTOR_OIDC_JWKS_URL", ""),
+		OIDCClientID:      envString("DOCTOR_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:  envString("DOCTOR_OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURL:   envString("DOCTOR_OIDC_REDIRECT_URL", ""),
+		OIDCEndSessionURL: envString("DOCTOR_OIDC_END_SESSION_URL", ""),
+		OIDCAuthURL:       envString("DOCTOR_OIDC_AUTH_URL", ""),
+		OIDCRequireLogin:  envBool("DOCTOR_OIDC_REQUIRE_LOGIN", false),
+		OIDCScopes:        envCSV("DOCTOR_OIDC_SCOPES", nil),
+		SessionDir:        envString("DOCTOR_SESSION_DIR", ".doctor/sessions"),
+		BreakGlassToken:   envString("DOCTOR_BREAK_GLASS_TOKEN", ""),
 
 		AccessResolver:          envString("DOCTOR_ACCESS_RESOLVER", "owners"),
 		AccessMode:              envString("DOCTOR_ACCESS_MODE", "observe"),

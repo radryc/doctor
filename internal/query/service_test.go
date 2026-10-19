@@ -398,6 +398,118 @@ func TestHandleRecentTracesQueriesBoundedSpanSet(t *testing.T) {
 	t.Fatalf("response did not include trace %s", targetTraceID)
 }
 
+func TestHandleLogServicesFiltersServicesByPartition(t *testing.T) {
+	base := time.Now().UTC()
+	backend := &fakeLogEngineBackend{logs: []segment.LogRecord{
+		{Tenant: "default", Service: "doctor.query", Partition: "doctor", Timestamp: base, Body: "ready"},
+		{Tenant: "default", Service: "monofs.node", Partition: "monofs", Timestamp: base, Body: "ready"},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/services?tenant=default&partition=doctor", nil)
+	rec := httptest.NewRecorder()
+	svc.handleLogServices(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Services   []string `json:"services"`
+		Partitions []string `json:"partitions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Services) != 1 || resp.Services[0] != "doctor.query" {
+		t.Fatalf("services = %v, want only doctor.query", resp.Services)
+	}
+	if len(resp.Partitions) != 2 {
+		t.Fatalf("partitions = %v, want both partitions", resp.Partitions)
+	}
+}
+
+func TestHandleLogSearchFiltersByPartition(t *testing.T) {
+	base := time.Now().UTC()
+	backend := &fakeLogEngineBackend{logs: []segment.LogRecord{
+		{Tenant: "default", Service: "doctor.query", Partition: "doctor", Timestamp: base, Body: "ready"},
+		{Tenant: "default", Service: "monofs.node", Partition: "monofs", Timestamp: base, Body: "ready"},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/search?tenant=default&partition=doctor&from="+url.QueryEscape(base.Add(-time.Hour).Format(time.RFC3339))+"&to="+url.QueryEscape(base.Add(time.Minute).Format(time.RFC3339)), nil)
+	rec := httptest.NewRecorder()
+	svc.handleLogSearch(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Results []segment.LogRecord `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Service != "doctor.query" {
+		t.Fatalf("results = %+v, want only doctor log", resp.Results)
+	}
+}
+
+func TestHandleRecentTracesFiltersByPartition(t *testing.T) {
+	base := time.Now().UTC()
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{
+		{TraceID: "doctor-trace", SpanID: "s1", Service: "doctor.query", Partition: "doctor", StartTime: base.Add(-time.Minute), EndTime: base},
+		{TraceID: "monofs-trace", SpanID: "s2", Service: "monofs.node", Partition: "monofs", StartTime: base.Add(-time.Minute), EndTime: base},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	req := httptest.NewRequest(http.MethodGet, "/v1/traces/recent?tenant=default&partition=doctor&from="+url.QueryEscape(base.Add(-time.Hour).Format(time.RFC3339))+"&to="+url.QueryEscape(base.Format(time.RFC3339)), nil)
+	rec := httptest.NewRecorder()
+	svc.handleRecentTraces(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Traces []struct {
+			TraceID string `json:"trace_id"`
+		} `json:"traces"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Traces) != 1 || resp.Traces[0].TraceID != "doctor-trace" {
+		t.Fatalf("traces = %+v, want only doctor trace", resp.Traces)
+	}
+}
+
+func TestHandlePrometheusQueryFiltersByPartition(t *testing.T) {
+	base := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+	backend := &fakeLogEngineBackend{
+		metrics: []segment.MetricPointRecord{
+			{Tenant: "default", Service: "doctor.query", Partition: "doctor", MetricName: "demo_metric", Timestamp: base, HasValue: true, Value: 10},
+			{Tenant: "default", Service: "monofs.node", Partition: "monofs", MetricName: "demo_metric", Timestamp: base, HasValue: true, Value: 20},
+		},
+	}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/query?tenant=default&partition=doctor&query=demo_metric&time="+url.QueryEscape(base.Format(time.RFC3339)), nil)
+	rec := httptest.NewRecorder()
+	svc.handlePrometheusQuery(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+				Value  []any             `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Data.Result) != 1 {
+		t.Fatalf("result = %+v, want one partition series", resp.Data.Result)
+	}
+	if got := resp.Data.Result[0].Metric["guardian_partition"]; got != "doctor" {
+		t.Fatalf("guardian_partition = %q, want doctor", got)
+	}
+}
+
 func TestHandlePrometheusQueryReturnsVector(t *testing.T) {
 	t.Helper()
 
@@ -538,6 +650,32 @@ func TestHandlePrometheusLabelValuesUsesMetricNameDiscovery(t *testing.T) {
 		if resp.Data[idx] != want[idx] {
 			t.Fatalf("data = %v, want %v", resp.Data, want)
 		}
+	}
+}
+
+func TestHandlePrometheusLabelValuesFiltersByPartition(t *testing.T) {
+	base := time.Date(2026, 5, 12, 11, 0, 0, 0, time.UTC)
+	backend := &fakeLogEngineBackend{
+		metrics: []segment.MetricPointRecord{
+			{Tenant: "default", Service: "doctor.query", Partition: "doctor", MetricName: "doctor_ingest_requests_accepted", Timestamp: base, HasValue: true, Value: 1},
+			{Tenant: "default", Service: "monofs.node", Partition: "monofs", MetricName: "monofs_server_ops_total", Timestamp: base, HasValue: true, Value: 1},
+		},
+	}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/label/__name__/values?tenant=default&partition=doctor&start="+url.QueryEscape(base.Add(-5*time.Minute).Format(time.RFC3339))+"&end="+url.QueryEscape(base.Format(time.RFC3339)), nil)
+	rec := httptest.NewRecorder()
+	svc.handlePrometheusLabelValues(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []string `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Data) != 1 || resp.Data[0] != "doctor_ingest_requests_accepted" {
+		t.Fatalf("data = %v, want only doctor metric", resp.Data)
 	}
 }
 

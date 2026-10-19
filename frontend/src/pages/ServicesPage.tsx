@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { Activity, AlertTriangle, Clock, Gauge, Search, Sparkles, BarChart3 } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
@@ -94,16 +95,32 @@ export default function ServicesPage() {
       });
       const data = await api.queryPrometheusRange(params);
       if (data.data?.resultType === "matrix" && data.data.result?.length > 0) {
-        const series = data.data.result.map((s: any) => ({
-          label: Object.entries(s.metric || {})
-            .filter(([k]) => k !== "__name__")
-            .map(([k, v]) => `${k}="${v}"`)
-            .join(",") || suggestion.label,
-          points: s.values.map((v: [number, string]) => ({
+        const series = data.data.result.map((s: any) => {
+          const points = (s.values ?? []).map((v: [number, string]) => ({
             timestamp: new Date(v[0] * 1000).toISOString(),
             value: Number(v[1]),
-          })),
-        }));
+          }));
+          for (const [timestamp, histogram] of s.histograms ?? []) {
+            const count = Number(histogram?.count);
+            const sum = Number(histogram?.sum);
+            const value = Number.isFinite(sum) && Number.isFinite(count) && count > 0
+              ? sum / count
+              : (Number.isFinite(sum) ? sum : count);
+            if (Number.isFinite(value)) {
+              points.push({
+                timestamp: new Date(timestamp * 1000).toISOString(),
+                value,
+              });
+            }
+          }
+          return {
+            label: Object.entries(s.metric || {})
+              .filter(([k]) => k !== "__name__")
+              .map(([k, v]) => `${k}="${v}"`)
+              .join(",") || suggestion.label,
+            points,
+          };
+        });
         setGraphData(series);
       } else {
         setGraphData([]);
@@ -126,12 +143,34 @@ export default function ServicesPage() {
           >
             ← Back to services
           </button>
-          <div className="flex items-center gap-2 mb-4">
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
             <h2 className="text-lg font-semibold text-slate-100">{selectedService.name}</h2>
             <div className="flex gap-1">
               {signalBadge(selectedService.has_traces, "traces")}
               {signalBadge(selectedService.has_logs, "logs")}
               {signalBadge(selectedService.has_metrics, "metrics")}
+            </div>
+            <div className="flex items-center gap-2 ml-auto text-xs">
+              <Link
+                className="px-2.5 py-1 rounded border border-slate-700 bg-slate-900 text-slate-300 hover:border-sky-500/40 hover:text-sky-300"
+                to={`/logs?q=${encodeURIComponent(selectedService.name)}&range=60`}
+              >
+                Logs
+              </Link>
+              <Link
+                className="px-2.5 py-1 rounded border border-slate-700 bg-slate-900 text-slate-300 hover:border-sky-500/40 hover:text-sky-300"
+                to={`/traces?service=${encodeURIComponent(selectedService.name)}&range=60`}
+              >
+                Traces
+              </Link>
+              {selectedService.partition && (
+                <Link
+                  className="px-2.5 py-1 rounded border border-slate-700 bg-slate-900 text-slate-300 hover:border-sky-500/40 hover:text-sky-300"
+                  to={`/partition/${encodeURIComponent(selectedService.partition)}/assets`}
+                >
+                  Assets
+                </Link>
+              )}
             </div>
           </div>
 

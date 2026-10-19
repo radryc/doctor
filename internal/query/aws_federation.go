@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
@@ -59,6 +60,22 @@ func logPushdown(plan lokiPlan) proxy.LogPushdown {
 // Prometheus label-values route used by Grafana's metric browser.
 func (s *Service) awsMetricNames(ctx context.Context) []string {
 	return proxy.AWSMetricNames(ctx, s.aws)
+}
+
+// awsPartitionVisible reports whether federated AWS metrics belong to the
+// selected partition. Local partitions must not inherit every CloudWatch
+// metric name in the catalog.
+func (s *Service) awsPartitionVisible(ctx context.Context, partition string) bool {
+	partition = strings.TrimSpace(partition)
+	if partition == "" {
+		return true
+	}
+	for _, svc := range s.awsServiceInfos(ctx) {
+		if awsPartition(svc.Region, svc.Account) == partition {
+			return true
+		}
+	}
+	return false
 }
 
 // awsServiceInfos returns X-Ray services with their AWS partition metadata.

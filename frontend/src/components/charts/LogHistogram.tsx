@@ -12,10 +12,10 @@ const barW = cW / BUCKETS;
 type SevKey = "error" | "warn" | "info" | "debug";
 
 const SEV_COLORS: Record<SevKey, string> = {
-  error: "#f43f5e",
-  warn: "#f59e0b",
-  info: "#38bdf8",
-  debug: "#95a6c6",
+  error: "var(--chart-5)",
+  warn: "var(--chart-4)",
+  info: "var(--chart-2)",
+  debug: "var(--chart-text)",
 };
 
 function sevKey(text: string): SevKey {
@@ -80,9 +80,9 @@ export default function LogHistogram({ records }: LogHistogramProps) {
           <g key={i}>
             <line
               x1={pL} y1={y} x2={pL + cW} y2={y}
-              stroke="rgba(148,163,184,0.1)" strokeWidth={1} strokeDasharray="3,3"
+              stroke="var(--chart-grid)" strokeWidth={1} strokeDasharray="3,3"
             />
-            <text x={pL - 4} y={y + 4} textAnchor="end" fill="#95a6c6" fontSize={10}>
+            <text x={pL - 4} y={y + 4} textAnchor="end" fill="var(--chart-text)" fontSize={10}>
               {Math.round((maxCount * i) / 4)}
             </text>
           </g>
@@ -122,7 +122,7 @@ export default function LogHistogram({ records }: LogHistogramProps) {
           x={pL + (i / 4) * cW}
           y={H - 4}
           textAnchor="middle"
-          fill="#95a6c6"
+          fill="var(--chart-text)"
           fontSize={10}
         >
           {fmt(minT + (i / 4) * (maxT - minT))}
@@ -136,7 +136,7 @@ export default function LogHistogram({ records }: LogHistogramProps) {
           const el = (
             <g key={key}>
               <rect x={lx} y={4} width={10} height={10} fill={SEV_COLORS[key]} rx={2} />
-              <text x={lx + 13} y={13} fill="#95a6c6" fontSize={10}>
+              <text x={lx + 13} y={13} fill="var(--chart-text)" fontSize={10}>
                 {lbl}
               </text>
             </g>

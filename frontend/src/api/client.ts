@@ -15,6 +15,7 @@ import type {
   GuardianEventsResponse,
   ServiceDiscoveryResponse,
   ServiceSuggestResponse,
+  UIUser,
 } from "../types/api";
 
 async function fetchJSON<T>(url: string): Promise<T> {
@@ -36,6 +37,8 @@ async function fetchJSON<T>(url: string): Promise<T> {
 export const api = {
   getConfig: () => fetchJSON<UIConfig>("/v1/ui/config"),
 
+  getUser: () => fetchJSON<UIUser>("/v1/ui/user"),
+
   getHealth: () => fetchJSON<HealthResponse>("/healthz"),
 
   getBuildInfo: () =>
@@ -49,10 +52,12 @@ export const api = {
       `/v1/traces/${encodeURIComponent(traceId)}?tenant=${encodeURIComponent(tenant)}`
     ),
 
-  getLogServices: (tenant: string) =>
-    fetchJSON<LogServicesResponse>(
-      `/v1/logs/services?tenant=${encodeURIComponent(tenant)}`
-    ),
+  getLogServices: (tenant: string, partition = "", includeTraces = false) => {
+    const params = new URLSearchParams({ tenant });
+    if (partition) params.set("partition", partition);
+    if (includeTraces) params.set("include", "traces");
+    return fetchJSON<LogServicesResponse>(`/v1/logs/services?${params}`);
+  },
 
   searchLogs: (params: URLSearchParams) =>
     fetchJSON<LogSearchResponse>(`/v1/logs/search?${params}`),

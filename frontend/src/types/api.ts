@@ -5,6 +5,15 @@ export interface UIConfig {
   default_partition: string;
 }
 
+export interface UIUser {
+  authenticated: boolean;
+  subject?: string;
+  email?: string;
+  groups?: string[];
+  client_id?: string;
+  display?: string;
+}
+
 // ── Traces ────────────────────────────────────────────────────────────────────
 export interface TraceRecord {
   tenant: string;
@@ -77,6 +86,7 @@ export interface LogSearchResponse {
 
 export interface LogServicesResponse {
   services: string[];
+  partitions: string[];
 }
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
@@ -124,14 +134,26 @@ export interface PrometheusSeriesMetric {
   [key: string]: string;
 }
 
+export interface PrometheusHistogram {
+  count?: string;
+  sum?: string;
+  buckets?: unknown[];
+}
+
+export type PrometheusHistogramPoint = [number, PrometheusHistogram];
+
 export interface PrometheusVectorResult {
   metric: PrometheusSeriesMetric;
   value: [number, string];
+  // Native Prometheus histograms use `histogram` instead of `value`.
+  histogram?: PrometheusHistogramPoint;
 }
 
 export interface PrometheusMatrixResult {
   metric: PrometheusSeriesMetric;
   values: Array<[number, string]>;
+  // Native Prometheus histograms use `histograms` instead of `values`.
+  histograms?: PrometheusHistogramPoint[];
 }
 
 export interface PrometheusScalarData {

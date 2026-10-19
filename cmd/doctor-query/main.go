@@ -155,6 +155,7 @@ func setupSecurity(ctx context.Context, cfg config.QueryConfig) (*access.Gate, *
 		ClientID:        cfg.OIDCClientID,
 		ClientSecret:    cfg.OIDCClientSecret,
 		RedirectURL:     cfg.OIDCRedirectURL,
+		EndSessionURL:   cfg.OIDCEndSessionURL,
 		AuthURL:         cfg.OIDCAuthURL,
 		Scopes:          cfg.OIDCScopes,
 		SessionDir:      cfg.SessionDir,

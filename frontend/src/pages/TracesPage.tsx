@@ -1,7 +1,9 @@
 import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { Check, Copy, FileText, Link2 } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { copyText } from "../lib/clipboard";
 import TraceWaterfall from "../components/charts/TraceWaterfall";
 import type { TraceSummary, TraceRecord } from "../types/api";
 
@@ -215,8 +217,24 @@ function TraceRow({ trace, tenant, onOpenTrace: _onOpenTrace }: TraceRowProps) {
   return (
     <div className={"trace-row" + (expanded ? " xp-expanded" : "")}>
       <div className="trace-cells" onClick={toggle}>
-        <div className="trace-svc">{trace.service || "-"}</div>
-        <div className="trace-tid">{trace.trace_id}</div>
+        <div className="trace-partition-cell" title={trace.service}>
+          <span className="trace-part">{trace.partition || "—"}</span>
+          {trace.service && <span className="trace-svc">{trace.service}</span>}
+        </div>
+        <div className="trace-tid">
+          {trace.trace_id}
+          <button
+            type="button"
+            className="copy-mini"
+            title="Copy trace ID"
+            onClick={(event) => {
+              event.stopPropagation();
+              void copyText(trace.trace_id);
+            }}
+          >
+            <Copy size={11} />
+          </button>
+        </div>
         <div className="trace-spans">{trace.span_count ?? "-"}</div>
         <div className="trace-time">{fmtTime(trace.max_time)}</div>
       </div>
@@ -239,6 +257,7 @@ function TraceRow({ trace, tenant, onOpenTrace: _onOpenTrace }: TraceRowProps) {
 
 // ── Single-trace direct view ──────────────────────────────────────────────────
 function SingleTraceView({ traceId, tenant, onBack }: { traceId: string; tenant: string; onBack: () => void }) {
+  const navigate = useNavigate();
   const [spans, setSpans] = useState<TraceRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -267,7 +286,23 @@ function SingleTraceView({ traceId, tenant, onBack }: { traceId: string; tenant:
           <h2>Trace</h2>
           <p className="trace-direct-id">{traceId}</p>
         </div>
-        <button className="xp-back-btn" onClick={onBack}>← Back to list</button>
+        <div className="xp-toolbar">
+          <button
+            className="xp-live-btn"
+            onClick={() => void copyText(traceId)}
+            title="Copy trace ID"
+          >
+            <Copy size={12} /> Copy ID
+          </button>
+          <button
+            className="xp-live-btn"
+            onClick={() => navigate(`/logs?q=${encodeURIComponent(traceId)}&range=1440`)}
+            title="Search logs carrying this trace ID"
+          >
+            <FileText size={12} /> Logs for trace
+          </button>
+          <button className="xp-back-btn" onClick={onBack}>← Back to list</button>
+        </div>
       </div>
       <div className="panel-body">
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
@@ -294,15 +329,20 @@ export default function TracesPage() {
   const [searchParams] = useSearchParams();
 
   const focusedTraceId = searchParams.get("trace_id") ?? "";
+  const initialRange = Number(searchParams.get("range"));
 
-  const [minutes, setMinutes] = useState(60);
-  const [service, setService] = useState("");
+  const [minutes, setMinutes] = useState([15, 60, 360, 1440].includes(initialRange) ? initialRange : 60);
+  const [service, setService] = useState(searchParams.get("service") ?? "");
+  const [partitionFilter, setPartitionFilter] = useState(searchParams.get("partition") ?? "");
   const [textFilter, setTextFilter] = useState("");
   const [liveOn, setLiveOn] = useState(false);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [services, setServices] = useState<string[]>([]);
+  const [partitions, setPartitions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("Searching…");
+  const [copiedView, setCopiedView] = useState(false);
+  const [inputVal, setInputVal] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -316,6 +356,7 @@ export default function TracesPage() {
         limit: "200",
       });
       if (service) params.set("service", service);
+      if (partitionFilter) params.set("partition", partitionFilter);
       const data = await api.getRecentTraces(params);
       setTraces(data.traces ?? []);
     } catch (err) {
@@ -323,15 +364,48 @@ export default function TracesPage() {
     } finally {
       setLoading(false);
     }
-  }, [config.default_tenant, minutes, service]);
+  }, [config.default_tenant, minutes, service, partitionFilter]);
 
-  // Load services once
+  // Load the service list for the selected partition (and the full partition
+  // list seen in telemetry).
   useEffect(() => {
     api
-      .getLogServices(config.default_tenant)
-      .then((d) => setServices(d.services ?? []))
+      .getLogServices(config.default_tenant, partitionFilter, true)
+      .then((d) => {
+        setServices(d.services ?? []);
+        setPartitions((prev) => [...new Set([...prev, ...(d.partitions ?? [])])].sort());
+      })
       .catch(() => {});
-  }, [config.default_tenant]);
+  }, [config.default_tenant, partitionFilter]);
+
+  useEffect(() => {
+    if (service && !services.includes(service)) {
+      setService("");
+    }
+  }, [service, services]);
+
+  // Keep the partition picker aligned with the traces currently loaded. This
+  // covers partitions that have traces but no log records in the scan window.
+  useEffect(() => {
+    const seen = new Set(partitions);
+    for (const trace of traces) {
+      if (trace.partition) seen.add(trace.partition);
+    }
+    const next = [...seen].sort();
+    if (next.length !== partitions.length || next.some((value, index) => value !== partitions[index])) {
+      setPartitions(next);
+    }
+  }, [traces, partitions]);
+
+  // Nested route changes (dashboard triage links, command palette) should
+  // replace the current investigation window without a full remount.
+  const paramKey = searchParams.toString();
+  useEffect(() => {
+    const range = Number(searchParams.get("range"));
+    if ([15, 60, 360, 1440].includes(range)) setMinutes(range);
+    setPartitionFilter(searchParams.get("partition") ?? "");
+    setService(searchParams.get("service") ?? "");
+  }, [paramKey]);
 
   useEffect(() => {
     void load();
@@ -344,10 +418,18 @@ export default function TracesPage() {
     return () => clearInterval(t);
   }, [liveOn, load]);
 
+  // Debounce text filter
+  useEffect(() => {
+    const t = setTimeout(() => setTextFilter(inputVal.trim()), 280);
+    return () => clearTimeout(t);
+  }, [inputVal]);
+
   // Derived filtered list
   const tf = textFilter.toLowerCase();
+  const selectedPartition = partitionFilter.trim();
   const filtered = traces.filter((t) => {
     if (service && t.service !== service) return false;
+    if (selectedPartition && t.partition !== selectedPartition) return false;
     if (tf && !t.trace_id.toLowerCase().includes(tf) && !(t.service ?? "").toLowerCase().includes(tf))
       return false;
     return true;
@@ -369,6 +451,18 @@ export default function TracesPage() {
     navigate("/traces?trace_id=" + encodeURIComponent(traceId));
   };
 
+  const copyViewLink = () => {
+    const params = new URLSearchParams();
+    params.set("range", String(minutes));
+    if (partitionFilter) params.set("partition", partitionFilter);
+    const base = window.location.href.split("#")[0];
+    void copyText(`${base}#/traces?${params.toString()}`).then((ok) => {
+      if (!ok) return;
+      setCopiedView(true);
+      window.setTimeout(() => setCopiedView(false), 1600);
+    });
+  };
+
   // ── Direct trace link: show single-trace view ──────────────────────────────
   if (focusedTraceId) {
     return (
@@ -379,13 +473,6 @@ export default function TracesPage() {
       />
     );
   }
-
-  // Debounce text filter
-  const [inputVal, setInputVal] = useState("");
-  useEffect(() => {
-    const t = setTimeout(() => setTextFilter(inputVal.trim()), 280);
-    return () => clearTimeout(t);
-  }, [inputVal]);
 
   const presets = [15, 60, 360, 1440];
 
@@ -408,12 +495,25 @@ export default function TracesPage() {
               </button>
             ))}
           </div>
+          <label className="filter-label">
+            Partition
+            <select
+              className="xp-select"
+              value={partitionFilter}
+              onChange={(e) => setPartitionFilter(e.target.value)}
+            >
+              <option value="">All</option>
+              {partitions.map((partition) => (
+                <option key={partition} value={partition}>{partition}</option>
+              ))}
+            </select>
+          </label>
           <select
             className="xp-select"
             value={service}
             onChange={(e) => setService(e.target.value)}
           >
-            <option value="">All partitions</option>
+            <option value="">All services</option>
             {services.map((s) => (
               <option key={s} value={s}>
                 {s}
@@ -430,9 +530,16 @@ export default function TracesPage() {
           <button
             className={"xp-live-btn" + (liveOn ? " xp-live-on" : "")}
             onClick={() => setLiveOn((v) => !v)}
-            title="Auto-refresh every 5 s"
+            title="Auto-refresh every 30 s"
           >
             &#9679; Live
+          </button>
+          <button
+            className="xp-live-btn"
+            onClick={copyViewLink}
+            title="Copy a shareable link to this trace view"
+          >
+            {copiedView ? <><Check size={11} /> Copied</> : <><Link2 size={11} /> Copy view</>}
           </button>
         </div>
       </div>
@@ -440,7 +547,7 @@ export default function TracesPage() {
       <div className="panel-body">
         <div className="xp-body">
           <div className="xp-table-header traces-header">
-            <span>Partition</span>
+            <span>Partition / Service</span>
             <span>Trace ID</span>
             <span>Spans</span>
             <span>Time</span>

@@ -1,9 +1,9 @@
 import { NavLink } from "react-router-dom";
+import { Command, Network, FileText, BarChart3, GitBranch, LayoutDashboard, Search } from "lucide-react";
 import { useConfig } from "../../context/ConfigContext";
-import { LayoutDashboard, Network, Search, FileText, BarChart3, GitBranch } from "lucide-react";
 
 const NAV = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard },
+  { to: "/", label: "On-call", icon: LayoutDashboard },
   { to: "/services", label: "Services", icon: Network },
   { to: "/traces", label: "Traces", icon: GitBranch },
   { to: "/logs", label: "Logs", icon: FileText },
@@ -11,10 +11,12 @@ const NAV = [
   { to: "/fleet", label: "Fleet", icon: Search },
 ] as const;
 
-export default function Sidebar() {
-  const { config } = useConfig();
+interface SidebarProps {
+  onOpenPalette: () => void;
+}
 
-  const nav = [...NAV];
+export default function Sidebar({ onOpenPalette }: SidebarProps) {
+  const { config } = useConfig();
 
   return (
     <aside className="sidebar">
@@ -24,12 +26,18 @@ export default function Sidebar() {
         </div>
         <div className="brand__text">
           <strong>Doctor</strong>
-          <span>Telemetry</span>
+          <span>Telemetry triage</span>
         </div>
       </div>
 
+      <button className="command-trigger" type="button" onClick={onOpenPalette}>
+        <Command size={14} aria-hidden="true" />
+        <span>Quick jump</span>
+        <kbd>⌘K</kbd>
+      </button>
+
       <nav className="tab-nav">
-        {nav.map(({ to, label, icon: Icon }) => (
+        {NAV.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
@@ -44,17 +52,17 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {config.guardian_url && (
-        <div className="sidebar-footer">
-          <a
-            href={config.guardian_url}
-            target="_blank"
-            rel="noreferrer"
-          >
+      <div className="sidebar-footer">
+        <div className="sidebar-meta">
+          <span>Tenant</span>
+          <strong>{config.default_tenant || "default"}</strong>
+        </div>
+        {config.guardian_url && (
+          <a href={config.guardian_url} target="_blank" rel="noreferrer">
             Guardian UI
           </a>
-        </div>
-      )}
+        )}
+      </div>
     </aside>
   );
 }

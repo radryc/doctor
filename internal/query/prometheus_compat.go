@@ -117,24 +117,27 @@ func doctorDiscoveryQuery(mode string, matchers []*promlabels.Matcher) segment.M
 }
 
 type doctorPromQueryable struct {
-	backend LogEngineBackend
-	tenant  string
+	backend   LogEngineBackend
+	tenant    string
+	partition string
 }
 
 func (q doctorPromQueryable) Querier(mint, maxt int64) (promstorage.Querier, error) {
 	return &doctorPromQuerier{
-		backend: q.backend,
-		tenant:  q.tenant,
-		mint:    mint,
-		maxt:    maxt,
+		backend:   q.backend,
+		tenant:    q.tenant,
+		partition: strings.TrimSpace(q.partition),
+		mint:      mint,
+		maxt:      maxt,
 	}, nil
 }
 
 type doctorPromQuerier struct {
-	backend LogEngineBackend
-	tenant  string
-	mint    int64
-	maxt    int64
+	backend   LogEngineBackend
+	tenant    string
+	partition string
+	mint      int64
+	maxt      int64
 
 	// loadedSamples counts the samples this querier holds against the global
 	// budget; released on Close.
@@ -190,7 +193,7 @@ func (q *doctorPromQuerier) Select(ctx context.Context, sortSeries bool, _ *prom
 
 	selected := make([]promstorage.Series, 0, len(index.series))
 	for _, series := range index.series {
-		if metricLabelsMatch(series.labels, matchers) {
+		if q.seriesMatchesPartition(series.labels) && metricLabelsMatch(series.labels, matchers) {
 			selected = append(selected, series.series)
 		}
 	}
@@ -213,10 +216,13 @@ func (q *doctorPromQuerier) LabelValues(ctx context.Context, name string, _ *pro
 		return q.discoverMetricNames(ctx)
 	}
 
-	if values, err := q.discoverLabelValues(ctx, name, matchers); err == nil {
+	if values, err := q.discoverLabelValues(ctx, name, matchers); err == nil && len(values) > 0 {
 		return values, nil, nil
 	}
 
+	// Manifest-backed discovery only sees metric attributes. Resource-derived
+	// labels such as service and guardian_partition can legitimately return an
+	// empty set there, so fall back to scanning series labels.
 	values := make(map[string]struct{})
 	err := q.forEachSeriesLabels(ctx, matchers, func(labelSet promlabels.Labels) {
 		if value := labelSet.Get(name); value != "" {
@@ -249,7 +255,11 @@ func (q *doctorPromQuerier) discoverLabelValues(ctx context.Context, name string
 			return errDiscoveryScanLimit
 		}
 		scanned++
-		if value := record.Attributes[name]; value != "" {
+		labelSet := metricPointLabels(record)
+		if !q.seriesMatchesPartition(labelSet) {
+			return nil
+		}
+		if value := labelSet.Get(name); value != "" {
 			values[value] = struct{}{}
 		}
 		return nil
@@ -287,7 +297,7 @@ func (q *doctorPromQuerier) forEachSeriesLabels(ctx context.Context, matchers []
 		}
 		scanned++
 		labelSet := metricPointLabels(point)
-		if !metricLabelsMatch(labelSet, matchers) {
+		if !q.seriesMatchesPartition(labelSet) || !metricLabelsMatch(labelSet, matchers) {
 			return nil
 		}
 		key := string(labelSet.Bytes(nil))
@@ -342,6 +352,24 @@ func (q *doctorPromQuerier) seriesLabelMaps(ctx context.Context, matchers []*pro
 }
 
 func (q *doctorPromQuerier) discoverMetricNames(ctx context.Context) ([]string, annotations.Annotations, error) {
+	values := make(map[string]struct{})
+	if q.partition != "" {
+		err := q.forEachSeriesLabels(ctx, nil, func(labelSet promlabels.Labels) {
+			if name := labelSet.Get(promlabels.MetricName); name != "" {
+				values[name] = struct{}{}
+			}
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		out := make([]string, 0, len(values))
+		for value := range values {
+			out = append(out, value)
+		}
+		sort.Strings(out)
+		return out, nil, nil
+	}
+
 	points, err := q.backend.QueryMetrics(ctx, q.tenant, segment.MetricQuery{
 		LabelMatchers: []segment.MetricLabelMatcher{{
 			Name:  doctorMetricDiscoveryMatcherName,
@@ -353,7 +381,6 @@ func (q *doctorPromQuerier) discoverMetricNames(ctx context.Context) ([]string, 
 		return nil, nil, err
 	}
 
-	values := make(map[string]struct{})
 	for _, point := range points {
 		name := normalizePrometheusMetricName(point.MetricName)
 		if name == "" {
@@ -403,11 +430,15 @@ func (q *doctorPromQuerier) discoverLabelNames(ctx context.Context, matchers []*
 			return errDiscoveryScanLimit
 		}
 		scanned++
-		for name := range record.Attributes {
-			if name != "" {
-				names[name] = struct{}{}
-			}
+		labelSet := metricPointLabels(record)
+		if !q.seriesMatchesPartition(labelSet) {
+			return nil
 		}
+		labelSet.Range(func(label promlabels.Label) {
+			if label.Name != "" {
+				names[label.Name] = struct{}{}
+			}
+		})
 		return nil
 	})
 	if err != nil && !errors.Is(err, errDiscoveryScanLimit) {
@@ -861,6 +892,13 @@ func normalizeMetricLabelName(name string) string {
 	return out
 }
 
+func (q *doctorPromQuerier) seriesMatchesPartition(labelSet promlabels.Labels) bool {
+	if q == nil || q.partition == "" {
+		return true
+	}
+	return labelSet.Get(labelPartition) == q.partition
+}
+
 func metricLabelsMatch(labelSet promlabels.Labels, matchers []*promlabels.Matcher) bool {
 	for _, matcher := range matchers {
 		if matcher == nil {
@@ -902,10 +940,11 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 
 	forwarded, mode := awsQueryMode(queryString)
 	tenant := s.tenantFromRequest(r)
+	partition := partitionFromRequest(r)
 
 	var localData map[string]any
 	if mode != awsQueryOnly {
-		data, execErr, parseErr := s.execPrometheusInstant(r.Context(), tenant, queryString, evaluationTime)
+		data, execErr, parseErr := s.execPrometheusInstant(r.Context(), tenant, partition, queryString, evaluationTime)
 		if execErr != nil {
 			if parseErr {
 				writePrometheusError(w, http.StatusBadRequest, "bad_data", execErr.Error())
@@ -935,7 +974,7 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	writePrometheusSuccess(w, mergePrometheusQueryData(localData, awsData, "vector"))
+	writePrometheusSuccess(w, filterPrometheusDataByPartition(mergePrometheusQueryData(localData, awsData, "vector"), partition))
 }
 
 func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Request) {
@@ -976,10 +1015,11 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 
 	forwarded, mode := awsQueryMode(queryString)
 	tenant := s.tenantFromRequest(r)
+	partition := partitionFromRequest(r)
 
 	var localData map[string]any
 	if mode != awsQueryOnly {
-		data, execErr, parseErr := s.execPrometheusRange(r.Context(), tenant, queryString, start, end, step)
+		data, execErr, parseErr := s.execPrometheusRange(r.Context(), tenant, partition, queryString, start, end, step)
 		if execErr != nil {
 			if parseErr {
 				writePrometheusError(w, http.StatusBadRequest, "bad_data", execErr.Error())
@@ -1007,7 +1047,7 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	writePrometheusSuccess(w, mergePrometheusQueryData(localData, awsData, "matrix"))
+	writePrometheusSuccess(w, filterPrometheusDataByPartition(mergePrometheusQueryData(localData, awsData, "matrix"), partition))
 }
 
 // isHighCardinalityCumulativeRangeQuery reports whether a range query would
@@ -1031,9 +1071,10 @@ func isHighCardinalityCumulativeRangeQuery(queryString string) bool {
 }
 
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {
+	partition := partitionFromRequest(r)
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
-	awsEnabled := s.awsReady()
+	awsEnabled := s.awsReady() && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
 
 	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
 	if selErr != nil && !hasAWS && !awsEnabled {
@@ -1106,9 +1147,10 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	partition := partitionFromRequest(r)
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
-	awsEnabled := s.awsReady()
+	awsEnabled := s.awsReady() && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
 
 	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
 	if selErr != nil && !hasAWS && !awsEnabled {
@@ -1165,8 +1207,10 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 		if labelName == promlabels.MetricName {
 			// CloudWatch's PromQL API has no label-values route, so fall back to
 			// ListMetrics to populate the Grafana metric-name browser.
-			for _, name := range s.awsMetricNames(r.Context()) {
-				values[name] = struct{}{}
+			if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
+				for _, name := range s.awsMetricNames(r.Context()) {
+					values[name] = struct{}{}
+				}
 			}
 		} else if len(forwardedMatches) > 0 {
 			// Derive label values from series when a metric selector is
@@ -1190,8 +1234,9 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", "at least one match[] selector is required")
 		return
 	}
+	partition := partitionFromRequest(r)
 	hasAWS, forwardedMatches := awsMatches(matchValues)
-	awsEnabled := s.awsReady()
+	awsEnabled := s.awsReady() && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
 	selectorSets, err := parsePrometheusSelectorSets(matchValues)
 	if err != nil && !hasAWS && !awsEnabled {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
@@ -1256,8 +1301,10 @@ func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	for _, name := range s.awsMetricNames(r.Context()) {
-		metricNames[name] = struct{}{}
+	if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
+		for _, name := range s.awsMetricNames(r.Context()) {
+			metricNames[name] = struct{}{}
+		}
 	}
 
 	metadata := make(map[string][]map[string]string, len(metricNames))
@@ -1287,7 +1334,11 @@ func (s *Service) discoveryPrometheusQuerier(r *http.Request) (promstorage.Queri
 		return nil, err
 	}
 	start, end = clampDiscoveryWindow(start, end)
-	return doctorPromQueryable{backend: s.logEngine, tenant: s.tenantFromRequest(r)}.Querier(start.UnixMilli(), end.UnixMilli())
+	return doctorPromQueryable{
+		backend:   s.logEngine,
+		tenant:    s.tenantFromRequest(r),
+		partition: partitionFromRequest(r),
+	}.Querier(start.UnixMilli(), end.UnixMilli())
 }
 
 // clampDiscoveryWindow bounds a discovery time range to doctorDiscoveryScanWindow

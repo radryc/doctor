@@ -2,10 +2,10 @@ import type { GuardianTopologyNode } from "../../types/api";
 
 function healthColor(level?: string): string {
   const normalized = (level || "").toLowerCase();
-  if (normalized === "healthy") return "#22c55e";
-  if (normalized === "degraded" || normalized === "attention") return "#f59e0b";
-  if (normalized === "unhealthy" || normalized === "failing" || normalized === "failed") return "#ef4444";
-  return "#64748b";
+  if (normalized === "healthy") return "var(--ui-green)";
+  if (normalized === "degraded" || normalized === "attention") return "var(--ui-amber)";
+  if (normalized === "unhealthy" || normalized === "failing" || normalized === "failed") return "var(--ui-red)";
+  return "var(--ui-faint)";
 }
 
 interface NodeDetailsPanelProps {

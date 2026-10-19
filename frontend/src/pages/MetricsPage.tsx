@@ -1,7 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import {
+  Activity,
+  AlertTriangle,
+  Check,
+  Clock,
+  Copy,
+  Gauge,
+  Loader2,
+  RefreshCw,
+  Search,
+  Sparkles,
+} from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { copyText } from "../lib/clipboard";
 import MetricLineChart from "../components/charts/MetricLineChart";
 import DataTable from "../components/ui/DataTable";
 import type {
@@ -15,6 +28,7 @@ import type {
 
 type ViewMode = "graph" | "table" | "json";
 type QueryMode = "range" | "instant";
+type StatusKind = "idle" | "loading" | "ok" | "error";
 
 const METRIC_HELPERS = [
   {
@@ -52,25 +66,50 @@ const METRIC_HELPERS = [
       { name: "kvs_pebble_batch_commits_total", hint: "Pebble batch commits by operation." },
     ],
   },
-  {
-    group: "Doctor and OTLP",
-    items: [
-      { name: "http_requests_total", hint: "Common HTTP request counter if exported by services." },
-      { name: "request_duration_seconds", hint: "Common app request duration histogram." },
-      { name: "request_size_bytes", hint: "Common request payload size metric." },
-      { name: "go_goroutines", hint: "Go runtime goroutine count." },
-      { name: "process_resident_memory_bytes", hint: "Resident memory for scraped processes." },
-    ],
-  },
 ] as const;
 
-const PROMQL_EXAMPLES = [
-  { label: "Request rate", query: "rate(http_requests_total[5m])" },
-  { label: "Guardian write rate", query: "sum by (partition) (rate(guardian_dispatcher_writes_total[5m]))" },
-  { label: "MonoFS read throughput", query: "sum(rate(monofs_read_bytes_total[5m]))" },
-  { label: "KVS write throughput", query: "rate(kvs_write_bytes_total[5m])" },
-  { label: "Log query p95", query: "histogram_quantile(0.95, sum by (le) (rate(monofs_query_duration_seconds_bucket[5m])))" },
-] as const;
+const PREFERRED_METRIC_NAMES: string[] = [
+  // High-frequency metrics first: they are the most likely to produce a
+  // graphable series in a short default window.
+  "guardian_result_executions",
+  "guardian_reconcile_partition_executions",
+  "guardian_task_executions",
+  "guardian_dispatcher_writes_total",
+  "monofs_server_ops_total",
+  "monofs_router_ingest_bytes_total",
+  "k8s_top_pod_cpu_usage_millicores",
+  "doctor_ingest_requests_accepted",
+  ...METRIC_HELPERS.flatMap((group) => group.items.map((item) => item.name)),
+].filter((name, index, all) => all.indexOf(name) === index);
+
+const QUICK_METRIC_ICONS = [Activity, Gauge, Clock, Sparkles, AlertTriangle] as const;
+const QUICK_METRIC_TONES = ["sky", "emerald", "violet", "amber", "rose"] as const;
+
+function preferredMetricName(names: string[]): string {
+  const available = new Set(names);
+  for (const candidate of PREFERRED_METRIC_NAMES) {
+    if (available.has(candidate)) return candidate;
+  }
+  return names[0] ?? "";
+}
+
+function metricHint(name: string): string {
+  for (const group of METRIC_HELPERS) {
+    const item = group.items.find((candidate) => candidate.name === name);
+    if (item) return item.hint;
+  }
+  return "Live metric in the selected partition.";
+}
+
+const TONE_CLASS: Record<string, string> = {
+  sky: "border-sky-500/30 bg-sky-500/10 text-sky-300",
+  rose: "border-rose-500/30 bg-rose-500/10 text-rose-300",
+  violet: "border-violet-500/30 bg-violet-500/10 text-violet-300",
+  amber: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+  emerald: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+};
+
+const RANGE_PRESETS = [15, 60, 360, 1440] as const;
 
 function formatDateTimeLocal(date: Date): string {
   if (Number.isNaN(date.getTime())) return formatDateTimeLocal(new Date());
@@ -106,18 +145,48 @@ function formatNumber(value: number): string {
   return value.toFixed(3).replace(/\.?0+$/, "");
 }
 
+function histogramScalar(histogram?: { count?: string; sum?: string }): number | null {
+  if (!histogram) return null;
+  const count = Number(histogram.count);
+  const sum = Number(histogram.sum);
+  if (Number.isFinite(sum) && Number.isFinite(count) && count > 0) return sum / count;
+  if (Number.isFinite(sum)) return sum;
+  if (Number.isFinite(count)) return count;
+  return null;
+}
+
+function histogramSummary(histogram?: { count?: string; sum?: string }): string {
+  if (!histogram) return "histogram";
+  const parts: string[] = [];
+  if (histogram.count !== undefined) parts.push(`count=${histogram.count}`);
+  if (histogram.sum !== undefined) parts.push(`sum=${histogram.sum}`);
+  return parts.length > 0 ? `histogram(${parts.join(", ")})` : "histogram";
+}
+
 function matrixToSeries(result?: PrometheusMatrixResult[]): MetricSeries[] {
   if (!result) return [];
   return result
-    .map((series) => ({
-      label: metricLabel(series.metric),
-      labels: series.metric,
-      points: series.values.map(([timestamp, value]) => ({
+    .map((series) => {
+      const points: MetricPoint[] = (series.values ?? []).map(([timestamp, value]) => ({
         timestamp: new Date(timestamp * 1000).toISOString(),
         value: Number(value),
         labels: series.metric,
-      } satisfies MetricPoint)),
-    }))
+      }));
+      for (const [timestamp, histogram] of series.histograms ?? []) {
+        const value = histogramScalar(histogram);
+        if (value === null) continue;
+        points.push({
+          timestamp: new Date(timestamp * 1000).toISOString(),
+          value,
+          labels: series.metric,
+        });
+      }
+      return {
+        label: metricLabel(series.metric),
+        labels: series.metric,
+        points,
+      };
+    })
     .sort((left, right) => left.label.localeCompare(right.label));
 }
 
@@ -127,7 +196,10 @@ function resultStats(response: PrometheusQueryResponse | null) {
   if (data.resultType === "matrix") {
     return {
       series: data.result.length,
-      samples: data.result.reduce((total, series) => total + series.values.length, 0),
+      samples: data.result.reduce(
+        (total, series) => total + (series.values?.length ?? 0) + (series.histograms?.length ?? 0),
+        0
+      ),
     };
   }
   if (data.resultType === "vector") return { series: data.result.length, samples: data.result.length };
@@ -138,62 +210,114 @@ function tableRows(response: PrometheusQueryResponse | null): Record<string, unk
   if (!response) return [];
   const data = response.data;
   if (data.resultType === "matrix") {
-    return data.result.flatMap((series) =>
-      series.values.map(([timestamp, value]) => ({
+    return data.result.flatMap((series) => {
+      const rows = (series.values ?? []).map(([timestamp, value]) => ({
         time: new Date(timestamp * 1000).toLocaleString(),
         series: metricLabel(series.metric),
         value: formatNumber(Number(value)),
-      }))
-    );
+      }));
+      for (const [timestamp, histogram] of series.histograms ?? []) {
+        rows.push({
+          time: new Date(timestamp * 1000).toLocaleString(),
+          series: metricLabel(series.metric),
+          value: histogramSummary(histogram),
+        });
+      }
+      return rows;
+    });
   }
   if (data.resultType === "vector") {
     return data.result.map((sample: PrometheusVectorResult) => ({
-      time: new Date(sample.value[0] * 1000).toLocaleString(),
+      time: new Date((sample.value?.[0] ?? sample.histogram?.[0] ?? 0) * 1000).toLocaleString(),
       series: metricLabel(sample.metric),
-      value: formatNumber(Number(sample.value[1])),
+      value: sample.value
+        ? formatNumber(Number(sample.value[1]))
+        : histogramSummary(sample.histogram?.[1]),
     }));
   }
-  return [{ time: new Date(data.result[0] * 1000).toLocaleString(), series: data.resultType, value: data.result[1] }];
+  return [
+    {
+      time: new Date(data.result[0] * 1000).toLocaleString(),
+      series: data.resultType,
+      value: data.result[1],
+    },
+  ];
+}
+
+function rangeLabel(from: string, to: string): string {
+  const start = new Date(from).getTime();
+  const end = new Date(to).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end) || end <= start) return "custom range";
+  const minutes = Math.round((end - start) / 60_000);
+  if (minutes < 60) return `last ${minutes}m`;
+  if (minutes < 60 * 24) return `last ${minutes / 60}h`;
+  return `last ${minutes / (60 * 24)}d`;
 }
 
 export default function MetricsPage() {
   const { config, loaded } = useConfig();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialized = useRef(false);
+  const bootstrapped = useRef(false);
+  const autoRan = useRef("");
 
   const [tenant, setTenant] = useState(searchParams.get("tenant") ?? config.default_tenant ?? "default");
+  const [partition, setPartition] = useState(searchParams.get("partition") ?? "");
   const [partitions, setPartitions] = useState<string[]>([]);
   const [metricNames, setMetricNames] = useState<string[]>([]);
+  const [metricLoading, setMetricLoading] = useState(true);
+  const [metricError, setMetricError] = useState("");
   const [metricFilter, setMetricFilter] = useState("");
   const [selectedMetric, setSelectedMetric] = useState(searchParams.get("metric") ?? "");
   const [query, setQuery] = useState(searchParams.get("query") ?? searchParams.get("metric") ?? "");
-  const [from, setFrom] = useState(searchParams.get("from") ? formatDateTimeLocal(new Date(searchParams.get("from") || "")) : localNow(-60));
-  const [to, setTo] = useState(searchParams.get("to") ? formatDateTimeLocal(new Date(searchParams.get("to") || "")) : localNow(0));
+  const [from, setFrom] = useState(
+    searchParams.get("from") ? formatDateTimeLocal(new Date(searchParams.get("from") || "")) : localNow(-60)
+  );
+  const [to, setTo] = useState(
+    searchParams.get("to") ? formatDateTimeLocal(new Date(searchParams.get("to") || "")) : localNow(0)
+  );
   const [step, setStep] = useState(searchParams.get("step") ?? "30s");
   const [mode, setMode] = useState<QueryMode>((searchParams.get("mode") as QueryMode) || "range");
   const [view, setView] = useState<ViewMode>("graph");
   const [response, setResponse] = useState<PrometheusQueryResponse | null>(null);
   const [requestUrl, setRequestUrl] = useState("");
   const [rawJson, setRawJson] = useState("{}");
-  const [statusKind, setStatusKind] = useState<"idle" | "loading" | "ok" | "error">("idle");
-  const [statusMsg, setStatusMsg] = useState("Pick a metric or run a PromQL expression.");
+  const [statusKind, setStatusKind] = useState<StatusKind>("idle");
+  const [statusMsg, setStatusMsg] = useState("Choose a quick start, a metric, or write a PromQL expression.");
+  const [copiedQuery, setCopiedQuery] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
-  const loadMetricNames = useCallback(async () => {
-    const end = new Date();
-    const start = new Date(end.getTime() - 24 * 60 * 60_000);
-    const params = new URLSearchParams({ tenant, start: start.toISOString(), end: end.toISOString() });
+  const loadMetricNames = useCallback(async (
+    targetTenant = tenant,
+    targetPartition = partition,
+    rangeStart = from,
+    rangeEnd = to
+  ) => {
+    let end = new Date(rangeEnd);
+    let start = new Date(rangeStart);
+    if (Number.isNaN(end.getTime()) || Number.isNaN(start.getTime()) || end <= start) {
+      end = new Date();
+      start = new Date(end.getTime() - 60 * 60_000);
+    }
+    const params = new URLSearchParams({
+      tenant: targetTenant,
+      start: start.toISOString(),
+      end: end.toISOString(),
+    });
+    if (targetPartition) params.set("partition", targetPartition);
+
+    setMetricLoading(true);
+    setMetricError("");
     try {
       const data = await api.getMetricNames(params);
       setMetricNames(data.data ?? []);
-      if (!selectedMetric && data.data?.length) {
-        setSelectedMetric(data.data[0]);
-        setQuery(data.data[0]);
-      }
     } catch (err) {
-      setStatusKind("error");
-      setStatusMsg(err instanceof Error ? err.message : "Metric discovery failed");
+      setMetricNames([]);
+      setMetricError(err instanceof Error ? err.message : "Metric discovery failed");
+    } finally {
+      setMetricLoading(false);
     }
-  }, [tenant, selectedMetric]);
+  }, [tenant, partition, from, to]);
 
   useEffect(() => {
     if (loaded && !initialized.current) {
@@ -204,24 +328,39 @@ export default function MetricsPage() {
 
   useEffect(() => {
     let cancelled = false;
-    api.guardianOverview().then((overview) => {
-      if (cancelled) return;
-      const names = overview.partitions?.map((p) => p.name).filter(Boolean) ?? [];
-      setPartitions(names);
-      if (names.length > 0 && !names.includes(tenant) && tenant === "default") {
-        setTenant(names[0]);
-      }
-    }).catch(() => {});
-    return () => { cancelled = true; };
+    api
+      .guardianOverview()
+      .then((overview) => {
+        if (cancelled) return;
+        const names = overview.partitions?.map((p) => p.name).filter(Boolean) ?? [];
+        setPartitions(names);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    void loadMetricNames();
-  }, [loadMetricNames]);
+    void loadMetricNames(tenant, partition, from, to);
+  }, [tenant, partition, from, to, loadMetricNames]);
+
+  // Augment the Guardian-derived partition list with partitions that actually
+  // appear in telemetry, so the metrics picker works even when Guardian is not
+  // reachable.
+  useEffect(() => {
+    api
+      .getLogServices(config.default_tenant)
+      .then((d) => {
+        setPartitions((prev) => [...new Set([...prev, ...(d.partitions ?? [])])].sort());
+      })
+      .catch(() => {});
+  }, [config.default_tenant]);
 
   useEffect(() => {
     const next = new URLSearchParams();
     if (tenant) next.set("tenant", tenant);
+    if (partition) next.set("partition", partition);
     if (selectedMetric) next.set("metric", selectedMetric);
     if (query) next.set("query", query);
     const fromISO = toISOStringOrEmpty(from);
@@ -231,78 +370,157 @@ export default function MetricsPage() {
     if (step) next.set("step", step);
     next.set("mode", mode);
     if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
-  }, [tenant, selectedMetric, query, from, to, step, mode, searchParams, setSearchParams]);
+  }, [tenant, partition, selectedMetric, query, from, to, step, mode, searchParams, setSearchParams]);
+
+  const execute = useCallback(
+    async (
+      expression: string,
+      options?: {
+        mode?: QueryMode;
+        tenant?: string;
+        partition?: string;
+        from?: string;
+        to?: string;
+        step?: string;
+      }
+    ) => {
+      const expr = expression.trim();
+      if (!expr) {
+        setStatusKind("idle");
+        setStatusMsg("Enter a PromQL expression first.");
+        return;
+      }
+
+      const nextMode = options?.mode ?? mode;
+      const nextTenant = options?.tenant ?? tenant;
+      const nextPartition = options?.partition ?? partition;
+      const nextFrom = options?.from ?? from;
+      const nextTo = options?.to ?? to;
+      const nextStep = options?.step ?? step;
+
+      const params = new URLSearchParams({ tenant: nextTenant, query: expr });
+      if (nextPartition) params.set("partition", nextPartition);
+      let url = "/api/v1/query";
+      if (nextMode === "range") {
+        const fromISO = toISOStringOrEmpty(nextFrom);
+        const toISO = toISOStringOrEmpty(nextTo);
+        if (fromISO) params.set("start", fromISO);
+        if (toISO) params.set("end", toISO);
+        params.set("step", nextStep.trim() || "30s");
+        url = "/api/v1/query_range";
+      } else {
+        const toISO = toISOStringOrEmpty(nextTo);
+        if (toISO) params.set("time", toISO);
+      }
+
+      setRequestUrl(`${url}?${params}`);
+      setStatusKind("loading");
+      setStatusMsg("Executing PromQL query…");
+      if (nextMode === "instant") setView("table");
+
+      try {
+        const data =
+          nextMode === "range"
+            ? await api.queryPrometheusRange(params)
+            : await api.queryPrometheus(params);
+        setResponse(data);
+        setRawJson(JSON.stringify(data, null, 2));
+        const nextStats = resultStats(data);
+        setStatusKind("ok");
+        setStatusMsg(
+          `${data.data.resultType} result: ${nextStats.series} series, ${nextStats.samples} samples.`
+        );
+      } catch (err) {
+        setResponse(null);
+        const message = err instanceof Error ? err.message : "Query failed";
+        setRawJson(JSON.stringify({ error: message }, null, 2));
+        setStatusKind("error");
+        setStatusMsg(message);
+      }
+    },
+    [mode, tenant, partition, from, to, step]
+  );
+
+  // If the page was opened from a dashboard link with a query/metric, run it
+  // once so the graph is populated without an extra click.
+  useEffect(() => {
+    if (bootstrapped.current) return;
+    const initial = searchParams.get("query") ?? searchParams.get("metric") ?? "";
+    if (!initial.trim()) return;
+    bootstrapped.current = true;
+    void execute(initial);
+  }, [execute, searchParams]);
 
   const filteredMetricNames = useMemo(() => {
     const needle = metricFilter.trim().toLowerCase();
-    if (!needle) return metricNames.slice(0, 200);
-    return metricNames.filter((name) => name.toLowerCase().includes(needle)).slice(0, 200);
+    const names = needle
+      ? metricNames.filter((name) => name.toLowerCase().includes(needle))
+      : metricNames;
+    return names.slice(0, 250);
   }, [metricNames, metricFilter]);
+
+  const quickMetrics = useMemo(() => {
+    const available = new Set(metricNames);
+    const preferred = PREFERRED_METRIC_NAMES.filter((name) => available.has(name));
+    const preferredSet = new Set(preferred);
+    const rest = metricNames.filter((name) => !preferredSet.has(name));
+    return [...preferred, ...rest].slice(0, 5);
+  }, [metricNames]);
+
+  // Populate the main graph from a metric that actually exists in the selected
+  // partition instead of leaving the page on an empty "Nothing plotted yet".
+  useEffect(() => {
+    if (metricLoading || metricNames.length === 0) return;
+    const key = `${tenant}|${partition}`;
+    if (autoRan.current === key) return;
+    autoRan.current = key;
+    if (query.trim() || selectedMetric.trim()) return;
+    const pick = preferredMetricName(metricNames);
+    if (!pick) return;
+    setSelectedMetric(pick);
+    setQuery(pick);
+    void execute(pick, { partition });
+  }, [execute, metricLoading, metricNames, partition, query, selectedMetric, tenant]);
 
   const stats = resultStats(response);
   const graphSeries = response?.data.resultType === "matrix" ? matrixToSeries(response.data.result) : [];
   const hasGraphSeries = graphSeries.some((series) => series.points.length >= 2);
   const rows = tableRows(response);
+  const activeExpression = query.trim() || selectedMetric.trim();
+  const currentRange = rangeLabel(from, to);
 
   const chooseMetric = (metricName: string) => {
     setSelectedMetric(metricName);
     setQuery(metricName);
-    setResponse(null);
-    setRawJson("{}");
-    setStatusKind("idle");
-    setStatusMsg(`Ready to query ${metricName}.`);
+    void execute(metricName);
   };
 
-  const chooseExpression = (expression: string) => {
-    setSelectedMetric("");
-    setQuery(expression);
-    setResponse(null);
-    setRawJson("{}");
-    setStatusKind("idle");
-    setStatusMsg("Ready to run helper expression.");
+  const changePartition = (nextPartition: string) => {
+    setPartition(nextPartition);
+    autoRan.current = "";
+    if (query.trim()) void execute(query.trim(), { partition: nextPartition });
+  };
+
+  const changeMode = (nextMode: QueryMode) => {
+    setMode(nextMode);
+    if (query.trim()) void execute(query.trim(), { mode: nextMode });
   };
 
   const setQuickRange = (minutes: number) => {
-    setFrom(localNow(-minutes));
-    setTo(localNow(0));
+    const nextFrom = localNow(-minutes);
+    const nextTo = localNow(0);
+    setFrom(nextFrom);
+    setTo(nextTo);
+    if (query.trim()) void execute(query.trim(), { from: nextFrom, to: nextTo });
   };
 
-  const run = async (event?: React.FormEvent) => {
-    event?.preventDefault();
-    const expr = query.trim() || selectedMetric.trim();
-    if (!expr) return;
-
-    const params = new URLSearchParams({ tenant, query: expr });
-    let url = "/api/v1/query";
-    if (mode === "range") {
-      const fromISO = toISOStringOrEmpty(from);
-      const toISO = toISOStringOrEmpty(to);
-      if (fromISO) params.set("start", fromISO);
-      if (toISO) params.set("end", toISO);
-      params.set("step", step.trim() || "30s");
-      url = "/api/v1/query_range";
-    } else {
-      const toISO = toISOStringOrEmpty(to);
-      if (toISO) params.set("time", toISO);
-    }
-
-    setRequestUrl(`${url}?${params}`);
-    setStatusKind("loading");
-    setStatusMsg("Executing PromQL query...");
-    try {
-      const data = mode === "range" ? await api.queryPrometheusRange(params) : await api.queryPrometheus(params);
-      setResponse(data);
-      setRawJson(JSON.stringify(data, null, 2));
-      const nextStats = resultStats(data);
-      setStatusKind("ok");
-      setStatusMsg(`${data.data.resultType} result: ${nextStats.series} series, ${nextStats.samples} samples.`);
-    } catch (err) {
-      setResponse(null);
-      const message = err instanceof Error ? err.message : "Query failed";
-      setRawJson(JSON.stringify({ error: message }, null, 2));
-      setStatusKind("error");
-      setStatusMsg(message);
-    }
+  const copyQuery = () => {
+    if (!activeExpression) return;
+    void copyText(activeExpression).then((ok) => {
+      if (!ok) return;
+      setCopiedQuery(true);
+      window.setTimeout(() => setCopiedQuery(false), 1600);
+    });
   };
 
   return (
@@ -310,71 +528,181 @@ export default function MetricsPage() {
       <div className="panel-header">
         <div className="panel-header__left">
           <h2>Metrics</h2>
-          <p>Prometheus-compatible metric discovery, query, graph, and table view.</p>
+          <p>
+            {query
+              ? `${partition || "all partitions"} · ${currentRange} · ${mode === "range" ? "range query" : "instant query"}`
+              : "Explore live Prometheus-compatible metrics. Pick a partition to narrow the metric catalog and graphs."}
+          </p>
         </div>
-        <span className="panel-badge">/api/v1/query_range</span>
+        <div className="xp-toolbar">
+          <div className="xp-presets" role="group" aria-label="Time range">
+            {RANGE_PRESETS.map((minutes) => (
+              <button
+                key={minutes}
+                type="button"
+                className="xp-preset"
+                onClick={() => setQuickRange(minutes)}
+                title={`Set the query window to the last ${minutes < 60 ? `${minutes} minutes` : `${minutes / 60} hours`}`}
+              >
+                {minutes < 60 ? `${minutes}m` : `${minutes / 60}h`}
+              </button>
+            ))}
+          </div>
+          <label className="filter-label">
+            Partition
+            <select
+              className="xp-select"
+              value={partition}
+              onChange={(event) => changePartition(event.target.value)}
+            >
+              <option value="">All partitions</option>
+              {partitions.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="xp-live-btn"
+            onClick={() => void loadMetricNames(tenant, partition)}
+            disabled={metricLoading}
+            title="Reload the metric catalog from Doctor"
+          >
+            {metricLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            {metricLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
       </div>
 
-      <div className="panel-body">
-        <div className="prom-layout">
-          <aside className="prom-sidebar">
-            <div className="prom-sidebar__head">
-              <strong>Metrics</strong>
-              <span>{metricNames.length} discovered</span>
+      <div className="flex flex-1 min-h-0 flex-col gap-5 overflow-y-auto p-5">
+        {metricError && (
+          <div className="flex items-center gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+            <AlertTriangle size={16} className="shrink-0" />
+            <span className="min-w-0 flex-1">Could not load metric names: {metricError}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded-md border border-rose-400/40 px-2.5 py-1 text-xs font-semibold hover:bg-rose-500/10"
+              onClick={() => void loadMetricNames(tenant, partition)}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        <section>
+          <div className="mb-2 flex items-center gap-2">
+            <Sparkles size={14} className="text-amber-300" />
+            <h3 className="text-[11px] font-bold uppercase tracking-[0.14em] text-gray-500">
+              Live metrics in this partition
+            </h3>
+            <span className="text-[10px] text-gray-600">
+              {partition || "all partitions"} · {metricNames.length} metric{metricNames.length === 1 ? "" : "s"} with data
+            </span>
+          </div>
+          {quickMetrics.length === 0 ? (
+            <div className="rounded-xl border border-dark-600 bg-dark-800 px-4 py-3 text-xs text-gray-500">
+              {metricLoading ? "Discovering metrics with data…" : "No metrics with data found for this partition in the last 24h."}
             </div>
-            <input
-              className="xp-search prom-metric-filter"
-              value={metricFilter}
-              onChange={(event) => setMetricFilter(event.target.value)}
-              placeholder="Filter metric names..."
-            />
-            <div className="prom-metric-list">
-              {filteredMetricNames.length === 0 ? (
-                <div className="prom-helper">
-                  <div className="prom-helper__empty">No live metric names found for the last 24h.</div>
-                  <div className="prom-helper__section">
-                    <strong>Known useful metrics</strong>
-                    {METRIC_HELPERS.map((group) => (
-                      <div className="prom-helper__group" key={group.group}>
-                        <span>{group.group}</span>
-                        {group.items.map((item) => (
-                          <button
-                            type="button"
-                            key={item.name}
-                            className="prom-helper__metric"
-                            onClick={() => chooseMetric(item.name)}
-                            title={item.hint}
-                          >
-                            <code>{item.name}</code>
-                            <small>{item.hint}</small>
-                          </button>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                  <div className="prom-helper__section">
-                    <strong>PromQL starters</strong>
-                    {PROMQL_EXAMPLES.map((example) => (
-                      <button
-                        type="button"
-                        key={example.label}
-                        className="prom-helper__metric"
-                        onClick={() => chooseExpression(example.query)}
-                      >
-                        <code>{example.label}</code>
-                        <small>{example.query}</small>
-                      </button>
-                    ))}
-                  </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+              {quickMetrics.map((metricName, index) => {
+                const Icon = QUICK_METRIC_ICONS[index % QUICK_METRIC_ICONS.length];
+                const tone = QUICK_METRIC_TONES[index % QUICK_METRIC_TONES.length];
+                return (
+                  <button
+                    key={metricName}
+                    type="button"
+                    onClick={() => chooseMetric(metricName)}
+                    className="group rounded-xl border border-dark-600 bg-dark-800 p-3 text-left transition-colors hover:border-accent-blue/50 hover:bg-dark-700"
+                    title={`Query ${metricName}`}
+                  >
+                    <span className={`inline-flex h-7 w-7 items-center justify-center rounded-lg border ${TONE_CLASS[tone]}`}>
+                      <Icon size={14} />
+                    </span>
+                    <span className="mt-2 block truncate font-mono text-[11px] font-semibold text-gray-100">{metricName}</span>
+                    <span className="mt-0.5 block truncate text-[11px] text-gray-500">{metricHint(metricName)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+          <aside className="flex min-h-[320px] flex-col overflow-hidden rounded-xl border border-dark-600 bg-dark-800">
+            <div className="flex items-center justify-between gap-2 border-b border-dark-600 px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-100">Metric catalog</h3>
+                <p className="mt-0.5 text-[11px] text-gray-500">
+                  {metricLoading
+                    ? "Discovering metrics…"
+                    : `${metricNames.length} metric${metricNames.length === 1 ? "" : "s"} with data in the selected range`}
+                </p>
+              </div>
+              {metricLoading && <Loader2 size={15} className="animate-spin text-gray-500" />}
+            </div>
+            <div className="relative border-b border-dark-600 p-3">
+              <Search size={13} className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 text-gray-500" />
+              <input
+                type="text"
+                value={metricFilter}
+                onChange={(event) => setMetricFilter(event.target.value)}
+                placeholder="Search metric names…"
+                className="w-full rounded-lg border border-dark-600 bg-dark-900 py-1.5 pl-8 pr-3 text-xs text-gray-200 placeholder:text-gray-600 focus:border-accent-blue focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+              />
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {metricLoading && metricNames.length === 0 ? (
+                <div className="flex items-center gap-2 px-2 py-6 text-xs text-gray-500">
+                  <Loader2 size={13} className="animate-spin" /> Loading metrics…
+                </div>
+              ) : filteredMetricNames.length === 0 ? (
+                <div className="space-y-3 px-1 py-2">
+                  <p className="text-xs leading-relaxed text-gray-500">
+                    {metricNames.length === 0
+                      ? "No live metric names found in the last 24h."
+                      : "No metric names match this filter."}
+                  </p>
+                  <details className="rounded-lg border border-dark-600 bg-dark-900/60 p-2" open={metricNames.length === 0}>
+                    <summary className="cursor-pointer text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                      Known useful metrics
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      {METRIC_HELPERS.map((group) => (
+                        <div key={group.group}>
+                          <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-gray-600">
+                            {group.group}
+                          </div>
+                          {group.items.map((item) => (
+                            <button
+                              key={item.name}
+                              type="button"
+                              className="block w-full rounded-md px-2 py-1.5 text-left hover:bg-dark-700"
+                              onClick={() => chooseMetric(item.name)}
+                              title={item.hint}
+                            >
+                              <code className="block truncate text-[11px] text-gray-300">{item.name}</code>
+                              <span className="block truncate text-[10px] text-gray-600">{item.hint}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 </div>
               ) : (
                 filteredMetricNames.map((metricName) => (
                   <button
-                    type="button"
                     key={metricName}
-                    className={"prom-metric-item" + (selectedMetric === metricName ? " is-selected" : "")}
+                    type="button"
                     onClick={() => chooseMetric(metricName)}
-                    title={metricName}
+                    title={`Query ${metricName}`}
+                    className={`block w-full truncate rounded-md px-2.5 py-2 text-left font-mono text-[11px] transition-colors ${
+                      selectedMetric === metricName
+                        ? "bg-accent-blue/15 text-sky-200"
+                        : "text-gray-400 hover:bg-dark-700 hover:text-gray-200"
+                    }`}
                   >
                     {metricName}
                   </button>
@@ -383,120 +711,169 @@ export default function MetricsPage() {
             </div>
           </aside>
 
-          <section className="prom-console">
-            <form className="prom-query-bar" onSubmit={(event) => void run(event)}>
-              <div className="prom-query-main">
-                <label>
-                  Partition
-                  <select value={tenant} onChange={(event) => setTenant(event.target.value)} className="xp-select">
-                    {partitions.length === 0 && (
-                      <option value={tenant}>{tenant}</option>
-                    )}
-                    {partitions.map((p) => (
-                      <option key={p} value={p}>{p}</option>
-                    ))}
-                  </select>
+          <section className="min-w-0 space-y-4">
+            <form
+              className="rounded-xl border border-dark-600 bg-dark-800 p-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void execute(activeExpression);
+              }}
+            >
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <label htmlFor="metrics-expression" className="text-sm font-semibold text-gray-100">
+                  PromQL expression
                 </label>
-                <label className="prom-expression-label">
-                  Expression
-                  <textarea
-                    className="prom-expression"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    spellCheck={false}
-                    rows={2}
-                  />
-                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="xp-live-btn"
+                    onClick={copyQuery}
+                    disabled={!activeExpression}
+                    title="Copy the current expression"
+                  >
+                    {copiedQuery ? <Check size={12} /> : <Copy size={12} />}
+                    {copiedQuery ? "Copied" : "Copy"}
+                  </button>
+                  <button
+                    type="button"
+                    className="xp-live-btn"
+                    onClick={() => setShowAdvanced((value) => !value)}
+                  >
+                    {showAdvanced ? "Hide options" : "Options"}
+                  </button>
+                  <button type="submit" className="rounded-lg bg-accent-blue px-3.5 py-1.5 text-xs font-bold text-white transition-colors hover:bg-accent-blue/85">
+                    Run query
+                  </button>
+                </div>
               </div>
+              <textarea
+                id="metrics-expression"
+                className="min-h-[72px] w-full resize-y rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 font-mono text-xs leading-relaxed text-gray-200 placeholder:text-gray-600 focus:border-accent-blue focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setSelectedMetric("");
+                }}
+                placeholder='e.g. sum(rate(http_requests_total[5m]))'
+                spellCheck={false}
+              />
 
-              <div className="prom-controls">
-                <div className="xp-toolbar" role="group" aria-label="Query mode">
-                  <button type="button" className={"xp-preset" + (mode === "range" ? " xp-active" : "")} onClick={() => setMode("range")}>Range</button>
-                  <button type="button" className={"xp-preset" + (mode === "instant" ? " xp-active" : "")} onClick={() => setMode("instant")}>Instant</button>
-                </div>
-                <div className="xp-toolbar">
-                  {[15, 60, 360, 1440].map((minutes) => (
-                    <button key={minutes} type="button" className="xp-preset" onClick={() => setQuickRange(minutes)}>
-                      {minutes < 60 ? `${minutes}m` : `${minutes / 60}h`}
+              {showAdvanced && (
+                <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-dark-600 pt-3">
+                  <div className="flex items-center gap-1" role="group" aria-label="Query mode">
+                    <button
+                      type="button"
+                      className={"xp-preset" + (mode === "range" ? " xp-active" : "")}
+                      onClick={() => changeMode("range")}
+                    >
+                      Range
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      className={"xp-preset" + (mode === "instant" ? " xp-active" : "")}
+                      onClick={() => changeMode("instant")}
+                    >
+                      Instant
+                    </button>
+                  </div>
+                  <label className="filter-label">
+                    From
+                    <input
+                      type="datetime-local"
+                      value={from}
+                      onChange={(event) => setFrom(event.target.value)}
+                      disabled={mode === "instant"}
+                    />
+                  </label>
+                  <label className="filter-label">
+                    To
+                    <input type="datetime-local" value={to} onChange={(event) => setTo(event.target.value)} />
+                  </label>
+                  <label className="filter-label">
+                    Step
+                    <input value={step} onChange={(event) => setStep(event.target.value)} disabled={mode === "instant"} />
+                  </label>
                 </div>
-                <label>
-                  From
-                  <input type="datetime-local" value={from} onChange={(event) => setFrom(event.target.value)} disabled={mode === "instant"} />
-                </label>
-                <label>
-                  To
-                  <input type="datetime-local" value={to} onChange={(event) => setTo(event.target.value)} />
-                </label>
-                <label>
-                  Step
-                  <input value={step} onChange={(event) => setStep(event.target.value)} disabled={mode === "instant"} />
-                </label>
-                <button type="submit" className="run-btn">Execute</button>
+              )}
+
+              <div className={`mt-3 text-xs ${statusKind === "error" ? "text-rose-300" : statusKind === "ok" ? "text-emerald-300" : "text-gray-500"}`}>
+                {statusMsg}
               </div>
             </form>
 
-            {requestUrl && (
-              <div className="request">
-                GET <a href={requestUrl} target="_blank" rel="noreferrer">{requestUrl}</a>
+            <div className="overflow-hidden rounded-xl border border-dark-600 bg-dark-800">
+              <div className="flex flex-wrap items-center gap-3 border-b border-dark-600 px-4 py-2.5">
+                <div className="prom-tabs m-0 border-0" role="tablist" aria-label="Metric result view">
+                  {(["graph", "table", "json"] as ViewMode[]).map((item) => (
+                    <button
+                      type="button"
+                      key={item}
+                      className={"prom-tab" + (view === item ? " is-active" : "")}
+                      onClick={() => setView(item)}
+                    >
+                      {item}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-1 flex-wrap items-center justify-end gap-1.5">
+                  <span className="pill">series: {stats.series}</span>
+                  <span className="pill">samples: {stats.samples}</span>
+                  {response?.data.resultType && <span className="pill">type: {response.data.resultType}</span>}
+                </div>
               </div>
-            )}
-            <div className={`status status-${statusKind}`}>{statusMsg}</div>
 
-            <div className="prom-tabs" role="tablist" aria-label="Metric result view">
-              {(["graph", "table", "json"] as ViewMode[]).map((item) => (
-                <button
-                  type="button"
-                  key={item}
-                  className={"prom-tab" + (view === item ? " is-active" : "")}
-                  onClick={() => setView(item)}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
-
-            <div className="summary">
-              <span className="pill">series: {stats.series}</span>
-              <span className="pill">samples: {stats.samples}</span>
-              {response?.data.resultType && <span className="pill">type: {response.data.resultType}</span>}
-              {graphSeries.length > 0 && (
-                <span className="pill">graph: {graphSeries.length === 1 ? graphSeries[0].label : `${graphSeries.length} series`}</span>
-              )}
-            </div>
-
-            {view === "graph" && (
-              <div className="results">
-                {hasGraphSeries ? (
-                  <MetricLineChart series={graphSeries} metricName={query} />
-                ) : (
-                  <div className="result-block">
-                    <h3>Graph</h3>
-                    <p className="empty">Run a range query with at least two samples to render a graph.</p>
+              <div className="min-h-[340px] p-4">
+                {statusKind === "loading" ? (
+                  <div className="flex h-[300px] items-center justify-center gap-2 text-xs text-gray-500">
+                    <Loader2 size={15} className="animate-spin" /> Running query…
                   </div>
+                ) : !response ? (
+                  <div className="flex h-[300px] flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-dark-600 bg-dark-900/40 px-6 text-center">
+                    <Activity size={22} className="text-gray-600" />
+                    <p className="text-sm font-medium text-gray-300">Nothing plotted yet</p>
+                    <p className="max-w-md text-xs leading-relaxed text-gray-500">
+                      Pick one of the quick starts above, choose a metric from the catalog, or type a PromQL expression.
+                      Selecting a metric now runs it automatically.
+                    </p>
+                  </div>
+                ) : view === "graph" ? (
+                  hasGraphSeries ? (
+                    <MetricLineChart series={graphSeries} metricName={activeExpression} />
+                  ) : (
+                    <div className="flex h-[300px] flex-col items-center justify-center gap-2 text-center">
+                      <p className="text-sm font-medium text-gray-300">No graphable series</p>
+                      <p className="max-w-md text-xs leading-relaxed text-gray-500">
+                        The query returned {stats.series} series. Use the table view for instant queries, or widen the
+                        time range and run it again.
+                      </p>
+                    </div>
+                  )
+                ) : view === "table" ? (
+                  <DataTable
+                    title="Samples"
+                    columns={[
+                      { label: "Time", key: "time" },
+                      { label: "Series", key: "series" },
+                      { label: "Value", key: "value" },
+                    ]}
+                    rows={rows}
+                  />
+                ) : (
+                  <pre className="max-h-[520px] overflow-auto rounded-lg bg-dark-900 p-3 text-[11px] leading-relaxed text-gray-300">
+                    {rawJson}
+                  </pre>
                 )}
               </div>
-            )}
 
-            {view === "table" && (
-              <DataTable
-                title="Samples"
-                columns={[
-                  { label: "Time", key: "time" },
-                  { label: "Series", key: "series" },
-                  { label: "Value", key: "value" },
-                ]}
-                rows={rows}
-              />
-            )}
-
-            {view === "json" && (
-              <div className="result-block">
-                <h3>Prometheus response</h3>
-                <pre>{rawJson}</pre>
-              </div>
-            )}
+              {requestUrl && (
+                <details className="border-t border-dark-600 px-4 py-2 text-[11px] text-gray-500">
+                  <summary className="cursor-pointer select-none hover:text-gray-300">Request details</summary>
+                  <a className="mt-1 block break-all font-mono text-sky-300 hover:text-sky-200" href={requestUrl} target="_blank" rel="noreferrer">
+                    GET {requestUrl}
+                  </a>
+                </details>
+              )}
+            </div>
           </section>
         </div>
       </div>

@@ -20,7 +20,7 @@ import {
   Loader2,
   Check,
 } from "lucide-react";
-import type { HealthStatus, PartitionModel } from "./FleetView";
+import type { AssetGroup, HealthStatus, PartitionModel } from "./FleetView";
 import type { AssetObservabilityConfig, HelperFileManifest } from "../types/observability";
 import type {
   GuardianTopologyEdge,
@@ -118,10 +118,10 @@ const SAVED_DASHBOARDS_KEY = "doctor.savedDashboards.v1";
 
 function healthColor(level?: string): string {
   const n = (level || "").toLowerCase();
-  if (n === "healthy") return "#10b981";
-  if (n === "degraded" || n === "attention") return "#f59e0b";
-  if (n === "unhealthy" || n === "failing" || n === "failed") return "#ef4444";
-  return "#64748b";
+  if (n === "healthy") return "var(--ui-green)";
+  if (n === "degraded" || n === "attention") return "var(--ui-amber)";
+  if (n === "unhealthy" || n === "failing" || n === "failed") return "var(--ui-red)";
+  return "var(--ui-faint)";
 }
 
 function buildGraph(nodes: GuardianTopologyNode[]): LayoutNode[] {
@@ -286,10 +286,25 @@ function mapLevelToHealth(level?: string): HealthStatus {
   return "critical";
 }
 
-function makeNodeStrip(status: HealthStatus): HealthStatus[] {
-  if (status === "healthy") return Array(16).fill("healthy");
-  if (status === "degraded") return [...Array(11).fill("healthy"), ...Array(4).fill("degraded"), "critical"];
-  return [...Array(10).fill("healthy"), ...Array(2).fill("degraded"), ...Array(4).fill("critical")];
+function partitionSummary(
+  partitionName: string,
+  assets: AssetGroup[],
+  intentCount: number,
+  overview: GuardianOverview | null
+): PartitionModel["summary"] {
+  const summary = overview?.partitions?.find((p) => p.name === partitionName);
+  const healthyAssets = assets.filter((asset) => asset.status === "healthy").length;
+  const attentionAssets = assets.filter((asset) => asset.status === "degraded").length;
+  const failingAssets = assets.filter((asset) => asset.status === "critical").length;
+  return {
+    health: summary?.health ?? (failingAssets > 0 ? "failing" : attentionAssets > 0 ? "attention" : "healthy"),
+    status: summary?.displayStatus || summary?.status,
+    assetCount: summary?.assetCount ?? assets.length,
+    intentCount: summary?.intentCount ?? intentCount,
+    healthyAssets: summary?.healthyAssets ?? healthyAssets,
+    attentionAssets: summary?.attentionAssets ?? attentionAssets,
+    failingAssets: summary?.failingAssets ?? failingAssets,
+  };
 }
 
 function buildPartitionModelFromSources(
@@ -314,10 +329,8 @@ function buildPartitionModelFromSources(
       id: node.id,
       name: node.name,
       status,
-      nodes: makeNodeStrip(status),
       partition: partitionName,
       intent: intentName,
-      sourceScope: "asset",
     });
   }
 
@@ -326,31 +339,29 @@ function buildPartitionModelFromSources(
     .sort((a, b) => a.name.localeCompare(b.name));
 
   if (sortedIntents.length > 0) {
-    return { id: partitionName, region: partitionName, intents: sortedIntents };
+    const assets = sortedIntents.flatMap((intent) => intent.assets);
+    return {
+      id: partitionName,
+      region: partitionName,
+      intents: sortedIntents,
+      summary: partitionSummary(partitionName, assets, sortedIntents.length, overview),
+    };
   }
 
   const summary = overview?.partitions?.find((p) => p.name === partitionName);
   if (!summary) return null;
-  const fallbackStatus = mapLevelToHealth(summary.health);
+  const fallbackAsset: AssetGroup = {
+    id: `${partitionName}-summary`,
+    name: partitionName,
+    status: mapLevelToHealth(summary.health),
+    partition: partitionName,
+    intent: "Services",
+  };
   return {
     id: partitionName,
     region: partitionName,
-    intents: [
-      {
-        name: "Services",
-        assets: [
-          {
-            id: `${partitionName}-summary`,
-            name: partitionName,
-            status: fallbackStatus,
-            nodes: makeNodeStrip(fallbackStatus),
-            partition: partitionName,
-            intent: "Services",
-            sourceScope: "fallback",
-          },
-        ],
-      },
-    ],
+    intents: [{ name: "Services", assets: [fallbackAsset] }],
+    summary: partitionSummary(partitionName, [fallbackAsset], 1, overview),
   };
 }
 
@@ -786,7 +797,7 @@ export default function PartitionAssetsPage() {
     const rangeMinutes = rangeOverrideMinutes && rangeOverrideMinutes > 0 ? rangeOverrideMinutes : timeRange;
     const { from, to } = toIsoRange(rangeMinutes);
     const step = stepForMinutes(rangeMinutes);
-    const colors = ["#38bdf8", "#f43f5e", "#22d3ee", "#a78bfa", "#34d399", "#f59e0b"];
+    const colors = ["var(--chart-1)", "var(--chart-5)", "var(--chart-2)", "var(--chart-8)", "var(--chart-3)", "var(--chart-4)"];
 
     try {
       const response = await api.queryPrometheusRange(
@@ -1386,7 +1397,7 @@ export default function PartitionAssetsPage() {
   const crit = allAssets.filter((a) => a.status === "critical").length;
   const deg = allAssets.filter((a) => a.status === "degraded").length;
   const ok = allAssets.filter((a) => a.status === "healthy").length;
-  const pColor = crit > 0 ? "#ef4444" : deg > 0 ? "#f59e0b" : "#10b981";
+  const pColor = crit > 0 ? "var(--ui-red)" : deg > 0 ? "var(--ui-amber)" : "var(--ui-green)";
   const TIME_OPTIONS = [15, 60, 360, 1440];
 
   return (
@@ -1541,7 +1552,7 @@ export default function PartitionAssetsPage() {
                   <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
                 </filter>
                 <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-                  <path d="M0,0 L8,3 L0,6 Z" fill="rgba(56,189,248,0.3)" />
+                  <path d="M0,0 L8,3 L0,6 Z" fill="var(--ui-accent)" />
                 </marker>
               </defs>
 
@@ -1551,7 +1562,7 @@ export default function PartitionAssetsPage() {
                   const t = nodeById.get(edge.to);
                   if (!f || !t) return null;
                   const fKind = resolveNodeKind(f);
-                  const stroke = fKind === "intent" ? "rgba(56,189,248,0.15)" : "rgba(148,163,184,0.08)";
+                  const stroke = fKind === "intent" ? "var(--ui-overlay-border)" : "var(--ui-border)";
                   return (
                     <g key={`e-${idx}`}>
                       <line
@@ -1561,7 +1572,7 @@ export default function PartitionAssetsPage() {
                         strokeWidth={fKind === "intent" ? 2 : 1}
                         markerEnd="url(#arrowHead)"
                       />
-                      <circle r="2.5" fill="rgba(56,189,248,0.4)" opacity="0.6">
+                      <circle r="2.5" fill="var(--ui-accent)" opacity="0.6">
                         <animateMotion
                           dur={`${2 + idx * 0.7}s`}
                           repeatCount="indefinite"
@@ -1589,19 +1600,19 @@ export default function PartitionAssetsPage() {
                       className="cursor-pointer transition-transform"
                     >
                       {selected && (
-                        <rect x={-4} y={-4} width={w + 8} height={h + 8} fill="none" stroke="#38bdf8" strokeWidth="1.5" opacity="0.5" filter="url(#selectedGlow)" />
+                        <rect x={-4} y={-4} width={w + 8} height={h + 8} fill="none" stroke="var(--chart-1)" strokeWidth="1.5" opacity="0.5" filter="url(#selectedGlow)" />
                       )}
                       <rect
                         x={0} y={0} width={w} height={h}
-                        fill={isIntent ? "#0b1e33" : "#0f172a"}
-                        stroke={selected ? "#38bdf8" : `${hColor}40`}
+                        fill={isIntent ? "var(--ui-panel)" : "var(--ui-card)"}
+                        stroke={selected ? "var(--ui-accent)" : `${hColor}40`}
                         strokeWidth={selected ? 1.5 : 1}
                       />
                       <circle cx={isIntent ? 10 : 8} cy={h / 2} r={isIntent ? 5 : 4} fill={hColor} opacity="0.8" />
-                      <text x={isIntent ? 20 : 16} y={isIntent ? 16 : 14} fill="#64748b" fontSize={fs - 2}>
+                      <text x={isIntent ? 20 : 16} y={isIntent ? 16 : 14} fill="var(--ui-faint)" fontSize={fs - 2}>
                         {kind.toUpperCase()}
                       </text>
-                      <text x={isIntent ? 20 : 16} y={isIntent ? 32 : 27} fill="#e2e8f0" fontSize={fs} fontWeight={isIntent ? 600 : 400}>
+                      <text x={isIntent ? 20 : 16} y={isIntent ? 32 : 27} fill="var(--ui-text)" fontSize={fs} fontWeight={isIntent ? 600 : 400}>
                         {node.name.length > 14 ? `${node.name.slice(0, 12)}..` : node.name}
                       </text>
                     </g>
@@ -1775,9 +1786,9 @@ export default function PartitionAssetsPage() {
                           ) : (
                             <ResponsiveContainer width="100%" height="100%">
                               <LineChart data={customData}>
-                                <XAxis dataKey="time" stroke="#475569" fontSize={10} />
-                                <YAxis stroke="#475569" fontSize={10} />
-                                <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc", fontSize: 12 }} />
+                                <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
+                                <YAxis stroke="var(--chart-text)" fontSize={10} />
+                                <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
                                 {customSeries.map((series) => (
                                   <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={1.5} dot={false} connectNulls />
                                 ))}
@@ -1811,11 +1822,11 @@ export default function PartitionAssetsPage() {
                             <div className="h-44">
                               <ResponsiveContainer width="100%" height="100%">
                                 <LineChart data={metricData}>
-                                  <XAxis dataKey="time" stroke="#475569" fontSize={10} />
-                                  <YAxis stroke="#475569" fontSize={10} />
-                                  <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc", fontSize: 12 }} />
-                                  <Line type="monotone" dataKey="p95" stroke="#38bdf8" strokeWidth={1.5} dot={false} />
-                                  <Line type="monotone" dataKey="p99" stroke="#f43f5e" strokeWidth={1.5} dot={false} />
+                                  <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
+                                  <YAxis stroke="var(--chart-text)" fontSize={10} />
+                                  <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
+                                  <Line type="monotone" dataKey="p95" stroke="var(--chart-1)" strokeWidth={1.5} dot={false} />
+                                  <Line type="monotone" dataKey="p99" stroke="var(--chart-5)" strokeWidth={1.5} dot={false} />
                                 </LineChart>
                               </ResponsiveContainer>
                             </div>
@@ -1838,10 +1849,10 @@ export default function PartitionAssetsPage() {
                             <div className="h-44">
                               <ResponsiveContainer width="100%" height="100%">
                                 <LineChart data={metricData}>
-                                  <XAxis dataKey="time" stroke="#475569" fontSize={10} />
-                                  <YAxis stroke="#475569" fontSize={10} />
-                                  <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc", fontSize: 12 }} />
-                                  <Line type="monotone" dataKey="rps" stroke="#22d3ee" strokeWidth={1.5} dot={false} />
+                                  <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
+                                  <YAxis stroke="var(--chart-text)" fontSize={10} />
+                                  <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
+                                  <Line type="monotone" dataKey="rps" stroke="var(--chart-2)" strokeWidth={1.5} dot={false} />
                                 </LineChart>
                               </ResponsiveContainer>
                             </div>
@@ -2043,9 +2054,9 @@ export default function PartitionAssetsPage() {
                           ) : (
                             <ResponsiveContainer width="100%" height="100%">
                               <LineChart data={customData}>
-                                <XAxis dataKey="time" stroke="#475569" fontSize={10} />
-                                <YAxis stroke="#475569" fontSize={10} />
-                                <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc", fontSize: 12 }} />
+                                <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
+                                <YAxis stroke="var(--chart-text)" fontSize={10} />
+                                <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
                                 {customSeries.map((series) => (
                                   <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={1.5} dot={false} connectNulls />
                                 ))}
@@ -2168,9 +2179,9 @@ export default function PartitionAssetsPage() {
                                   ) : (
                                     <ResponsiveContainer width="100%" height="100%">
                                       <LineChart data={graph.data}>
-                                        <XAxis dataKey="time" stroke="#475569" fontSize={10} />
-                                        <YAxis stroke="#475569" fontSize={10} />
-                                        <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc", fontSize: 12 }} />
+                                        <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
+                                        <YAxis stroke="var(--chart-text)" fontSize={10} />
+                                        <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
                                         {graph.series.map((series) => (
                                           <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={1.5} dot={false} connectNulls />
                                         ))}

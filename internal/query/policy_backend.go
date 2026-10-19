@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/radryc/monofs/pkg/authz"
@@ -29,6 +30,22 @@ func identityFromContext(ctx context.Context) authz.Identity {
 // QueryLogs filters log records by the caller's log partitions.
 func (b *policyBackend) QueryLogs(ctx context.Context, tenant, query, service string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
 	records, err := b.inner.QueryLogs(ctx, tenant, query, service, from, to, limit)
+	if err != nil {
+		return records, err
+	}
+	return b.gate.FilterLogs(identityFromContext(ctx), records), nil
+}
+
+// QueryLogsRaw executes a full LogQL expression and filters the result. The
+// proxy's local logs upstream prefers this method when available; without it,
+// the LogQL selector is passed as a text filter to QueryLogs and matches
+// nothing.
+func (b *policyBackend) QueryLogsRaw(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
+	raw, ok := b.inner.(rawLogQueryBackend)
+	if !ok {
+		return nil, fmt.Errorf("log backend does not support raw queries")
+	}
+	records, err := raw.QueryLogsRaw(ctx, tenant, query, from, to, limit)
 	if err != nil {
 		return records, err
 	}

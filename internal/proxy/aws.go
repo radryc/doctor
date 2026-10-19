@@ -189,16 +189,43 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 			attributes[key] = value
 		}
 		ApplyAWSPartition(attributes, record.Region, record.Account)
+		// Guardian log groups are named
+		// guardian/<account>/<region>/<partition>/<intent>. Prefer the
+		// partition segment over the region so federated logs use the same ACL
+		// scope as the partition's native telemetry and X-Ray traces.
+		partition := awsLogGroupPartition(record.LogGroup)
+		if partition == "" {
+			partition = record.Region
+		}
+		if partition != "" {
+			attributes[AWSPartitionLabel] = partition
+		}
 		out = append(out, segment.LogRecord{
 			Tenant:     tenant,
 			Service:    firstNonEmpty(record.Fields["service"], record.Fields["service_name"], SourceAWS),
-			Partition:  record.Region,
+			Partition:  partition,
 			Timestamp:  record.Timestamp,
 			Body:       record.Message,
 			Attributes: attributes,
 		})
 	}
 	return out
+}
+
+// awsLogGroupPartition extracts the partition from a Guardian CloudWatch log
+// group (guardian/<account>/<region>/<partition>/<intent>).
+func awsLogGroupPartition(logGroup string) string {
+	logGroup = strings.TrimSpace(logGroup)
+	// CloudWatch log records from the AWS read API are prefixed with the
+	// account id (for example "780603797542:guardian/.../web").
+	if idx := strings.Index(logGroup, "guardian/"); idx >= 0 {
+		logGroup = logGroup[idx:]
+	}
+	parts := strings.Split(strings.Trim(logGroup, "/"), "/")
+	if len(parts) < 4 || parts[0] != "guardian" {
+		return ""
+	}
+	return strings.TrimSpace(parts[3])
 }
 
 // AWSMetricNames returns discovered CloudWatch metric names. It uses the REST

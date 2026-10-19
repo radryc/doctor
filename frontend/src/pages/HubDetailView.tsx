@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Server, Activity, Database } from "lucide-react";
+import { ArrowLeft, Server, Activity } from "lucide-react";
 import {
   LineChart,
   Line,
@@ -192,9 +192,9 @@ function nodeStatus(node: GuardianTopologyNode): HealthStatus {
 }
 
 function statusGlow(status: HealthStatus): string {
-  if (status === "healthy") return "#34d399";
-  if (status === "degraded") return "#f59e0b";
-  return "#f43f5e";
+  if (status === "healthy") return "var(--ui-green)";
+  if (status === "degraded") return "var(--ui-amber)";
+  return "var(--ui-red)";
 }
 
 function buildTopologyGraph(
@@ -365,11 +365,11 @@ export default function HubDetailView({
       return { healthy, degraded, critical };
     }
 
-    const healthy = asset.nodes.filter((n) => n === "healthy").length;
-    const degraded = asset.nodes.filter((n) => n === "degraded").length;
-    const critical = asset.nodes.filter((n) => n === "critical").length;
+    const healthy = asset.status === "healthy" ? 1 : 0;
+    const degraded = asset.status === "degraded" ? 1 : 0;
+    const critical = asset.status === "critical" ? 1 : 0;
     return { healthy, degraded, critical };
-  }, [topologyGraph.nodes, asset.nodes]);
+  }, [topologyGraph.nodes, asset.status]);
 
   const focusedNode = useMemo(
     () => topologyGraph.nodes.find((n) => n.id === focusNodeId) || null,
@@ -669,10 +669,10 @@ export default function HubDetailView({
             </span>
           </div>
 
-          <div className="relative h-[440px] rounded-xl overflow-hidden border border-slate-800 bg-gradient-to-br from-slate-950 via-[#0b1323] to-[#140d1f]">
+          <div className="relative h-[440px] rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
             <div className="absolute inset-0 opacity-40" style={{
               backgroundImage:
-                "radial-gradient(circle at 20% 20%, rgba(56,189,248,0.18), transparent 30%), radial-gradient(circle at 80% 75%, rgba(244,63,94,0.14), transparent 28%), linear-gradient(rgba(148,163,184,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.06) 1px, transparent 1px)",
+                "radial-gradient(circle at 20% 20%, color-mix(in oklab, var(--ui-accent) 18%, transparent), transparent 30%), radial-gradient(circle at 80% 75%, color-mix(in oklab, var(--ui-red) 14%, transparent), transparent 28%), linear-gradient(var(--chart-grid) 1px, transparent 1px), linear-gradient(90deg, var(--chart-grid) 1px, transparent 1px)",
               backgroundSize: "auto, auto, 22px 22px, 22px 22px",
             }} />
             {topologyGraph.nodes.length === 0 ? (
@@ -702,7 +702,7 @@ export default function HubDetailView({
                       <path
                         key={`${edge.from}-${edge.to}-${index}`}
                         d={`M ${from.x} ${from.y} Q ${mx} ${my - curve} ${to.x} ${to.y}`}
-                        stroke="rgba(125,211,252,0.35)"
+                        stroke="var(--ui-border-strong)"
                         strokeWidth="0.35"
                         fill="none"
                       >
@@ -723,7 +723,7 @@ export default function HubDetailView({
                           cy={node.y}
                           r={radius}
                           fill={color}
-                          stroke={focused ? "#e2e8f0" : "rgba(226,232,240,0.28)"}
+                          stroke={focused ? "var(--ui-text)" : "var(--ui-border-strong)"}
                           strokeWidth={focused ? 0.45 : 0.2}
                         >
                           <title>{`${node.name} (${node.status})`}</title>
@@ -733,8 +733,8 @@ export default function HubDetailView({
                             x={node.x + 1.9}
                             y={node.y - 1.2}
                             fontSize="2.1"
-                            fill="rgba(226,232,240,0.92)"
-                            style={{ paintOrder: "stroke", stroke: "rgba(2,6,23,0.9)", strokeWidth: 0.7 }}
+                            fill="var(--ui-text)"
+                            style={{ paintOrder: "stroke", stroke: "var(--ui-bg)", strokeWidth: 0.7 }}
                           >
                             {node.name}
                           </text>
@@ -783,13 +783,13 @@ export default function HubDetailView({
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={metricData}>
-                    <XAxis dataKey="time" stroke="#64748b" fontSize={11} />
-                    <YAxis stroke="#64748b" fontSize={11} />
+                    <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={11} />
+                    <YAxis stroke="var(--chart-text)" fontSize={11} />
                     <Tooltip
-                      contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc" }}
+                      contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)" }}
                     />
-                    <Line type="monotone" dataKey="p95" stroke="#38bdf8" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="p99" stroke="#f43f5e" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="p95" stroke="var(--chart-1)" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="p99" stroke="var(--chart-5)" strokeWidth={2} dot={false} />
                   </LineChart>
                 </ResponsiveContainer>
               )}
@@ -808,12 +808,12 @@ export default function HubDetailView({
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={metricData}>
-                    <XAxis dataKey="time" stroke="#64748b" fontSize={11} />
-                    <YAxis stroke="#64748b" fontSize={11} />
+                    <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={11} />
+                    <YAxis stroke="var(--chart-text)" fontSize={11} />
                     <Tooltip
-                      contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155", color: "#f8fafc" }}
+                      contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)" }}
                     />
-                    <Line type="monotone" dataKey="rps" stroke="#22d3ee" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="rps" stroke="var(--chart-2)" strokeWidth={2} dot={false} />
                   </LineChart>
                 </ResponsiveContainer>
               )}
@@ -889,32 +889,6 @@ export default function HubDetailView({
                 </tbody>
               </table>
             </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-6 bg-slate-900 border border-slate-800 rounded-xl p-4">
-        <h2 className="text-sm font-semibold mb-4 flex items-center gap-2">
-          <Database className="w-4 h-4 text-sky-400" /> Internal Dependency Topology Map
-        </h2>
-        <div className="flex items-center justify-between bg-slate-950 p-6 rounded-lg border border-slate-800/80">
-          <div className="p-3 bg-slate-900 border border-slate-700 rounded text-center">
-            <span className="text-xs text-slate-400 block">Ingress</span>
-            <span className="text-sm font-bold text-slate-200">API Gateway</span>
-          </div>
-          <div className="h-0.5 w-16 bg-sky-500/50 relative">
-            <div className="absolute -top-3 left-1/2 -translate-x-1/2 text-[10px] text-sky-400">HTTP</div>
-          </div>
-          <div className="p-3 bg-slate-900 border border-amber-500/50 rounded text-center">
-            <span className="text-xs text-slate-400 block">Cache</span>
-            <span className="text-sm font-bold text-amber-400">Redis Cluster</span>
-          </div>
-          <div className="h-0.5 w-16 bg-sky-500/50 relative">
-            <div className="absolute -top-3 left-1/2 -translate-x-1/2 text-[10px] text-sky-400">gRPC</div>
-          </div>
-          <div className="p-3 bg-slate-900 border border-slate-700 rounded text-center">
-            <span className="text-xs text-slate-400 block">Storage</span>
-            <span className="text-sm font-bold text-slate-200">Primary DB</span>
           </div>
         </div>
       </div>

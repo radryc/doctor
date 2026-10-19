@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	promlabels "github.com/prometheus/prometheus/model/labels"
@@ -60,7 +61,7 @@ type seriesPresence struct {
 }
 
 // execCountByNameRange answers a range query from the chunk series index.
-func (s *Service) execCountByNameRange(ctx context.Context, tenant string, plan countByNamePlan, start, end time.Time, step time.Duration) (map[string]any, error) {
+func (s *Service) execCountByNameRange(ctx context.Context, tenant, partition string, plan countByNamePlan, start, end time.Time, step time.Duration) (map[string]any, error) {
 	if step <= 0 {
 		step = time.Minute
 	}
@@ -70,7 +71,7 @@ func (s *Service) execCountByNameRange(ctx context.Context, tenant string, plan 
 	}
 
 	// name -> series identity -> presence range
-	groups, err := s.loadSeriesPresence(ctx, tenant, plan, start, end)
+	groups, err := s.loadSeriesPresence(ctx, tenant, partition, plan, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -103,9 +104,9 @@ func (s *Service) execCountByNameRange(ctx context.Context, tenant string, plan 
 }
 
 // execCountByNameInstant answers an instant query from the chunk series index.
-func (s *Service) execCountByNameInstant(ctx context.Context, tenant string, plan countByNamePlan, at time.Time) (map[string]any, error) {
+func (s *Service) execCountByNameInstant(ctx context.Context, tenant, partition string, plan countByNamePlan, at time.Time) (map[string]any, error) {
 	window := at.Add(-doctorPrometheusLookback)
-	groups, err := s.loadSeriesPresence(ctx, tenant, plan, window, at)
+	groups, err := s.loadSeriesPresence(ctx, tenant, partition, plan, window, at)
 	if err != nil {
 		return nil, err
 	}
@@ -134,16 +135,21 @@ func (s *Service) execCountByNameInstant(ctx context.Context, tenant string, pla
 
 // loadSeriesPresence streams matching series metadata and merges it into
 // name -> series -> presence ranges.
-func (s *Service) loadSeriesPresence(ctx context.Context, tenant string, plan countByNamePlan, start, end time.Time) (map[string]map[string]*seriesPresence, error) {
+func (s *Service) loadSeriesPresence(ctx context.Context, tenant, partition string, plan countByNamePlan, start, end time.Time) (map[string]map[string]*seriesPresence, error) {
 	query := segment.MetricQuery{
 		Service:       exactServiceMatcher(plan.matchers),
 		LabelMatchers: segmentMetricMatchers(plan.matchers),
+	}
+	matchers := plan.matchers
+	if partition = strings.TrimSpace(partition); partition != "" {
+		matchers = append(append([]*promlabels.Matcher(nil), matchers...),
+			promlabels.MustNewMatcher(promlabels.MatchEqual, labelPartition, partition))
 	}
 	groups := make(map[string]map[string]*seriesPresence)
 	seriesCount := 0
 	err := s.logEngine.StreamMetricSeries(ctx, tenant, query, start, end, func(meta segment.MetricSeriesMeta) error {
 		labelSet := metricSeriesLabels(meta)
-		if !matchersMatch(plan.matchers, labelSet) {
+		if !matchersMatch(matchers, labelSet) {
 			return nil
 		}
 		name := labelSet.Get(promlabels.MetricName)
