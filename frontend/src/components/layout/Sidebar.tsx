@@ -4,7 +4,7 @@ import { useConfig } from "../../context/ConfigContext";
 
 const NAV = [
   { to: "/", label: "On-call", icon: LayoutDashboard },
-  { to: "/rules", label: "Rules", icon: ListChecks },
+  { to: "/rules", label: "Recording Rules", icon: ListChecks },
   { to: "/traces", label: "Traces", icon: GitBranch },
   { to: "/logs", label: "Logs", icon: FileText },
   { to: "/metrics", label: "Metrics", icon: BarChart3 },
