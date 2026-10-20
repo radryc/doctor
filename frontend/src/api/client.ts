@@ -30,8 +30,9 @@ async function fetchText(url: string): Promise<string> {
   return body;
 }
 
-async function fetchJSON<T>(url: string): Promise<T> {
+async function fetchJSON<T>(url: string, method = "GET"): Promise<T> {
   const res = await fetch(url, {
+    method,
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(60_000),
   });
@@ -113,6 +114,6 @@ export const api = {
 
   evaluateRecordingRuleGroup: (tenant: string, group: string) => {
     const params = new URLSearchParams({ tenant, group });
-    return fetchJSON<unknown>(`/v1/rules/evaluate?${params}`);
+    return fetchJSON<unknown>(`/v1/rules/evaluate?${params}`, "POST");
   },
 };
