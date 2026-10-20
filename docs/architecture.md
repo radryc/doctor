@@ -97,7 +97,7 @@ Recording-rule CRUD API and per-shard evaluator with lease-based HA.
 React 19 + TypeScript + Vite 6 + Tailwind 4, HashRouter, Recharts. Built into
 `internal/query/ui/dist` and embedded with `//go:embed`; the SPA fallback
 never serves HTML for API prefixes (`api/`, `v1/`, `loki/`, `tempo/`, ...).
-Views: dashboard, services, traces (waterfall), logs (histogram), metrics
+Views: dashboard, recording rules, traces (waterfall), logs (histogram), metrics
 (PromQL builder), fleet dashboard, partition detail, partition assets.
 
 ## 3. Ingest Pipeline
