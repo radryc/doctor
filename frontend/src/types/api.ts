@@ -286,3 +286,24 @@ export interface RecordingRuleGroupSummary {
 export interface RecordingRulesResponse {
   groups: RecordingRuleGroupSummary[];
 }
+
+export interface RecordingRulesStatus {
+  enabled: boolean;
+  rulerId: string;
+  leader: boolean;
+  lease?: {
+    rulerId: string;
+    leader: boolean;
+    ttl: string;
+    renew: string;
+    path: string;
+    since?: string;
+  };
+  scheduler?: {
+    groups: number;
+    due: number;
+    evaluated: number;
+    lastLoad: string;
+    lastError?: string;
+  };
+}

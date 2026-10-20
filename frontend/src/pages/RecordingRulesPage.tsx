@@ -1,13 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, ArrowLeft, Copy, FileCode2, ListChecks, Play, RefreshCw } from "lucide-react";
+import {
+  Activity,
+  AlertCircle,
+  ArrowLeft,
+  Copy,
+  FileCode2,
+  ListChecks,
+  Play,
+  RefreshCw,
+} from "lucide-react";
 import { api } from "../api/client";
 import { copyText } from "../lib/clipboard";
-import type { RecordingRuleGroupSummary } from "../types/api";
+import type { RecordingRuleGroupSummary, RecordingRulesStatus } from "../types/api";
 
 export default function RecordingRulesPage() {
   const [groups, setGroups] = useState<RecordingRuleGroupSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [status, setStatus] = useState<RecordingRulesStatus | null>(null);
+  const [statusError, setStatusError] = useState("");
   const [selected, setSelected] = useState<RecordingRuleGroupSummary | null>(null);
   const [yaml, setYaml] = useState("");
   const [yamlLoading, setYamlLoading] = useState(false);
@@ -29,11 +40,24 @@ export default function RecordingRulesPage() {
     }
   }, []);
 
+  const loadStatus = useCallback(async () => {
+    try {
+      setStatus(await api.getRecordingRuleStatus());
+      setStatusError("");
+    } catch (e) {
+      setStatusError(e instanceof Error ? e.message : "could not load engine status");
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([loadGroups(), loadStatus()]);
+  }, [loadGroups, loadStatus]);
+
   useEffect(() => {
-    void loadGroups();
-    const interval = setInterval(loadGroups, 30_000);
+    void refresh();
+    const interval = setInterval(() => void refresh(), 15_000);
     return () => clearInterval(interval);
-  }, [loadGroups]);
+  }, [refresh]);
 
   const openGroup = async (group: RecordingRuleGroupSummary) => {
     setSelected(group);
@@ -46,6 +70,27 @@ export default function RecordingRulesPage() {
       setYaml(e instanceof Error ? e.message : "could not load rule group");
     } finally {
       setYamlLoading(false);
+    }
+  };
+
+  const testGroup = async (group: RecordingRuleGroupSummary) => {
+    setSelected(group);
+    setYaml("");
+    setEvalResult("");
+    setYamlLoading(true);
+    setEvaluating(true);
+    try {
+      const [ruleYAML, result] = await Promise.all([
+        api.getRecordingRuleGroup(group.tenant, group.group),
+        api.evaluateRecordingRuleGroup(group.tenant, group.group),
+      ]);
+      setYaml(ruleYAML);
+      setEvalResult(JSON.stringify(result, null, 2));
+    } catch (e) {
+      setEvalResult(e instanceof Error ? e.message : "evaluation failed");
+    } finally {
+      setYamlLoading(false);
+      setEvaluating(false);
     }
   };
 
@@ -97,7 +142,7 @@ export default function RecordingRulesPage() {
                 className="px-2.5 py-1 rounded border border-emerald-600/40 bg-emerald-500/10 text-emerald-300 text-xs hover:bg-emerald-500/20 disabled:opacity-50 inline-flex items-center gap-1"
               >
                 <Play className="w-3.5 h-3.5" />
-                {evaluating ? "Evaluating…" : "Evaluate now"}
+                {evaluating ? "Testing…" : "Test group"}
               </button>
             </div>
           </div>
@@ -120,7 +165,7 @@ export default function RecordingRulesPage() {
             <div className="bg-slate-900/50 border border-slate-800 rounded-lg overflow-hidden">
               <div className="px-4 py-2 border-b border-slate-800 text-xs text-slate-400 flex items-center gap-2">
                 <ListChecks className="w-3.5 h-3.5" />
-                Manual evaluation
+                Test result
               </div>
               <div className="p-4">
                 {evalResult ? (
@@ -129,8 +174,8 @@ export default function RecordingRulesPage() {
                   </pre>
                 ) : (
                   <p className="text-xs text-slate-500">
-                    Evaluate this group once through the doctor-rules API. The normal scheduler
-                    evaluates it every {selected.interval || "1m0s"}.
+                    Run this group once through the doctor-rules evaluator. The engine's normal
+                    scheduler evaluates it every {selected.interval || "1m0s"}.
                   </p>
                 )}
               </div>
@@ -154,13 +199,15 @@ export default function RecordingRulesPage() {
           </div>
           <button
             type="button"
-            onClick={() => void loadGroups()}
+            onClick={() => void refresh()}
             className="px-2.5 py-1 rounded border border-slate-700 bg-slate-900 text-slate-300 text-xs hover:border-sky-500/40 hover:text-sky-300 inline-flex items-center gap-1"
           >
             <RefreshCw className="w-3.5 h-3.5" />
             Refresh
           </button>
         </div>
+
+        <EngineStatus status={status} error={statusError} groups={groups.length} />
 
         {error && (
           <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300 flex items-center gap-2">
@@ -226,6 +273,19 @@ export default function RecordingRulesPage() {
                     <td className="px-4 py-2.5 font-mono text-slate-200">{group.group}</td>
                     <td className="px-4 py-2.5 text-slate-400">{group.interval || "1m0s"}</td>
                     <td className="px-4 py-2.5 text-right text-slate-300">{group.rules}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void testGroup(group);
+                        }}
+                        className="px-2 py-0.5 rounded border border-emerald-600/40 bg-emerald-500/10 text-emerald-300 text-[10px] hover:bg-emerald-500/20 inline-flex items-center gap-1"
+                      >
+                        <Play className="w-3 h-3" />
+                        Test
+                      </button>
+                    </td>
                     <td className="px-4 py-2.5 text-right text-sky-400">View →</td>
                   </tr>
                 ))}
@@ -236,6 +296,71 @@ export default function RecordingRulesPage() {
       </div>
     </div>
   );
+}
+
+function EngineStatus({
+  status,
+  error,
+  groups,
+}: {
+  status: RecordingRulesStatus | null;
+  error: string;
+  groups: number;
+}) {
+  const leader = status?.leader ?? false;
+  const scheduler = status?.scheduler;
+  return (
+    <div className="mb-4 rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Activity className="w-3.5 h-3.5 text-sky-400" />
+        <span className="text-xs font-medium text-slate-200">Engine</span>
+        <span
+          className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border ${
+            leader
+              ? "border-emerald-500/30 text-emerald-300 bg-emerald-500/10"
+              : "border-amber-500/30 text-amber-300 bg-amber-500/10"
+          }`}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${leader ? "bg-emerald-400" : "bg-amber-400"}`} />
+          {status ? (leader ? "Leader" : "Standby") : "Unknown"}
+        </span>
+        <code className="text-[10px] text-slate-500">{status?.rulerId || "doctor-rules"}</code>
+        {status?.lease && (
+          <span className="text-[10px] text-slate-500 ml-auto">
+            lease renew {status.lease.renew} · TTL {status.lease.ttl}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+        <Metric label="Rule groups" value={String(scheduler?.groups ?? groups)} />
+        <Metric label="Evaluations" value={String(scheduler?.evaluated ?? 0)} />
+        <Metric label="Due" value={String(scheduler?.due ?? 0)} />
+        <Metric label="Last load" value={formatTime(scheduler?.lastLoad)} />
+      </div>
+      {scheduler?.lastError && (
+        <div className="mt-3 text-[11px] text-rose-300">
+          Last load error: {scheduler.lastError}
+        </div>
+      )}
+      {error && <div className="mt-3 text-[11px] text-amber-300">{error}</div>}
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+      <div className="text-sm text-slate-200 mt-0.5">{value}</div>
+    </div>
+  );
+}
+
+function formatTime(value?: string) {
+  if (!value || value.startsWith("0001-")) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 const EXAMPLE_RULE = `version: 1

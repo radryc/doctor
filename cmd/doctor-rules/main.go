@@ -60,7 +60,6 @@ func main() {
 		PollInterval: cfg.PollInterval,
 		Logger:       log.Default(),
 	}
-	api := &ruler.API{Store: store, Evaluator: evaluator, Logger: log.Default()}
 
 	lease := ruler.NewLeaseManager(
 		&ruler.FileLeaseStore{Files: files, Token: cfg.MonoFSToken},
@@ -70,6 +69,7 @@ func main() {
 		cfg.LeaseRenew,
 		log.Default(),
 	)
+	api := &ruler.API{Store: store, Evaluator: evaluator, Scheduler: scheduler, Lease: lease, Logger: log.Default()}
 	go lease.Run(ctx, scheduler.Run)
 
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: api.Handler()}
