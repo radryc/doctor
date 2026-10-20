@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -45,6 +47,7 @@ type Service struct {
 	aws              proxy.AWSClient
 	proxyRouter      *proxy.Router
 	guardianClient   *http.Client
+	rulesProxy       *httputil.ReverseProxy
 	policyGate       *access.PolicyGate
 }
 
@@ -85,6 +88,25 @@ func (s *Service) SetGuardianAPIURL(u string) { s.guardianAPIURL = u }
 
 // SetDefaultPartition sets the partition pre-filled in the topology form.
 func (s *Service) SetDefaultPartition(p string) { s.defaultPartition = p }
+
+// SetRulesURL configures the doctor-rules API base URL used by the UI proxy.
+func (s *Service) SetRulesURL(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		s.rulesProxy = nil
+		return
+	}
+	target, err := url.Parse(raw)
+	if err != nil || target.Host == "" {
+		s.rulesProxy = nil
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "rules service unavailable: " + err.Error()})
+	}
+	s.rulesProxy = proxy
+}
 
 // guardianTimelineEntry mirrors Guardian's TimelineEntry JSON structure.
 type guardianTimelineEntry struct {
@@ -475,6 +497,8 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/logs/services", s.handleLogServices)
 	mux.HandleFunc("/v1/logs/search", s.handleLogSearch)
 	mux.HandleFunc("/v1/metrics/range", s.handleMetricRange)
+	mux.HandleFunc("/v1/rules", s.handleRulesProxy)
+	mux.HandleFunc("/v1/rules/", s.handleRulesProxy)
 	mux.HandleFunc("/v1/services/discover", s.handleServiceDiscovery)
 	mux.HandleFunc("/v1/services/suggest", s.handleServiceSuggest)
 	mux.HandleFunc("/v1/proxy/endpoints", s.handleProxyEndpoints)
@@ -523,6 +547,28 @@ func (s *Service) guardianTokenMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// handleRulesProxy exposes the doctor-rules list/detail and manual-evaluate
+// endpoints through the query UI origin. Mutations stay on the rules service
+// API; the UI is read-only except for manual evaluation.
+func (s *Service) handleRulesProxy(w http.ResponseWriter, r *http.Request) {
+	if s.rulesProxy == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "recording rules service is not configured"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+	case http.MethodPost:
+		if r.URL.Path != "/v1/rules/evaluate" {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	s.rulesProxy.ServeHTTP(w, r)
 }
 
 func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {

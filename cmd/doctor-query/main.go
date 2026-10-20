@@ -76,6 +76,10 @@ func main() {
 	svc.SetGuardianURL(cfg.GuardianURL)
 	svc.SetGuardianAPIURL(cfg.GuardianAPIURL)
 	svc.SetDefaultPartition(cfg.DefaultPartition)
+	svc.SetRulesURL(cfg.RulesURL)
+	if strings.TrimSpace(cfg.RulesURL) != "" {
+		log.Printf("recording rules UI enabled via %s", cfg.RulesURL)
+	}
 
 	// Repo-managed access policy: filter logs and traces per partition. The
 	// gate is nil (feature disabled) unless a policy URL or file is set.

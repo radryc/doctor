@@ -6,7 +6,7 @@ import TopBar from "./TopBar";
 
 const GO_ROUTES: Record<string, string> = {
   d: "/",
-  s: "/services",
+  r: "/rules",
   t: "/traces",
   l: "/logs",
   m: "/metrics",

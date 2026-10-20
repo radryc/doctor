@@ -1,10 +1,10 @@
 import { NavLink } from "react-router-dom";
-import { Command, Network, FileText, BarChart3, GitBranch, LayoutDashboard, Search } from "lucide-react";
+import { Command, ListChecks, FileText, BarChart3, GitBranch, LayoutDashboard, Search } from "lucide-react";
 import { useConfig } from "../../context/ConfigContext";
 
 const NAV = [
   { to: "/", label: "On-call", icon: LayoutDashboard },
-  { to: "/services", label: "Services", icon: Network },
+  { to: "/rules", label: "Rules", icon: ListChecks },
   { to: "/traces", label: "Traces", icon: GitBranch },
   { to: "/logs", label: "Logs", icon: FileText },
   { to: "/metrics", label: "Metrics", icon: BarChart3 },
