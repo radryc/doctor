@@ -5,7 +5,7 @@ import ThemePicker from "./ThemePicker";
 
 const PAGE_TITLES: Record<string, string> = {
   "/": "On-call",
-  "/services": "Services",
+  "/rules": "Recording Rules",
   "/traces": "Traces",
   "/logs": "Logs",
   "/metrics": "Metrics",

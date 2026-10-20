@@ -13,10 +13,21 @@ import type {
   GuardianOverview,
   GuardianTopologyResponse,
   GuardianEventsResponse,
-  ServiceDiscoveryResponse,
-  ServiceSuggestResponse,
+  RecordingRulesResponse,
   UIUser,
 } from "../types/api";
+
+async function fetchText(url: string): Promise<string> {
+  const res = await fetch(url, {
+    headers: { Accept: "application/yaml, text/plain, */*" },
+    signal: AbortSignal.timeout(60_000),
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(body || `HTTP ${res.status}`);
+  }
+  return body;
+}
 
 async function fetchJSON<T>(url: string): Promise<T> {
   const res = await fetch(url, {
@@ -90,9 +101,14 @@ export const api = {
   guardianOverview: () =>
     fetchJSON<GuardianOverview>("/v1/guardian/overview"),
 
-  discoverServices: (params: URLSearchParams) =>
-    fetchJSON<ServiceDiscoveryResponse>(`/v1/services/discover?${params}`),
+  getRecordingRuleGroups: () =>
+    fetchJSON<RecordingRulesResponse>("/v1/rules"),
 
-  suggestServiceQueries: (params: URLSearchParams) =>
-    fetchJSON<ServiceSuggestResponse>(`/v1/services/suggest?${params}`),
+  getRecordingRuleGroup: (tenant: string, group: string) =>
+    fetchText(`/v1/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(group)}`),
+
+  evaluateRecordingRuleGroup: (tenant: string, group: string) => {
+    const params = new URLSearchParams({ tenant, group });
+    return fetchJSON<unknown>(`/v1/rules/evaluate?${params}`);
+  },
 };

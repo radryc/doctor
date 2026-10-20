@@ -145,6 +145,7 @@ flushes on size or time boundaries.
 | `DOCTOR_TENANT_HEADER` | Header used when no `tenant` query parameter is set | `X-Doctor-Tenant` |
 | `DOCTOR_DEFAULT_PARTITION` | Default Guardian partition in the UI | unset |
 | `DOCTOR_GUARDIAN_UI_URL` / `DOCTOR_GUARDIAN_API_URL` | Guardian deep links / live topology data | unset |
+| `DOCTOR_RULES_URL` | doctor-rules API base URL for the recording-rules UI proxy | unset |
 | `DOCTOR_AWS_ENABLED` | Federate CloudWatch/Logs Insights/X-Ray via pusher-aws | `true` |
 | `DOCTOR_AWS_BACKEND_URL` / `DOCTOR_AWS_BACKEND_TOKEN` | pusher-aws read API base URL + bearer | unset |
 | `DOCTOR_PROXY_ENABLED` | Route queries through the multi-backend proxy | `true` |
@@ -319,13 +320,17 @@ Verify with `./scripts/verify-aws-federation.sh`.
 
 ## Recording rules
 
-`doctor-rules` evaluates PromQL recording rules per shard, merges results by
-the declared strategy (`sum|max|min|last|keep`; `keep` preserves the `shard`
-label), and writes derived metrics back into the logengine where the normal
+`doctor-rules` is enabled by default (`DOCTOR_RULES_ENABLED=true`) and starts
+automatically with the Doctor partition. It evaluates PromQL recording rules
+per shard, merges results by the declared strategy (`sum|max|min|last|keep`;
+`keep` preserves the `shard` label), and writes derived metrics back into the
+logengine where the normal
 query APIs read them. Rules live in MonoFS at
 `/doctor/v1/rules/<tenant>/<group>.yaml`. Partial sums are skipped rather than
 written incorrectly. One replica holds a MonoFS CAS lease at
 `<store>/.lease/leader.json`; followers take over after the lease expires.
+The Doctor UI **Rules** page reads rule groups through `doctor-query`
+(`DOCTOR_RULES_URL`) and can trigger a manual evaluation.
 
 ```yaml
 version: 1

@@ -275,41 +275,14 @@ export type GuardianOverview = {
   }>;
 };
 
-// ── Service Discovery ───────────────────────────────────────────────────────
-export interface DiscoveredService {
-  name: string;
-  has_metrics: boolean;
-  has_traces: boolean;
-  has_logs: boolean;
-  metric_names?: string[];
-  partition?: string;
-  intent?: string;
-  last_seen: string;
-  trace_count: number;
-  log_count: number;
-  error_rate?: number;
-  suggested_dashboards?: string[];
-}
-
-export interface ServiceDiscoveryResponse {
+// ── Recording Rules ─────────────────────────────────────────────────────────
+export interface RecordingRuleGroupSummary {
   tenant: string;
-  window: string;
-  services: DiscoveredService[];
-  total_services: number;
-  discovered_at: string;
+  group: string;
+  interval?: string;
+  rules: number;
 }
 
-export interface ServiceSuggestion {
-  label: string;
-  query: string;
-  description: string;
-  type: "rate" | "latency" | "errors" | "saturation";
-  window: string;
-}
-
-export interface ServiceSuggestResponse {
-  service: string;
-  window: string;
-  suggestions: ServiceSuggestion[];
-  generated_at: string;
+export interface RecordingRulesResponse {
+  groups: RecordingRuleGroupSummary[];
 }

@@ -6,7 +6,7 @@ import TracesPage from "./pages/TracesPage";
 import LogsPage from "./pages/LogsPage";
 import MetricsPage from "./pages/MetricsPage";
 import FleetDashboard from "./pages/FleetDashboard";
-import ServicesPage from "./pages/ServicesPage";
+import RecordingRulesPage from "./pages/RecordingRulesPage";
 import PartitionViewPage from "./pages/PartitionViewPage";
 import PartitionAssetsPage from "./pages/PartitionAssetsPage";
 
@@ -17,7 +17,7 @@ export default function App() {
         <Routes>
           <Route element={<AppLayout />}>
             <Route path="/" element={<DashboardPage />} />
-            <Route path="/services" element={<ServicesPage />} />
+            <Route path="/rules" element={<RecordingRulesPage />} />
             <Route path="/traces" element={<TracesPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
