@@ -24,6 +24,8 @@ type API struct {
 	Store      *Store
 	Evaluator  *Evaluator
 	Authorizer Authorizer
+	Scheduler  *Scheduler
+	Lease      *LeaseManager
 	Logger     *log.Logger
 }
 
@@ -32,9 +34,28 @@ func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/v1/rules", a.handleCollection)
+	mux.HandleFunc("/v1/rules/status", a.handleStatus)
 	mux.HandleFunc("/v1/rules/evaluate", a.handleEvaluate)
 	mux.HandleFunc("/v1/rules/", a.handleGroup)
 	return mux
+}
+
+func (a *API) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	payload := map[string]any{
+		"enabled": true,
+		"rulerId": "",
+		"leader":  false,
+	}
+	if a.Lease != nil {
+		lease := a.Lease.Status()
+		payload["rulerId"] = lease.RulerID
+		payload["leader"] = lease.Leader
+		payload["lease"] = lease
+	}
+	if a.Scheduler != nil {
+		payload["scheduler"] = a.Scheduler.Stats()
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (a *API) handleCollection(w http.ResponseWriter, r *http.Request) {

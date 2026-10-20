@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/store"
@@ -42,6 +43,49 @@ type LeaseManager struct {
 	Renew   time.Duration
 	Logger  *log.Logger
 	Now     func() time.Time
+
+	mu          sync.RWMutex
+	leader      bool
+	leaderSince time.Time
+}
+
+// LeaseStatus is a point-in-time view of this replica's leadership.
+type LeaseStatus struct {
+	RulerID string `json:"rulerId"`
+	Leader  bool   `json:"leader"`
+	TTL     string `json:"ttl"`
+	Renew   string `json:"renew"`
+	Path    string `json:"path"`
+	Since   string `json:"since,omitempty"`
+}
+
+// Status returns the current leadership state.
+func (m *LeaseManager) Status() LeaseStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	status := LeaseStatus{
+		RulerID: m.RulerID,
+		Leader:  m.leader,
+		TTL:     m.TTL.String(),
+		Renew:   m.Renew.String(),
+		Path:    m.Path,
+	}
+	if !m.leaderSince.IsZero() {
+		status.Since = m.leaderSince.UTC().Format(time.RFC3339)
+	}
+	return status
+}
+
+func (m *LeaseManager) setLeader(leader bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if leader && !m.leader {
+		m.leaderSince = m.now()
+	}
+	if !leader {
+		m.leaderSince = time.Time{}
+	}
+	m.leader = leader
 }
 
 // NewLeaseManager builds a lease manager with sane defaults.
@@ -78,7 +122,9 @@ func (m *LeaseManager) Run(ctx context.Context, onLeader func(context.Context)) 
 			return
 		}
 		if m.TryAcquire(ctx) {
+			m.setLeader(true)
 			m.runLeader(ctx, onLeader)
+			m.setLeader(false)
 			continue
 		}
 		select {

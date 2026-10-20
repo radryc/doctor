@@ -330,7 +330,8 @@ query APIs read them. Rules live in MonoFS at
 written incorrectly. One replica holds a MonoFS CAS lease at
 `<store>/.lease/leader.json`; followers take over after the lease expires.
 The Doctor UI **Rules** page reads rule groups through `doctor-query`
-(`DOCTOR_RULES_URL`) and can trigger a manual evaluation.
+(`DOCTOR_RULES_URL`), shows the engine's leader/standby state and scheduler
+counters, and can test-evaluate a group.
 
 ```yaml
 version: 1

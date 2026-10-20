@@ -14,6 +14,7 @@ import type {
   GuardianTopologyResponse,
   GuardianEventsResponse,
   RecordingRulesResponse,
+  RecordingRulesStatus,
   UIUser,
 } from "../types/api";
 
@@ -103,6 +104,9 @@ export const api = {
 
   getRecordingRuleGroups: () =>
     fetchJSON<RecordingRulesResponse>("/v1/rules"),
+
+  getRecordingRuleStatus: () =>
+    fetchJSON<RecordingRulesStatus>("/v1/rules/status"),
 
   getRecordingRuleGroup: (tenant: string, group: string) =>
     fetchText(`/v1/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(group)}`),
