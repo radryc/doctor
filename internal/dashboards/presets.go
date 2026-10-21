@@ -436,7 +436,7 @@ func presetAWSFederation() DashboardDocument {
 				ID: "aws-xray-traces", Title: "X-Ray Trace Summaries", Kind: WidgetTraces,
 				GridPos: GridPos{X: 6, Y: 6, W: 6, H: 5},
 				Queries: []WidgetQuery{{RefID: "A", Datasource: DatasourceNativeTraces,
-					Expr: `source="aws" and @aws.region=~"$region"`,
+					Expr: `source="aws" region=~"$region"`,
 				}},
 			},
 		},
