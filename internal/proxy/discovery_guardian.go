@@ -7,10 +7,17 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	maxGuardianDiscoveryBodyBytes = 64 << 20 // 64 MiB for 50K pusher payloads
+	fullReconcileInterval         = 10 * time.Minute
 )
 
 // GuardianDiscoveryConfig configures dynamic backend discovery from Guardian.
@@ -45,6 +52,11 @@ type GuardianDiscovery struct {
 	snapshot    atomic.Pointer[[]Backend]
 	lastRefresh atomic.Int64
 	lastError   atomic.Pointer[string]
+
+	mu             sync.Mutex
+	knownPushers   map[string]Backend
+	lastFullSync   time.Time
+	lastSyncCursor time.Time
 }
 
 // NewGuardianDiscovery builds a discovery loop. Call Run to start polling.
@@ -116,28 +128,63 @@ func (d *GuardianDiscovery) LastError() error {
 }
 
 // Refresh performs one discovery poll. The pusher registry is authoritative;
-// partition-derived endpoints are best-effort.
+// partition-derived endpoints are best-effort. After the initial full hydration,
+// steady-state polls use ?updated_since= delta queries to avoid transferring
+// all 50,000 pusher records every 30s.
 func (d *GuardianDiscovery) Refresh(ctx context.Context) error {
 	if d.baseURL == "" {
 		return fmt.Errorf("proxy: guardian discovery requires a base URL")
 	}
-	pushers, err := d.fetchPushers(ctx)
+
+	d.mu.Lock()
+	now := time.Now().UTC()
+	fullSync := d.knownPushers == nil || d.lastFullSync.IsZero() || now.Sub(d.lastFullSync) >= fullReconcileInterval
+	since := d.lastSyncCursor
+	d.mu.Unlock()
+
+	var (
+		pushers []guardianPusher
+		err     error
+	)
+	if fullSync {
+		pushers, err = d.fetchPushers(ctx, time.Time{})
+	} else {
+		pushers, err = d.fetchPushers(ctx, since)
+	}
 	if err != nil {
 		d.setError(err)
 		return err
 	}
 
-	backends := make([]Backend, 0, len(pushers))
+	d.mu.Lock()
+	if fullSync || d.knownPushers == nil {
+		d.knownPushers = make(map[string]Backend, len(pushers))
+		d.lastFullSync = now
+	}
+	maxUpdated := since
 	for _, pusher := range pushers {
-		backend, err := d.backendFromPusher(pusher)
-		if err != nil {
+		if ts := parsePusherTimestamp(pusher.UpdatedAt, pusher.LastHeartbeat); ts.After(maxUpdated) {
+			maxUpdated = ts
+		}
+		backend, bErr := d.backendFromPusher(pusher)
+		if bErr != nil {
 			if d.logger != nil {
-				d.logger.Printf("proxy: skipping pusher %q: %v", pusher.Name, err)
+				d.logger.Printf("proxy: skipping pusher %q: %v", pusher.Name, bErr)
 			}
 			continue
 		}
-		backends = append(backends, backend)
+		d.knownPushers[backend.Name] = backend
 	}
+	if maxUpdated.IsZero() {
+		d.lastSyncCursor = now.Add(-2 * time.Second)
+	} else {
+		d.lastSyncCursor = maxUpdated
+	}
+	backends := make([]Backend, 0, len(d.knownPushers))
+	for _, b := range d.knownPushers {
+		backends = append(backends, b)
+	}
+	d.mu.Unlock()
 
 	if partitionBackends, partitionErr := d.fetchPartitionBackends(ctx); partitionErr != nil {
 		if d.logger != nil {
@@ -150,9 +197,22 @@ func (d *GuardianDiscovery) Refresh(ctx context.Context) error {
 	deduped := dedupeBackends(backends)
 	SortBackends(deduped)
 	d.snapshot.Store(&deduped)
-	d.lastRefresh.Store(time.Now().UTC().UnixNano())
+	d.lastRefresh.Store(now.UnixNano())
 	d.lastError.Store(nil)
 	return nil
+}
+
+func parsePusherTimestamp(updatedAt, lastHeartbeat string) time.Time {
+	for _, raw := range []string{updatedAt, lastHeartbeat} {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 func (d *GuardianDiscovery) setError(err error) {
@@ -173,6 +233,7 @@ type guardianPusher struct {
 	Capabilities   []string          `json:"capabilities"`
 	Status         string            `json:"status"`
 	LastHeartbeat  string            `json:"lastHeartbeat"`
+	UpdatedAt      string            `json:"updatedAt"`
 	ObservedAPIURL string            `json:"observedApiUrl"`
 	Token          string            `json:"token"`
 	TokenEnv       string            `json:"tokenEnv"`
@@ -183,9 +244,13 @@ type guardianPusherList struct {
 	Pushers []guardianPusher `json:"pushers"`
 }
 
-func (d *GuardianDiscovery) fetchPushers(ctx context.Context) ([]guardianPusher, error) {
+func (d *GuardianDiscovery) fetchPushers(ctx context.Context, updatedSince time.Time) ([]guardianPusher, error) {
+	path := "/api/pushers"
+	if !updatedSince.IsZero() {
+		path = "/api/pushers?updated_since=" + url.QueryEscape(updatedSince.UTC().Format(time.RFC3339Nano))
+	}
 	var response guardianPusherList
-	if err := d.getJSON(ctx, "/api/pushers", &response); err != nil {
+	if err := d.getJSON(ctx, path, &response); err != nil {
 		return nil, err
 	}
 	return response.Pushers, nil
@@ -230,7 +295,7 @@ func (d *GuardianDiscovery) getJSON(ctx context.Context, path string, out any) e
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		return fmt.Errorf("proxy: guardian GET %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxGuardianDiscoveryBodyBytes)).Decode(out); err != nil {
 		return fmt.Errorf("proxy: decode guardian %s: %w", path, err)
 	}
 	return nil

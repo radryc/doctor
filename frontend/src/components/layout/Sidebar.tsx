@@ -1,14 +1,20 @@
 import { NavLink } from "react-router-dom";
-import { Command, ListChecks, FileText, BarChart3, GitBranch, LayoutDashboard, Search } from "lucide-react";
+import {
+  Command, ListChecks, FileText, BarChart3, GitBranch,
+  LayoutDashboard, Search, Layers, Activity, Cpu,
+} from "lucide-react";
 import { useConfig } from "../../context/ConfigContext";
 
 const NAV = [
-  { to: "/", label: "On-call", icon: LayoutDashboard },
-  { to: "/rules", label: "Recording Rules", icon: ListChecks },
-  { to: "/traces", label: "Traces", icon: GitBranch },
-  { to: "/logs", label: "Logs", icon: FileText },
-  { to: "/metrics", label: "Metrics", icon: BarChart3 },
-  { to: "/fleet", label: "Fleet", icon: Search },
+  { to: "/", label: "On-call", icon: LayoutDashboard, end: true },
+  { to: "/dashboards", label: "Dashboards", icon: Layers, end: false },
+  { to: "/services", label: "APM Services", icon: Activity, end: false },
+  { to: "/rules", label: "Recording Rules", icon: ListChecks, end: false },
+  { to: "/traces", label: "Traces", icon: GitBranch, end: false },
+  { to: "/logs", label: "Logs", icon: FileText, end: false },
+  { to: "/metrics", label: "Metrics", icon: BarChart3, end: false },
+  { to: "/fleet", label: "Fleet", icon: Search, end: false },
+  { to: "/probes", label: "Synthetics", icon: Cpu, end: false },
 ] as const;
 
 interface SidebarProps {
@@ -37,11 +43,11 @@ export default function Sidebar({ onOpenPalette }: SidebarProps) {
       </button>
 
       <nav className="tab-nav">
-        {NAV.map(({ to, label, icon: Icon }) => (
+        {NAV.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
             to={to}
-            end={to === "/"}
+            end={end}
             className={({ isActive }) =>
               "tab-link" + (isActive ? " is-active" : "")
             }

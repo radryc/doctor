@@ -3,14 +3,20 @@ import { Outlet, useNavigate } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import CommandPalette from "./CommandPalette";
 import TopBar from "./TopBar";
+import InspectorDrawer from "./InspectorDrawer";
+import { TimeRangeProvider } from "../../context/TimeRangeContext";
+import { InspectorProvider } from "../../context/InspectorContext";
 
 const GO_ROUTES: Record<string, string> = {
   d: "/",
+  b: "/dashboards",
+  s: "/services",
   r: "/rules",
   t: "/traces",
   l: "/logs",
   m: "/metrics",
   f: "/fleet",
+  p: "/probes",
 };
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -74,15 +80,20 @@ export default function AppLayout() {
   }, [navigate]);
 
   return (
-    <div className="app">
-      <Sidebar onOpenPalette={() => setPaletteOpen(true)} />
-      <main className="main">
-        <TopBar />
-        <div className="main-view">
-          <Outlet />
+    <TimeRangeProvider>
+      <InspectorProvider>
+        <div className="app">
+          <Sidebar onOpenPalette={() => setPaletteOpen(true)} />
+          <main className="main">
+            <TopBar />
+            <div className="main-view">
+              <Outlet />
+            </div>
+          </main>
+          <CommandPalette open={paletteOpen} onClose={closePalette} />
+          <InspectorDrawer />
         </div>
-      </main>
-      <CommandPalette open={paletteOpen} onClose={closePalette} />
-    </div>
+      </InspectorProvider>
+    </TimeRangeProvider>
   );
 }

@@ -16,8 +16,10 @@ import (
 	"github.com/rydzu/ainfra/doctor/internal/access"
 	"github.com/rydzu/ainfra/doctor/internal/auth"
 	"github.com/rydzu/ainfra/doctor/internal/config"
+	"github.com/rydzu/ainfra/doctor/internal/dashboards"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/query"
+	"github.com/rydzu/ainfra/doctor/internal/ruler"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
 	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
 	"github.com/rydzu/ainfra/doctor/internal/telemetry"
@@ -79,6 +81,34 @@ func main() {
 	svc.SetRulesURL(cfg.RulesURL)
 	if strings.TrimSpace(cfg.RulesURL) != "" {
 		log.Printf("recording rules UI enabled via %s", cfg.RulesURL)
+	}
+
+	// Shared Dashboards Store: MonoFS CAS when token is set, in-memory fallback for local dev.
+	{
+		var dashFS ruler.FileStore
+		if strings.TrimSpace(cfg.MonoFSFileToken) != "" {
+			dashClient, err := monofsstore.NewGRPCClient(ctx, monofsstore.ClientConfig{
+				RouterAddr:  cfg.MonoFSLogEngineAddr,
+				ClientID:    cfg.MonoFSClientID,
+				Token:       cfg.MonoFSFileToken,
+				PrincipalID: "doctor-query",
+				Role:        "doctor",
+				Writable:    true,
+			})
+			if err != nil {
+				log.Printf("dashboards: could not connect MonoFS file store: %v — using in-memory store", err)
+				dashFS = ruler.NewMemoryStore()
+			} else {
+				defer dashClient.Close()
+				dashFS = dashClient
+				log.Printf("dashboards: using MonoFS store at %s root %s", cfg.MonoFSLogEngineAddr, cfg.DashboardsStoreRoot)
+			}
+		} else {
+			dashFS = ruler.NewMemoryStore()
+			log.Printf("dashboards: DOCTOR_MONOFS_TOKEN unset — using in-memory store (presets always available)")
+		}
+		dashStore := dashboards.NewStore(dashFS, cfg.MonoFSFileToken, cfg.DashboardsStoreRoot)
+		svc.SetDashboardStore(dashStore)
 	}
 
 	// Repo-managed access policy: filter logs and traces per partition. The

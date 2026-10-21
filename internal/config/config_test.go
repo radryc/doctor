@@ -5,6 +5,27 @@ import (
 	"time"
 )
 
+func TestLoadRulesEnabledByDefault(t *testing.T) {
+	t.Setenv("DOCTOR_RULES_ENABLED", "")
+
+	cfg := LoadRules("doctor-rules")
+	if !cfg.Enabled {
+		t.Fatal("LoadRules() Enabled = false, want true by default")
+	}
+	if cfg.HTTPAddr != ":18081" {
+		t.Fatalf("HTTPAddr = %q, want :18081", cfg.HTTPAddr)
+	}
+}
+
+func TestLoadRulesHonorsDisableSwitch(t *testing.T) {
+	t.Setenv("DOCTOR_RULES_ENABLED", "false")
+
+	cfg := LoadRules("doctor-rules")
+	if cfg.Enabled {
+		t.Fatal("LoadRules() Enabled = true, want false when DOCTOR_RULES_ENABLED=false")
+	}
+}
+
 func TestLoadIngestUsesLowLatencyBufferDefaults(t *testing.T) {
 	t.Setenv("DOCTOR_PRIVACY_HMAC_KEY", "test-hmac-key")
 	t.Setenv("DOCTOR_TRACE_BUFFER_FLUSH_INTERVAL", "")

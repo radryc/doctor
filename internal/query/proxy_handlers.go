@@ -44,13 +44,70 @@ func (s *Service) handlePrometheusQueryRangeViaRouter(w http.ResponseWriter, r *
 	writePrometheusSuccess(w, data)
 }
 
-// handleProxyEndpoints lists the configured backends and their health.
+// handleProxyEndpoints lists the configured backends, fleet summary, and their health.
 func (s *Service) handleProxyEndpoints(w http.ResponseWriter, r *http.Request) {
-	endpoints := []proxy.EndpointInfo{}
-	if s.proxyRouter != nil {
-		endpoints = s.proxyRouter.Endpoints(r.Context())
+	if s.proxyRouter == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"endpoints": []proxy.EndpointInfo{}})
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"endpoints": endpoints})
+	q := r.URL.Query()
+	if q.Get("summary_only") == "1" || q.Get("summary_only") == "true" {
+		summary := s.proxyRouter.SummarizeEndpoints()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"summary":   summary,
+			"endpoints": []proxy.EndpointInfo{},
+		})
+		return
+	}
+
+	limitParam := strings.TrimSpace(q.Get("limit"))
+	cursorParam := strings.TrimSpace(q.Get("cursor"))
+	kindParam := strings.TrimSpace(q.Get("kind"))
+	statusParam := strings.TrimSpace(q.Get("status"))
+	regionParam := strings.TrimSpace(q.Get("region"))
+	accountParam := strings.TrimSpace(q.Get("account"))
+	clusterParam := strings.TrimSpace(q.Get("cluster"))
+	versionParam := strings.TrimSpace(q.Get("version"))
+	queryParam := strings.TrimSpace(q.Get("q"))
+	outliersParam := q.Get("outliers") == "1" || q.Get("outliers") == "true"
+	unhealthyParam := q.Get("unhealthy") == "1" || q.Get("unhealthy") == "true"
+	summaryParam := q.Get("summary") == "1" || q.Get("summary") == "true"
+
+	hasFilterOrPage := limitParam != "" || cursorParam != "" || kindParam != "" ||
+		statusParam != "" || regionParam != "" || accountParam != "" ||
+		clusterParam != "" || versionParam != "" || queryParam != "" ||
+		outliersParam || unhealthyParam
+
+	if hasFilterOrPage {
+		limit := 200
+		if limitParam != "" {
+			if parsed, err := strconv.Atoi(limitParam); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		page := s.proxyRouter.EndpointsPage(r.Context(), proxy.EndpointPageFilter{
+			Kind:      kindParam,
+			Status:    statusParam,
+			Region:    regionParam,
+			Account:   accountParam,
+			Cluster:   clusterParam,
+			Version:   versionParam,
+			Query:     queryParam,
+			Outliers:  outliersParam,
+			Unhealthy: unhealthyParam,
+			Limit:     limit,
+			Cursor:    cursorParam,
+		})
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
+
+	endpoints := s.proxyRouter.Endpoints(r.Context())
+	resp := map[string]any{"endpoints": endpoints}
+	if summaryParam {
+		resp["summary"] = s.proxyRouter.SummarizeEndpoints()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // writeProxyWarnings reports partial backend failures without failing the
@@ -82,9 +139,12 @@ func isAccessDenied(err error) bool {
 
 // logSearchPushdown converts the native log-search parameters into the reduced
 // LogQL form used by proxy upstreams.
-func logSearchPushdown(service, text string) proxy.LogPushdown {
+func logSearchPushdown(service, text, logGroup string) proxy.LogPushdown {
 	selector := `{service=~".+"}`
-	if service != "" {
+	switch {
+	case strings.TrimSpace(logGroup) != "":
+		selector = `{source="aws", aws_log_group="` + escapeLogQL(strings.TrimSpace(logGroup)) + `"}`
+	case service != "":
 		selector = `{service="` + escapeLogQL(service) + `"}`
 	}
 	pushdown := proxy.LogPushdown{Selector: selector}

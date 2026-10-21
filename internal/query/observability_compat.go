@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
@@ -228,6 +229,18 @@ func (s *Service) handleLokiLabelValues(w http.ResponseWriter, r *http.Request) 
 	}
 
 	values := make(map[string]struct{})
+	if labelName == "aws_log_group" && s.awsReady() {
+		for _, group := range proxy.AWSLogGroups(r.Context(), s.aws) {
+			part := proxy.LogGroupPartition(group)
+			if part == "" {
+				continue
+			}
+			if _, allowed := s.policyPartitionAllowed(r.Context(), "", "", part, policy.SignalLogs); !allowed {
+				continue
+			}
+			values[group] = struct{}{}
+		}
+	}
 	for _, record := range logs {
 		if value := lokiLabelsFromRecord(record)[labelName]; value != "" {
 			values[value] = struct{}{}

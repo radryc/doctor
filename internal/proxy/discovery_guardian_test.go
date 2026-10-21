@@ -144,3 +144,61 @@ func TestSignalsFromLabelsDefaults(t *testing.T) {
 		t.Fatalf("unknown kind signals = %#v, want nil", got)
 	}
 }
+
+func TestGuardianDiscoveryDeltaSyncUsesUpdatedSince(t *testing.T) {
+	var updatedSinceParams []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pushers":
+			since := r.URL.Query().Get("updated_since")
+			updatedSinceParams = append(updatedSinceParams, since)
+			if since == "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"pushers": []map[string]any{
+						{
+							"name":           "aws-1",
+							"observedApiUrl": "http://aws-1:19090",
+							"region":         "us-east-1",
+							"updatedAt":      "2026-10-21T10:00:00Z",
+							"labels":         map[string]string{"kind": "aws"},
+						},
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pushers": []map[string]any{
+					{
+						"name":           "aws-2",
+						"observedApiUrl": "http://aws-2:19090",
+						"region":         "eu-west-1",
+						"updatedAt":      "2026-10-21T10:01:00Z",
+						"labels":         map[string]string{"kind": "aws"},
+					},
+				},
+			})
+		case "/api/m2m/partitions":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	discovery := NewGuardianDiscovery(GuardianDiscoveryConfig{BaseURL: server.URL})
+	if err := discovery.Refresh(context.Background()); err != nil {
+		t.Fatalf("first Refresh: %v", err)
+	}
+	if len(discovery.Snapshot()) != 1 {
+		t.Fatalf("first Snapshot len = %d, want 1", len(discovery.Snapshot()))
+	}
+	if err := discovery.Refresh(context.Background()); err != nil {
+		t.Fatalf("second Refresh: %v", err)
+	}
+	if len(updatedSinceParams) != 2 || updatedSinceParams[0] != "" || updatedSinceParams[1] == "" {
+		t.Fatalf("updatedSinceParams = %#v, want empty first then non-empty delta cursor", updatedSinceParams)
+	}
+	if len(discovery.Snapshot()) != 2 {
+		t.Fatalf("merged Snapshot len = %d, want 2", len(discovery.Snapshot()))
+	}
+}

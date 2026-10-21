@@ -14,6 +14,7 @@ import (
 
 	"github.com/rydzu/ainfra/doctor/internal/buildinfo"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
+	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
 )
 
 func TestHandleGuardianHealthUsesLivePartitionFallbackWithoutRecentEvents(t *testing.T) {
@@ -426,6 +427,13 @@ func TestHandleLogServicesFiltersServicesByPartition(t *testing.T) {
 	}
 }
 
+func TestLogSearchPushdownUsesAWSLogGroup(t *testing.T) {
+	pushdown := logSearchPushdown("", "", "guardian/123/us-east-1/demo-build/web")
+	if !strings.Contains(pushdown.Selector, `source="aws"`) || !strings.Contains(pushdown.Selector, `aws_log_group="guardian/123/us-east-1/demo-build/web"`) {
+		t.Fatalf("selector = %q", pushdown.Selector)
+	}
+}
+
 func TestHandleLogSearchFiltersByPartition(t *testing.T) {
 	base := time.Now().UTC()
 	backend := &fakeLogEngineBackend{logs: []segment.LogRecord{
@@ -447,6 +455,37 @@ func TestHandleLogSearchFiltersByPartition(t *testing.T) {
 	}
 	if len(resp.Results) != 1 || resp.Results[0].Service != "doctor.query" {
 		t.Fatalf("results = %+v, want only doctor log", resp.Results)
+	}
+}
+
+func TestHandleLogServicesIncludesFilteredAWSLogGroups(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/aws/log-groups" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"log_groups": []string{
+			"guardian/123/us-east-1/demo-build/web",
+			"guardian/123/us-east-1/demo-deploy/api",
+		}})
+	}))
+	defer server.Close()
+	svc := &Service{defaultTenant: "default", logEngine: &fakeLogEngineBackend{}}
+	svc.SetAWSBackend(awsstore.NewClient(server.URL, ""))
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/services?tenant=default&include=aws&partition=demo-build", nil)
+	rec := httptest.NewRecorder()
+	svc.handleLogServices(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		LogGroups []string `json:"log_groups"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.LogGroups) != 1 || resp.LogGroups[0] != "guardian/123/us-east-1/demo-build/web" {
+		t.Fatalf("log groups = %v", resp.LogGroups)
 	}
 }
 

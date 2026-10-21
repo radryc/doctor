@@ -14,6 +14,7 @@ type fakeAWSClient struct {
 	lastLogQuery awsstore.LogQuery
 	metrics      []awsstore.MetricDescriptor
 	services     []awsstore.ServiceInfo
+	logGroups    []string
 }
 
 func (f *fakeAWSClient) Enabled() bool { return f.enabled }
@@ -24,6 +25,10 @@ func (f *fakeAWSClient) ListMetrics(context.Context, string, string) ([]awsstore
 
 func (f *fakeAWSClient) ListServices(context.Context) ([]awsstore.ServiceInfo, error) {
 	return f.services, nil
+}
+
+func (f *fakeAWSClient) ListLogGroups(context.Context) ([]string, error) {
+	return f.logGroups, nil
 }
 
 func (f *fakeAWSClient) QueryLogs(_ context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error) {
