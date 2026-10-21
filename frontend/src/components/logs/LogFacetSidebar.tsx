@@ -35,7 +35,7 @@ export default function LogFacetSidebar({ records, activeFilters, onInclude, onE
     for (const r of records) {
       bump("severity_text", normalizeSeverity(r.severity_text));
       bump("service", r.service ?? "");
-      bump("partition", r.partition ?? r.resource_attributes?.["guardian_partition"] ?? "");
+      bump("partition", r.partition ?? r.resource_attributes?.["guardian_partition"] ?? r.resource_attributes?.["guardian.partition"] ?? "");
       bump("intent", r.intent ?? "");
       bump("asset", r.asset ?? "");
 

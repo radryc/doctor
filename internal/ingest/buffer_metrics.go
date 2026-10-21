@@ -17,7 +17,7 @@ func RegisterBufferMetrics(traceBuffer *TraceBuffer, logBuffer *LogBuffer, metri
 		return nil, nil
 	}
 
-	meter := otel.Meter("doctor/ingest")
+	meter := otel.Meter("doctor.ingest")
 	pendingBatches, err := meter.Int64ObservableGauge(
 		"doctor.ingest.buffer.pending.batches",
 		metricapi.WithDescription("Current number of buffered batches waiting to flush, by signal."),

@@ -40,6 +40,7 @@ function logPartition(record: LogRecord): string {
   return (
     record.partition ||
     record.resource_attributes?.["guardian_partition"] ||
+    record.resource_attributes?.["guardian.partition"] ||
     record.resource_attributes?.["partition"] ||
     ""
   );

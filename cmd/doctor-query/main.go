@@ -40,8 +40,8 @@ func main() {
 		log.Fatal(err)
 	}
 	if telemetryHandle.Enabled() {
-		log.SetOutput(io.MultiWriter(os.Stderr, telemetry.NewStdLogWriter("doctor/stdlog")))
-		telemetry.EmitInfo(ctx, "doctor/query", "doctor query telemetry enabled")
+		log.SetOutput(io.MultiWriter(os.Stderr, telemetry.NewStdLogWriter("doctor.stdlog")))
+		telemetry.EmitInfo(ctx, "doctor.query", "doctor query telemetry enabled")
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -50,7 +50,7 @@ func main() {
 			}
 		}()
 	}
-	heartbeatHandle, err := telemetry.RegisterComponentHeartbeat("doctor/query")
+	heartbeatHandle, err := telemetry.RegisterComponentHeartbeat("doctor.query")
 	if err != nil {
 		log.Fatal(err)
 	}

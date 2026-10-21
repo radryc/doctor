@@ -42,7 +42,7 @@ func primeAcceptedIngestMetrics() {
 
 func ingestInstruments() (metricapi.Int64Counter, metricapi.Int64Counter) {
 	ingestMetricsOnce.Do(func() {
-		meter := otel.Meter("doctor/ingest")
+		meter := otel.Meter("doctor.ingest")
 		ingestRequestsAccepted, _ = meter.Int64Counter(
 			"doctor.ingest.requests.accepted",
 			metricapi.WithDescription("Total accepted ingest requests, by signal."),

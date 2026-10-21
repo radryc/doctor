@@ -227,7 +227,7 @@ falling back to partition summaries when no events are in the window.
 - `count by (__name__)` fast path served from the chunk series index.
 - Budgets: `DOCTOR_PROM_MAX_SAMPLES` (4M), `DOCTOR_PROM_MAX_SERIES` (100k),
   global `DOCTOR_PROM_GLOBAL_MAX_SAMPLES` (8M); exceeding → 422.
-- Bare range queries over `guardian_task_executions`/`guardian_result_executions`
+- Bare range queries over `guardian_pusher_task_executions`/`guardian_results_executions`
   are rejected unless aggregated.
 - Discovery scans only a 15-minute window.
 

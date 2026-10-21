@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/rydzu/ainfra/doctor/internal/identity"
 	"github.com/rydzu/ainfra/doctor/internal/privacy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
@@ -106,26 +107,26 @@ func FlattenMetrics(req *colmetricspb.ExportMetricsServiceRequest, tenant string
 				switch typed := metric.Data.(type) {
 				case *metricspb.Metric_Gauge:
 					for _, point := range typed.Gauge.GetDataPoints() {
-						out = append(out, numberPointRecord(base, "gauge", point.GetTimeUnixNano(), point.GetStartTimeUnixNano(), "", point.GetAttributes(), point))
+						out = append(out, normalizeMetricRecord(numberPointRecord(base, "gauge", point.GetTimeUnixNano(), point.GetStartTimeUnixNano(), "", point.GetAttributes(), point)))
 					}
 				case *metricspb.Metric_Sum:
 					temporality := typed.Sum.GetAggregationTemporality().String()
 					for _, point := range typed.Sum.GetDataPoints() {
-						out = append(out, numberPointRecord(base, "sum", point.GetTimeUnixNano(), point.GetStartTimeUnixNano(), temporality, point.GetAttributes(), point))
+						out = append(out, normalizeMetricRecord(numberPointRecord(base, "sum", point.GetTimeUnixNano(), point.GetStartTimeUnixNano(), temporality, point.GetAttributes(), point)))
 					}
 				case *metricspb.Metric_Histogram:
 					temporality := typed.Histogram.GetAggregationTemporality().String()
 					for _, point := range typed.Histogram.GetDataPoints() {
-						out = append(out, histogramPointRecords(base, temporality, point)...)
+						out = append(out, normalizeMetricRecords(histogramPointRecords(base, temporality, point))...)
 					}
 				case *metricspb.Metric_ExponentialHistogram:
 					temporality := typed.ExponentialHistogram.GetAggregationTemporality().String()
 					for _, point := range typed.ExponentialHistogram.GetDataPoints() {
-						out = append(out, exponentialHistogramPointRecords(base, temporality, point)...)
+						out = append(out, normalizeMetricRecords(exponentialHistogramPointRecords(base, temporality, point))...)
 					}
 				case *metricspb.Metric_Summary:
 					for _, point := range typed.Summary.GetDataPoints() {
-						out = append(out, summaryPointRecords(base, point)...)
+						out = append(out, normalizeMetricRecords(summaryPointRecords(base, point))...)
 					}
 				}
 			}
@@ -206,6 +207,90 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// normalizeMetricRecords applies the canonical identity to a batch of metric
+// points. Prometheus-scraped metrics carry guardian_* labels on the data point
+// instead of the resource, so storage must promote them to typed identity just
+// like OTLP-native metrics.
+func normalizeMetricRecords(records []segment.MetricPointRecord) []segment.MetricPointRecord {
+	for index := range records {
+		normalizeMetricRecordInPlace(&records[index])
+	}
+	return records
+}
+
+func normalizeMetricRecord(record segment.MetricPointRecord) segment.MetricPointRecord {
+	normalizeMetricRecordInPlace(&record)
+	return record
+}
+
+func normalizeMetricRecordInPlace(record *segment.MetricPointRecord) {
+	if record == nil {
+		return
+	}
+	attrs := mergeStringMaps(record.ResourceAttributes, record.Attributes)
+	partition := firstNonEmpty(
+		attrs["guardian.partition"],
+		attrs["guardian_partition"],
+		attrs["partition"],
+		record.Partition,
+		attrs["k8s.namespace.name"],
+		attrs["namespace"],
+	)
+	intent := firstNonEmpty(
+		attrs["guardian.intent"],
+		attrs["guardian_intent"],
+		attrs["intent"],
+		record.Intent,
+		attrs["app.kubernetes.io/component"],
+	)
+	asset := firstNonEmpty(
+		attrs["guardian.asset"],
+		attrs["guardian_asset"],
+		attrs["asset"],
+		record.Asset,
+		attrs["k8s.pod.name"],
+		attrs["k8s.container.name"],
+		attrs["app.kubernetes.io/instance"],
+	)
+	if partition != "" {
+		record.Partition = partition
+	}
+	if intent != "" {
+		record.Intent = intent
+	}
+	if asset != "" {
+		record.Asset = asset
+	}
+	if partition == "" || intent == "" || asset == "" {
+		return
+	}
+	canonical := identity.CanonicalServiceName(partition, intent, asset)
+	if canonical == "" {
+		return
+	}
+	if record.Service != "" && record.Service != canonical {
+		if record.Attributes == nil {
+			record.Attributes = make(map[string]string)
+		}
+		if _, exists := record.Attributes["service.alias"]; !exists {
+			record.Attributes["service.alias"] = record.Service
+		}
+	}
+	record.Service = canonical
+}
+
+func mergeStringMaps(maps ...map[string]string) map[string]string {
+	out := make(map[string]string)
+	for _, values := range maps {
+		for key, value := range values {
+			if value != "" {
+				out[key] = value
+			}
+		}
+	}
+	return out
 }
 
 func numberPointRecord(base metricBaseRecord, metricType string, ts, start uint64, temporality string, attrs []*commonpb.KeyValue, point *metricspb.NumberDataPoint) segment.MetricPointRecord {

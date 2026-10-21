@@ -44,7 +44,7 @@ func TestHandleHTTPTracesAcceptsOTLPJSONWithHexIDs(t *testing.T) {
 	    "scopeSpans": [{"spans": [{
 	      "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
 	      "spanId": "00f067aa0ba902b7",
-	      "name": "guardian.probe",
+	      "name": "guardian.probe.run",
 	      "kind": 1,
 	      "startTimeUnixNano": "1700000000000000000",
 	      "endTimeUnixNano": "1700000001000000000"

@@ -42,9 +42,12 @@ func TestCanonicalLabelsUnifySignals(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"service":            "doctor",
+		"service":            "doctor.query.doctor-query-abc",
+		"service_full":       "doctor.query.doctor-query-abc",
+		"service_alias":      "doctor",
 		"guardian_partition": "doctor",
 		"guardian_intent":    "query",
+		"guardian_asset":     "doctor-query-abc",
 		"k8s_pod_name":       "doctor-query-abc",
 		"k8s_namespace_name": "doctor",
 		"source":             "doctor",

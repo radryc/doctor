@@ -185,7 +185,7 @@ func buildResourceAttributes(cfg Config) []attribute.KeyValue {
 	info := buildinfo.Current()
 	attrs := []attribute.KeyValue{
 		attribute.String("service.name", cfg.ServiceName),
-		attribute.String("doctor.component", cfg.Component),
+		attribute.String("guardian.component", cfg.Component),
 	}
 	if info.Version != "" {
 		attrs = append(attrs, attribute.String("service.version", info.Version))
