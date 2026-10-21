@@ -212,8 +212,8 @@ func TestFlattenMetricsInfersTelemetryIdentityFromCommonResourceLabels(t *testin
 		t.Fatalf("record count = %d, want 1", len(records))
 	}
 	record := records[0]
-	if record.Service != "payments-api" {
-		t.Fatalf("service = %q, want %q", record.Service, "payments-api")
+	if record.Service != "checkout.backend.payments-api-7c9f4d8b7b-kzq9p" {
+		t.Fatalf("service = %q, want %q", record.Service, "checkout.backend.payments-api-7c9f4d8b7b-kzq9p")
 	}
 	if record.Partition != "checkout" {
 		t.Fatalf("partition = %q, want %q", record.Partition, "checkout")
@@ -223,5 +223,67 @@ func TestFlattenMetricsInfersTelemetryIdentityFromCommonResourceLabels(t *testin
 	}
 	if record.Asset != "payments-api-7c9f4d8b7b-kzq9p" {
 		t.Fatalf("asset = %q, want %q", record.Asset, "payments-api-7c9f4d8b7b-kzq9p")
+	}
+}
+
+func TestFlattenMetricsPromotesScrapedGuardianLabels(t *testing.T) {
+	t.Helper()
+
+	baseTime := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	req := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{{
+			Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
+				{
+					Key:   "service.name",
+					Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "guardiand"}},
+				},
+				{
+					Key:   "k8s.namespace.name",
+					Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "guardian"}},
+				},
+			}},
+			ScopeMetrics: []*metricspb.ScopeMetrics{{
+				Metrics: []*metricspb.Metric{{
+					Name: "monofs_server_ops_total",
+					Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{
+						AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+						DataPoints: []*metricspb.NumberDataPoint{{
+							TimeUnixNano:      uint64(baseTime.UnixNano()),
+							StartTimeUnixNano: uint64(baseTime.Add(-time.Minute).UnixNano()),
+							Value:             &metricspb.NumberDataPoint_AsInt{AsInt: 1},
+							Attributes: []*commonpb.KeyValue{
+								{
+									Key:   "guardian_partition",
+									Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "monofs"}},
+								},
+								{
+									Key:   "guardian_intent",
+									Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "monofs-storage"}},
+								},
+								{
+									Key:   "guardian_asset",
+									Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "node-a"}},
+								},
+							},
+						}},
+					}},
+				}},
+			}},
+		}},
+	}
+
+	records := FlattenMetrics(req, "tenant-a", nil)
+	if len(records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(records))
+	}
+	record := records[0]
+	if record.Service != "monofs.monofs-storage.node-a" {
+		t.Fatalf("service = %q, want %q", record.Service, "monofs.monofs-storage.node-a")
+	}
+	if record.Partition != "monofs" || record.Intent != "monofs-storage" || record.Asset != "node-a" {
+		t.Fatalf("identity = %s/%s/%s", record.Partition, record.Intent, record.Asset)
+	}
+	if record.Attributes["service.alias"] != "guardiand" {
+		t.Fatalf("service.alias = %q, want guardiand", record.Attributes["service.alias"])
 	}
 }

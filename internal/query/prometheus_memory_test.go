@@ -103,7 +103,7 @@ func TestPrometheusQueryWithinBudgetSucceeds(t *testing.T) {
 // instead of scanning every metric.
 func TestPrometheusRegexNameQueryScopesStorageByMetric(t *testing.T) {
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	backend := &floodBackend{name: "guardian_result_executions", samples: 3, ts: base}
+	backend := &floodBackend{name: "guardian_results_executions", samples: 3, ts: base}
 	svc := &Service{defaultTenant: "default", logEngine: backend}
 
 	req := httptest.NewRequest(
@@ -133,7 +133,7 @@ func TestMetricPointLabelsDropCorrelationIDs(t *testing.T) {
 	point := segment.MetricPointRecord{
 		Service:    "guardian",
 		Partition:  "doctor",
-		MetricName: "guardian.task.executions",
+		MetricName: "guardian.pusher.task.executions",
 		Attributes: map[string]string{
 			"guardian.task.correlation_id": "corr-123",
 			"guardian.partition":           "doctor",

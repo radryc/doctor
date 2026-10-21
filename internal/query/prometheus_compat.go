@@ -1055,7 +1055,7 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 // (sum/avg/max/... over rate/increase) are allowed because the operator
 // dashboards depend on them; bare selectors stay blocked.
 func isHighCardinalityCumulativeRangeQuery(queryString string) bool {
-	if !strings.Contains(queryString, "guardian_task_executions") && !strings.Contains(queryString, "guardian_result_executions") {
+	if !strings.Contains(queryString, "guardian_pusher_task_executions") && !strings.Contains(queryString, "guardian_results_executions") {
 		return false
 	}
 	lower := strings.Join(strings.Fields(strings.ToLower(queryString)), " ")

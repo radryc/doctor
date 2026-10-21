@@ -34,8 +34,8 @@ const METRIC_HELPERS = [
   {
     group: "Guardian runtime",
     items: [
-      { name: "guardian_runtime_loads_total", hint: "Partition runtime reloads by source." },
-      { name: "guardian_runtime_intent_states_loaded_total", hint: "Intent states materialized during runtime loads." },
+      { name: "guardian_runtime_partition_loads_total", hint: "Partition runtime reloads by source." },
+      { name: "guardian_runtime_partition_intent_states_loaded_total", hint: "Intent states materialized during runtime loads." },
       { name: "guardian_dispatcher_writes_total", hint: "Dispatcher writes by partition/intent/result." },
       { name: "guardian_dispatcher_skipped_writes_total", hint: "Writes skipped because output did not change." },
       { name: "guardian_dispatcher_partition_status_current", hint: "Current partition status gauge." },
@@ -45,14 +45,14 @@ const METRIC_HELPERS = [
   {
     group: "MonoFS router and storage",
     items: [
-      { name: "monofs_ops_total", hint: "Server operations by operation type." },
-      { name: "monofs_read_bytes_total", hint: "Bytes read from MonoFS server paths." },
-      { name: "monofs_write_bytes_total", hint: "Bytes written through MonoFS server paths." },
-      { name: "monofs_guardian_upsert_files_total", hint: "Guardian upsert file count through the router." },
-      { name: "monofs_guardian_upsert_bytes_total", hint: "Guardian upsert bytes through the router." },
-      { name: "monofs_native_read_ops_total", hint: "Native router read operations." },
-      { name: "monofs_query_duration_seconds", hint: "Log engine query latency histogram." },
-      { name: "monofs_query_returned_records_total", hint: "Records returned by log engine queries." },
+      { name: "monofs_server_ops_total", hint: "Server operations by operation type." },
+      { name: "monofs_server_read_bytes_total", hint: "Bytes read from MonoFS server paths." },
+      { name: "monofs_server_ingest_bytes_total", hint: "Bytes written through MonoFS server paths." },
+      { name: "monofs_router_guardian_upsert_files_total", hint: "Guardian upsert file count through the router." },
+      { name: "monofs_router_guardian_upsert_bytes_total", hint: "Guardian upsert bytes through the router." },
+      { name: "monofs_router_native_read_ops_total", hint: "Native router read operations." },
+      { name: "monofs_logengine_query_duration_seconds", hint: "Log engine query latency histogram." },
+      { name: "monofs_logengine_query_returned_records_total", hint: "Records returned by log engine queries." },
     ],
   },
   {
@@ -71,12 +71,12 @@ const METRIC_HELPERS = [
 const PREFERRED_METRIC_NAMES: string[] = [
   // High-frequency metrics first: they are the most likely to produce a
   // graphable series in a short default window.
-  "guardian_result_executions",
-  "guardian_reconcile_partition_executions",
-  "guardian_task_executions",
+  "guardian_results_executions",
+  "guardian_reconciler_partition_executions",
+  "guardian_pusher_task_executions",
   "guardian_dispatcher_writes_total",
   "monofs_server_ops_total",
-  "monofs_router_ingest_bytes_total",
+  "monofs_router_guardian_upsert_bytes_total",
   "k8s_top_pod_cpu_usage_millicores",
   "doctor_ingest_requests_accepted",
   ...METRIC_HELPERS.flatMap((group) => group.items.map((item) => item.name)),

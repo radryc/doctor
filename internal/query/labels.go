@@ -2,6 +2,7 @@ package query
 
 import (
 	promlabels "github.com/prometheus/prometheus/model/labels"
+	"github.com/rydzu/ainfra/doctor/internal/identity"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 )
 
@@ -11,14 +12,21 @@ import (
 // identically regardless of the source record type.
 
 const (
-	labelService      = "service"
-	labelServiceFull  = "service_full"
-	labelServiceAlias = "service_alias"
-	labelTenant       = "tenant"
-	labelSource       = "source"
-	labelPartition    = "guardian_partition"
-	labelIntent       = "guardian_intent"
-	labelAsset        = "guardian_asset"
+	labelService        = "service"
+	labelServiceFull    = "service_full"
+	labelServiceAlias   = "service_alias"
+	labelServiceName    = "service_name"
+	labelTenant         = "tenant"
+	labelSource         = "source"
+	labelPartition      = "guardian_partition"
+	labelIntent         = "guardian_intent"
+	labelAsset          = "guardian_asset"
+	labelShortPartition = "partition"
+	labelShortIntent    = "intent"
+	labelShortAsset     = "asset"
+
+	// MaxServiceNameLength mirrors Guardian's canonical identity cap.
+	MaxServiceNameLength = identity.MaxServiceNameLength
 
 	sourceDoctor = "doctor"
 
@@ -65,20 +73,20 @@ func identityFromAttributes(attrs map[string]string) (partition, intent, asset s
 	partition = firstNonEmpty(
 		attrs[attrGuardianPartition],
 		attrs[labelPartition],
-		attrs["partition"],
+		attrs[labelShortPartition],
 		attrs[attrK8sNamespace],
 		attrs["namespace"],
 	)
 	intent = firstNonEmpty(
 		attrs[attrGuardianIntent],
 		attrs[labelIntent],
-		attrs["intent"],
+		attrs[labelShortIntent],
 		attrs[attrAppComponent],
 	)
 	asset = firstNonEmpty(
 		attrs[attrGuardianAsset],
 		attrs[labelAsset],
-		attrs["asset"],
+		attrs[labelShortAsset],
 		attrs[attrK8sPod],
 		attrs[attrK8sContainer],
 		attrs[attrAppInstance],
@@ -86,38 +94,52 @@ func identityFromAttributes(attrs map[string]string) (partition, intent, asset s
 	return partition, intent, asset
 }
 
+// canonicalServiceName is kept local for readability at call sites; the
+// implementation lives in the shared identity package so ingest and query
+// produce exactly the same name.
+func canonicalServiceName(partition, intent, asset string) string {
+	return identity.CanonicalServiceName(partition, intent, asset)
+}
+
 // lokiLabelAllowlist is the curated set of low-cardinality labels exposed as
 // Loki stream labels. Point attributes outside this set stay queryable via the
 // log body / line filters but do not fragment streams.
 var lokiLabelAllowlist = map[string]struct{}{
-	labelService:         {},
-	labelServiceFull:     {},
-	labelServiceAlias:    {},
-	labelTenant:          {},
-	labelSource:          {},
-	labelPartition:       {},
-	labelIntent:          {},
-	labelAsset:           {},
-	"guardian_cluster":   {},
-	"guardian_pusher":    {},
-	"guardian_provider":  {},
-	"guardian_account":   {},
-	"guardian_region":    {},
-	"k8s_cluster_name":   {},
-	"pusher":             {},
-	"provider":           {},
-	"level":              {},
-	"trace_id":           {},
-	"span_id":            {},
-	"k8s_namespace_name": {},
-	"k8s_pod_name":       {},
-	"k8s_container_name": {},
-	"k8s_node_name":      {},
-	"guardian_component": {},
-	"aws_log_group":      {},
-	"aws_log_stream":     {},
-	"aws_region":         {},
-	"aws_account":        {},
+	labelService:            {},
+	labelServiceFull:        {},
+	labelServiceAlias:       {},
+	labelTenant:             {},
+	labelSource:             {},
+	labelPartition:          {},
+	labelIntent:             {},
+	labelAsset:              {},
+	"guardian_cluster":      {},
+	"guardian_pusher":       {},
+	"guardian_provider":     {},
+	"guardian_account":      {},
+	"guardian_region":       {},
+	"k8s_cluster_name":      {},
+	"pusher":                {},
+	"provider":              {},
+	"level":                 {},
+	"trace_id":              {},
+	"span_id":               {},
+	"k8s_namespace_name":    {},
+	"k8s_pod_name":          {},
+	"k8s_container_name":    {},
+	"k8s_node_name":         {},
+	"guardian_component":    {},
+	"guardian_probe_name":   {},
+	"guardian_probe_type":   {},
+	"guardian_probe_mode":   {},
+	"guardian_probe_target": {},
+	"guardian_probe_path":   {},
+	"guardian_probe_id":     {},
+	"guardian_probe_status": {},
+	"aws_log_group":         {},
+	"aws_log_stream":        {},
+	"aws_region":            {},
+	"aws_account":           {},
 }
 
 func filterLokiLabels(labels map[string]string) map[string]string {
@@ -145,9 +167,6 @@ func traceIdentityLabels(span segment.TraceRecord) (partition, intent, asset str
 // identity; reserved keys are never overwritten by raw attributes.
 func canonicalLabels(service, tenant, partition, intent, asset string, attrs map[string]string) map[string]string {
 	labels := make(map[string]string, len(attrs)+6)
-	if service != "" {
-		labels[labelService] = service
-	}
 	if tenant != "" {
 		labels[labelTenant] = tenant
 	}
@@ -171,14 +190,32 @@ func canonicalLabels(service, tenant, partition, intent, asset string, attrs map
 	if asset != "" {
 		labels[labelAsset] = asset
 	}
+
 	fullName := firstNonEmpty(attrs[attrGuardianFullName], attrs[labelServiceFull])
-	if fullName == "" && partition != "" && intent != "" && asset != "" {
-		fullName = partition + "." + intent + "." + asset
+	canonical := canonicalServiceName(partition, intent, asset)
+	if fullName == "" {
+		fullName = canonical
 	}
 	if fullName != "" {
 		labels[labelServiceFull] = fullName
 	}
-	if alias := firstNonEmpty(attrs[attrServiceAlias], attrs["app.kubernetes.io/name"]); alias != "" {
+
+	// Canonical identity wins over producer-supplied service names. The
+	// producer name is retained as service_alias for dashboards and UI filters.
+	alias := firstNonEmpty(attrs[attrServiceAlias])
+	if canonical != "" {
+		if service != "" && service != canonical && alias == "" {
+			alias = service
+		}
+		service = canonical
+	}
+	if alias == "" {
+		alias = attrs["app.kubernetes.io/name"]
+	}
+	if service != "" {
+		labels[labelService] = service
+	}
+	if alias != "" && alias != service {
 		labels[labelServiceAlias] = alias
 	}
 
@@ -191,7 +228,8 @@ func canonicalLabels(service, tenant, partition, intent, asset string, attrs map
 			continue
 		}
 		switch normalized {
-		case promlabels.MetricName, labelService, labelServiceFull, labelServiceAlias, labelTenant, labelSource, labelPartition, labelIntent, labelAsset:
+		case promlabels.MetricName, labelService, labelServiceFull, labelServiceAlias, labelServiceName, labelTenant, labelSource,
+			labelPartition, labelIntent, labelAsset, labelShortPartition, labelShortIntent, labelShortAsset:
 			continue
 		}
 		labels[normalized] = value

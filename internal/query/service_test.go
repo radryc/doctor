@@ -931,7 +931,7 @@ func TestHandlePrometheusQueryRangeRejectsRawGuardianCumulativeTotals(t *testing
 
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/api/v1/query_range?tenant=default&query=guardian_task_executions&start="+url.QueryEscape(base.Add(-12*time.Hour).Format(time.RFC3339))+"&end="+url.QueryEscape(base.Format(time.RFC3339))+"&step=15s",
+		"/api/v1/query_range?tenant=default&query=guardian_pusher_task_executions&start="+url.QueryEscape(base.Add(-12*time.Hour).Format(time.RFC3339))+"&end="+url.QueryEscape(base.Format(time.RFC3339))+"&step=15s",
 		nil,
 	)
 	rec := httptest.NewRecorder()
@@ -955,7 +955,7 @@ func TestHandlePrometheusQueryRangeAllowsAggregatedGuardianCumulativeTotals(t *t
 
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/api/v1/query_range?tenant=default&query=sum%20by%20(guardian_operation)%20(guardian_task_executions)&start="+url.QueryEscape(base.Add(-12*time.Hour).Format(time.RFC3339))+"&end="+url.QueryEscape(base.Format(time.RFC3339))+"&step=15s",
+		"/api/v1/query_range?tenant=default&query=sum%20by%20(guardian_operation)%20(guardian_pusher_task_executions)&start="+url.QueryEscape(base.Add(-12*time.Hour).Format(time.RFC3339))+"&end="+url.QueryEscape(base.Format(time.RFC3339))+"&step=15s",
 		nil,
 	)
 	rec := httptest.NewRecorder()
@@ -978,7 +978,7 @@ func TestHandlePrometheusQueryRangePreservesMultipleLabels(t *testing.T) {
 				Service:    "doctor",
 				MetricName: "doctor_component_up",
 				Timestamp:  base.Add(-1 * time.Minute),
-				Attributes: map[string]string{"doctor_component": "doctor-ingest", "service_name": "doctor"},
+				Attributes: map[string]string{"guardian_component": "doctor-ingest"},
 				HasValue:   true,
 				Value:      1,
 			},
@@ -987,7 +987,7 @@ func TestHandlePrometheusQueryRangePreservesMultipleLabels(t *testing.T) {
 				Service:    "doctor",
 				MetricName: "doctor_component_up",
 				Timestamp:  base,
-				Attributes: map[string]string{"doctor_component": "doctor-ingest", "service_name": "doctor"},
+				Attributes: map[string]string{"guardian_component": "doctor-ingest"},
 				HasValue:   true,
 				Value:      1,
 			},
@@ -996,7 +996,7 @@ func TestHandlePrometheusQueryRangePreservesMultipleLabels(t *testing.T) {
 				Service:    "doctor",
 				MetricName: "doctor_component_up",
 				Timestamp:  base.Add(-1 * time.Minute),
-				Attributes: map[string]string{"doctor_component": "doctor-query", "service_name": "doctor"},
+				Attributes: map[string]string{"guardian_component": "doctor-query"},
 				HasValue:   true,
 				Value:      1,
 			},
@@ -1005,7 +1005,7 @@ func TestHandlePrometheusQueryRangePreservesMultipleLabels(t *testing.T) {
 				Service:    "doctor",
 				MetricName: "doctor_component_up",
 				Timestamp:  base,
-				Attributes: map[string]string{"doctor_component": "doctor-query", "service_name": "doctor"},
+				Attributes: map[string]string{"guardian_component": "doctor-query"},
 				HasValue:   true,
 				Value:      1,
 			},
@@ -1015,7 +1015,7 @@ func TestHandlePrometheusQueryRangePreservesMultipleLabels(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/api/v1/query_range?tenant=default&query=sum%20by%20(service%2Cdoctor_component)%20(doctor_component_up)&start="+url.QueryEscape(base.Add(-2*time.Minute).Format(time.RFC3339))+"&end="+url.QueryEscape(base.Format(time.RFC3339))+"&step=30s",
+		"/api/v1/query_range?tenant=default&query=sum%20by%20(service%2Cguardian_component)%20(doctor_component_up)&start="+url.QueryEscape(base.Add(-2*time.Minute).Format(time.RFC3339))+"&end="+url.QueryEscape(base.Format(time.RFC3339))+"&step=30s",
 		nil,
 	)
 	rec := httptest.NewRecorder()
@@ -1052,8 +1052,8 @@ func TestHandlePrometheusQueryRangePreservesMultipleLabels(t *testing.T) {
 		if got := series.Metric["service"]; got != "doctor" {
 			t.Fatalf("service label = %q, want doctor", got)
 		}
-		if got := series.Metric["doctor_component"]; got == "" {
-			t.Fatalf("doctor_component label missing in %#v", series.Metric)
+		if got := series.Metric["guardian_component"]; got == "" {
+			t.Fatalf("guardian_component label missing in %#v", series.Metric)
 		}
 		if _, ok := series.Metric["__name__"]; ok {
 			t.Fatalf("aggregated series unexpectedly retained __name__ in %#v", series.Metric)
