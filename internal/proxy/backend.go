@@ -9,6 +9,7 @@ package proxy
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -186,13 +187,9 @@ func (b Backend) Mode(signal Signal) Mode {
 
 // SortBackends orders backends deterministically: priority first, then name.
 func SortBackends(backends []Backend) {
-	// Insertion sort keeps the helper dependency-free and stable for the small
-	// slices it is used with; the registry sorts larger slices on load.
-	for i := 1; i < len(backends); i++ {
-		for j := i; j > 0 && backendLess(backends[j], backends[j-1]); j-- {
-			backends[j], backends[j-1] = backends[j-1], backends[j]
-		}
-	}
+	sort.SliceStable(backends, func(i, j int) bool {
+		return backendLess(backends[i], backends[j])
+	})
 }
 
 func backendLess(a, b Backend) bool {

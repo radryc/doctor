@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +22,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -210,7 +213,8 @@ func (s *Service) handleHTTPTraces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req coltracepb.ExportTraceServiceRequest
-	if err := proto.Unmarshal(raw, &req); err != nil {
+	jsonBody, err := unmarshalOTLP(r, raw, &req)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -218,8 +222,7 @@ func (s *Service) handleHTTPTraces(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), httpIngestStatus(err))
 		return
 	}
-	resp := &coltracepb.ExportTraceServiceResponse{}
-	writeProto(w, http.StatusAccepted, resp)
+	writeOTLPResponse(w, http.StatusAccepted, jsonBody, &coltracepb.ExportTraceServiceResponse{})
 }
 
 func (s *Service) handleHTTPLogs(w http.ResponseWriter, r *http.Request) {
@@ -233,7 +236,8 @@ func (s *Service) handleHTTPLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req collogspb.ExportLogsServiceRequest
-	if err := proto.Unmarshal(raw, &req); err != nil {
+	jsonBody, err := unmarshalOTLP(r, raw, &req)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -241,8 +245,7 @@ func (s *Service) handleHTTPLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), httpIngestStatus(err))
 		return
 	}
-	resp := &collogspb.ExportLogsServiceResponse{}
-	writeProto(w, http.StatusAccepted, resp)
+	writeOTLPResponse(w, http.StatusAccepted, jsonBody, &collogspb.ExportLogsServiceResponse{})
 }
 
 func (s *Service) handleHTTPMetrics(w http.ResponseWriter, r *http.Request) {
@@ -256,7 +259,8 @@ func (s *Service) handleHTTPMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req colmetricspb.ExportMetricsServiceRequest
-	if err := proto.Unmarshal(raw, &req); err != nil {
+	jsonBody, err := unmarshalOTLP(r, raw, &req)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -264,8 +268,7 @@ func (s *Service) handleHTTPMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), httpIngestStatus(err))
 		return
 	}
-	resp := &colmetricspb.ExportMetricsServiceResponse{}
-	writeProto(w, http.StatusAccepted, resp)
+	writeOTLPResponse(w, http.StatusAccepted, jsonBody, &colmetricspb.ExportMetricsServiceResponse{})
 }
 
 func (s *Service) handleGuardianEvents(w http.ResponseWriter, r *http.Request) {
@@ -313,6 +316,90 @@ func writeProto(w http.ResponseWriter, statusCode int, msg proto.Message) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(payload)
+}
+
+// isJSONOTLP reports whether the request uses the OTLP/HTTP JSON encoding.
+// Guardian pushers (including synthetic probes) send application/json, while
+// Grafana/Collector typically send application/x-protobuf.
+func isJSONOTLP(r *http.Request) bool {
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	return strings.Contains(contentType, "json")
+}
+
+func unmarshalOTLP(r *http.Request, raw []byte, msg proto.Message) (bool, error) {
+	if isJSONOTLP(r) {
+		raw = normalizeOTLPJSONIDs(raw)
+		return true, protojson.UnmarshalOptions{DiscardUnknown: true}.Unmarshal(raw, msg)
+	}
+	return false, proto.Unmarshal(raw, msg)
+}
+
+// normalizeOTLPJSONIDs rewrites the hex-encoded trace/span IDs used by the
+// OTLP/JSON specification into the base64 form expected by protojson. Guardian
+// pushers emit hex IDs (for example "traceId": "4bf9…"), while protojson's
+// generic bytes mapping only accepts base64.
+func normalizeOTLPJSONIDs(raw []byte) []byte {
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return raw
+	}
+	if !rewriteOTLPIDs(payload) {
+		return raw
+	}
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return raw
+	}
+	return normalized
+}
+
+func rewriteOTLPIDs(value any) bool {
+	changed := false
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			switch key {
+			case "traceId", "trace_id", "spanId", "span_id", "parentSpanId", "parent_span_id":
+				encoded, ok := child.(string)
+				if !ok || encoded == "" {
+					continue
+				}
+				decoded, err := hex.DecodeString(encoded)
+				if err != nil {
+					// Already base64 (or another accepted encoding).
+					continue
+				}
+				node[key] = base64.StdEncoding.EncodeToString(decoded)
+				changed = true
+			default:
+				if rewriteOTLPIDs(child) {
+					changed = true
+				}
+			}
+		}
+	case []any:
+		for _, child := range node {
+			if rewriteOTLPIDs(child) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func writeOTLPResponse(w http.ResponseWriter, statusCode int, jsonBody bool, msg proto.Message) {
+	if !jsonBody {
+		writeProto(w, statusCode, msg)
+		return
+	}
+	payload, err := protojson.Marshal(msg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(payload)
 }

@@ -57,6 +57,7 @@ export interface TraceSummary {
   span_count: number;
   min_time: string;
   max_time: string;
+  duration_ms?: number;
 }
 
 export interface RecentTracesResponse {
@@ -87,6 +88,7 @@ export interface LogSearchResponse {
 export interface LogServicesResponse {
   services: string[];
   partitions: string[];
+  log_groups?: string[];
 }
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
@@ -274,6 +276,177 @@ export type GuardianOverview = {
     lastReconciledAt: string;
   }>;
 };
+
+// ── Proxy Endpoints ──────────────────────────────────────────────────────────
+export interface ProxyEndpointSummary {
+  total: number;
+  healthy: number;
+  unhealthy: number;
+  byKind?: Record<string, number>;
+  byStatus?: Record<string, number>;
+  byRegion?: Record<string, number>;
+  byAccount?: Record<string, number>;
+  byCluster?: Record<string, number>;
+  byVersion?: Record<string, number>;
+}
+
+export interface ProxyEndpointInfo {
+  name: string;
+  kind: string;
+  signals: string[];
+  ownersPath?: string;
+  origin?: string;
+  public?: boolean;
+  healthy?: boolean;
+  allowed?: boolean;
+  resolver?: string;
+  reason?: string;
+  provider?: string;
+  version?: string;
+  cluster?: string;
+  account?: string;
+  region?: string;
+  capabilities?: string[];
+  status?: string;
+  lastHeartbeat?: string;
+  // Optional UI-facing fields retained for forward compatibility with older
+  // Doctor responses.
+  health?: "healthy" | "degraded" | "offline" | string;
+  circuit_open?: boolean;
+  latency_ms?: number;
+  policy?: string;
+}
+
+export interface ProxyEndpointsResponse {
+  endpoints: ProxyEndpointInfo[];
+  summary?: ProxyEndpointSummary;
+  nextCursor?: string;
+  totalMatched?: number;
+}
+
+// ── Guardian Synthetic Probes ───────────────────────────────────────────────
+export interface ProbeResult {
+  probeID: string;
+  service: string;
+  fullName?: string;
+  pusher: string;
+  cluster?: string;
+  partition: string;
+  intent: string;
+  asset: string;
+  name: string;
+  type: string;
+  mode: string;
+  target: string;
+  status: string;
+  success: boolean;
+  durationMs: number;
+  statusCode?: number;
+  error?: string;
+  checkedAt: string;
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
+  consecutiveFailures: number;
+  path?: string;
+  labels?: Record<string, string>;
+}
+
+export interface ProbesResponse {
+  probes: ProbeResult[];
+}
+
+// ── Tempo search & TraceQL metrics ──────────────────────────────────────────
+export interface TempoSearchTrace {
+  traceID: string;
+  rootServiceName?: string;
+  rootTraceName?: string;
+  startTimeUnixNano?: string;
+  durationMs?: number;
+}
+
+export interface TempoSearchResponse {
+  traces: TempoSearchTrace[];
+}
+
+export interface TempoMetricLabelValue {
+  stringValue?: string;
+  intValue?: string;
+  doubleValue?: number;
+  boolValue?: boolean;
+}
+
+export interface TempoMetricLabel {
+  key: string;
+  value: TempoMetricLabelValue;
+}
+
+export interface TempoMetricSample {
+  timestampMs: number;
+  value: number;
+}
+
+export interface TempoTimeSeries {
+  labels?: TempoMetricLabel[];
+  samples: TempoMetricSample[];
+}
+
+export interface TempoQueryRangeResponse {
+  series: TempoTimeSeries[];
+}
+
+// ── Loki range query ────────────────────────────────────────────────────────
+export interface LokiStream {
+  stream: Record<string, string>;
+  values: Array<[string, string]>;
+}
+
+export interface LokiMatrixSeries {
+  metric: Record<string, string>;
+  values: Array<[number, string]>;
+}
+
+export interface LokiQueryResponse {
+  status: "success" | "error";
+  data: {
+    resultType: "streams" | "matrix" | string;
+    result: LokiStream[] | LokiMatrixSeries[];
+  };
+}
+
+// ── Service Discovery ─────────────────────────────────────────────────────────
+export interface DiscoveredService {
+  /** Canonical service name (matches the backend `name` field). */
+  name: string;
+  /** @deprecated Compatibility alias emitted by older Doctor backends. */
+  service?: string;
+  full_name?: string;
+  truncated?: boolean;
+  partition?: string;
+  intent?: string;
+  asset?: string;
+  cluster?: string;
+  pusher?: string;
+  last_seen?: string;
+  has_metrics: boolean;
+  has_traces: boolean;
+  has_logs: boolean;
+  trace_count?: number;
+  log_count?: number;
+  error_rate?: number;
+  metric_names?: string[];
+  suggested_dashboards?: string[];
+  // Enriched by TraceQL RED metrics (populated client-side or by a separate query)
+  rps?: number;
+  latency_p95_ms?: number;
+  latency_p99_ms?: number;
+}
+
+export interface ServiceDiscoveryResponse {
+  services: DiscoveredService[];
+  total_services?: number;
+  window?: string;
+  discovered_at?: string;
+}
 
 // ── Recording Rules ─────────────────────────────────────────────────────────
 export interface RecordingRuleGroupSummary {

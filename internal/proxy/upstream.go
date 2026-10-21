@@ -139,6 +139,7 @@ type AWSClient interface {
 	Enabled() bool
 	ListMetrics(ctx context.Context, namespace, metric string) ([]awsstore.MetricDescriptor, error)
 	ListServices(ctx context.Context) ([]awsstore.ServiceInfo, error)
+	ListLogGroups(ctx context.Context) ([]string, error)
 	QueryLogs(ctx context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error)
 	QueryTraces(ctx context.Context, q awsstore.TraceQuery) ([]awsstore.TraceSummary, error)
 	GetTrace(ctx context.Context, traceID string) ([]awsstore.Span, error)

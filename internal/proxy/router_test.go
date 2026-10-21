@@ -273,6 +273,51 @@ func TestRouterMetricsLocalParseErrorFatal(t *testing.T) {
 	}
 }
 
+func TestLocalBackendFailuresDoNotMarkEndpointUnhealthy(t *testing.T) {
+	local := &fakeLogsUpstream{name: "doctor", err: errors.New("query failed")}
+	router := newTestRouter(t,
+		map[string]Backend{
+			"doctor": {Name: "doctor", Kind: KindMonoFS, Signals: []Signal{SignalLogs}, Policy: PolicyAlways},
+		},
+		map[string]Upstreams{"doctor": {Logs: local}},
+	)
+
+	for i := 0; i < breakerThreshold+2; i++ {
+		_, _, _ = router.Logs(context.Background(), "default", LogPushdown{Selector: `{service="api"}`}, time.Now().Add(-time.Hour), time.Now(), 10)
+	}
+	if got := local.calls; got != breakerThreshold+2 {
+		t.Fatalf("local calls = %d, want %d (local backend must not be circuit-broken)", got, breakerThreshold+2)
+	}
+	summary := router.SummarizeEndpoints()
+	if summary.Healthy != 1 || summary.Unhealthy != 0 {
+		t.Fatalf("summary = %#v, want the local backend healthy", summary)
+	}
+	endpoints := router.Endpoints(context.Background())
+	if len(endpoints) != 1 || !endpoints[0].Healthy {
+		t.Fatalf("endpoints = %#v, want local backend healthy", endpoints)
+	}
+	if endpoints[0].Health != "healthy" {
+		t.Fatalf("health = %q, want healthy", endpoints[0].Health)
+	}
+}
+
+func TestRemoteParseErrorsDoNotOpenBreaker(t *testing.T) {
+	remote := &fakeMetricsUpstream{name: "prom-a", err: &QueryError{Err: errors.New("bad query"), Parse: true}}
+	router := newTestRouter(t,
+		map[string]Backend{
+			"prom-a": {Name: "prom-a", Kind: KindPrometheus, BaseURL: "http://prom-a", Signals: []Signal{SignalMetrics}, Policy: PolicyAlways},
+		},
+		map[string]Upstreams{"prom-a": {Metrics: remote}},
+	)
+
+	for i := 0; i < breakerThreshold+2; i++ {
+		_, _, _ = router.MetricsInstant(context.Background(), "default", "up{", time.Now())
+	}
+	if got := remote.callCount(); got != breakerThreshold+2 {
+		t.Fatalf("remote calls = %d, want %d (parse errors must not open the breaker)", got, breakerThreshold+2)
+	}
+}
+
 func TestRouterLogsMergesLocalFirst(t *testing.T) {
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	local := &fakeLogsUpstream{name: "doctor", records: []segment.LogRecord{{
@@ -350,5 +395,50 @@ func TestRouterEndpointsIncludesExplicitBackends(t *testing.T) {
 	endpoints := router.Endpoints(context.Background())
 	if len(endpoints) != 1 || endpoints[0].Name != "doctor" || !endpoints[0].Healthy {
 		t.Fatalf("endpoints = %#v", endpoints)
+	}
+}
+
+func TestRouterPartitionPruningAndMaxFanoutCap(t *testing.T) {
+	u1 := &fakeMetricsUpstream{name: "aws-us", instant: vectorWithSeries("")}
+	u2 := &fakeMetricsUpstream{name: "aws-eu", instant: vectorWithSeries("")}
+	u3 := &fakeMetricsUpstream{name: "aws-ap", instant: vectorWithSeries("")}
+	router := NewRouter(RouterConfig{MaxFanoutBackends: 2}, nil)
+	backends := []struct {
+		b Backend
+		u *fakeMetricsUpstream
+	}{
+		{Backend{Name: "aws-us", Kind: KindAWS, Origin: "guardian-pusher", Region: "us-east-1", Account: "111", Signals: []Signal{SignalMetrics}, Policy: PolicyAlways}, u1},
+		{Backend{Name: "aws-eu", Kind: KindAWS, Origin: "guardian-pusher", Region: "eu-west-1", Account: "222", Signals: []Signal{SignalMetrics}, Policy: PolicyAlways}, u2},
+		{Backend{Name: "aws-ap", Kind: KindAWS, Origin: "guardian-pusher", Region: "ap-south-1", Account: "333", Signals: []Signal{SignalMetrics}, Policy: PolicyAlways}, u3},
+	}
+	for _, item := range backends {
+		if err := router.Register(item.b, Upstreams{Metrics: item.u}); err != nil {
+			t.Fatalf("Register(%s): %v", item.b.Name, err)
+		}
+	}
+
+	// 1. Scoped query by region="eu-west-1" should prune to ONLY aws-eu!
+	_, warnings, err := router.MetricsInstant(context.Background(), "default", `CPUUtilization{source="aws", region="eu-west-1"}`, time.Now())
+	if err != nil {
+		t.Fatalf("MetricsInstant scoped: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings on scoped query: %#v", warnings)
+	}
+	if u1.callCount() != 0 || u2.callCount() != 1 || u3.callCount() != 0 {
+		t.Fatalf("calls = (%d, %d, %d), want (0, 1, 0)", u1.callCount(), u2.callCount(), u3.callCount())
+	}
+
+	// 2. Unscoped query across 3 backends with MaxFanoutBackends=2 should cap at 2 and emit a router warning.
+	_, warnings, err = router.MetricsInstant(context.Background(), "default", `CPUUtilization{source="aws"}`, time.Now())
+	if err != nil {
+		t.Fatalf("MetricsInstant unscoped: %v", err)
+	}
+	if len(warnings) != 1 || warnings[0].Backend != "router" {
+		t.Fatalf("expected MaxFanoutBackends warning, got %#v", warnings)
+	}
+	page := router.EndpointsPage(context.Background(), EndpointPageFilter{Region: "eu-west-1", Limit: 10})
+	if page.TotalMatch != 1 || len(page.Endpoints) != 1 || page.Endpoints[0].Name != "aws-eu" || page.Summary.Total != 3 {
+		t.Fatalf("unexpected EndpointsPage: %+v", page)
 	}
 }

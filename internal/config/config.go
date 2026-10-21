@@ -127,6 +127,9 @@ type QueryConfig struct {
 	AccessPolicyInterval time.Duration
 	MonoFSFileToken      string
 	MonoFSClientID       string
+
+	// Dashboards
+	DashboardsStoreRoot string
 }
 
 // RulesConfig holds doctor-rules settings.
@@ -285,6 +288,7 @@ func LoadQuery(service string) QueryConfig {
 		AccessPolicyInterval:    envDuration("DOCTOR_ACCESS_POLICY_INTERVAL", 30*time.Second),
 		MonoFSFileToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
 		MonoFSClientID:          envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-query"),
+		DashboardsStoreRoot:     envString("DOCTOR_DASHBOARDS_STORE_ROOT", "/doctor/v1/dashboards"),
 	}
 }
 

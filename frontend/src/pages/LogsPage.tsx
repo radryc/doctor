@@ -1,10 +1,13 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Check, Copy, Link2 } from "lucide-react";
+import { Check, Copy, Link2, Download } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { useTimeRange } from "../context/TimeRangeContext";
 import { copyText } from "../lib/clipboard";
+import { downloadJSON } from "../lib/download";
 import LogHistogram from "../components/charts/LogHistogram";
+import LogFacetSidebar from "../components/logs/LogFacetSidebar";
 import type { LogRecord } from "../types/api";
 
 type SevKey = "ERR" | "WARN" | "INFO" | "DBG";
@@ -130,15 +133,12 @@ function LogRow({ record, onOpenTrace }: LogRowProps) {
   );
 }
 
-const PRESETS = [15, 60, 360, 1440];
 const SEV_PILLS: { key: SevKey; cls: string; label: string }[] = [
   { key: "ERR", cls: "sev-pill-err", label: "ERR" },
   { key: "WARN", cls: "sev-pill-warn", label: "WARN" },
   { key: "INFO", cls: "sev-pill-info", label: "INFO" },
   { key: "DBG", cls: "sev-pill-dbg", label: "DBG" },
 ];
-
-const PRESET_RANGES = [15, 60, 360, 1440];
 
 function parseSevParam(value: string | null): Record<SevKey, boolean> {
   const all = { ERR: true, WARN: true, INFO: true, DBG: true };
@@ -159,12 +159,12 @@ function parseSevParam(value: string | null): Record<SevKey, boolean> {
 export default function LogsPage() {
   const { config } = useConfig();
   const navigate = useNavigate();
+  const tr = useTimeRange();
   const [searchParams] = useSearchParams();
-  const initialRange = Number(searchParams.get("range"));
 
-  const [minutes, setMinutes] = useState(PRESET_RANGES.includes(initialRange) ? initialRange : 60);
   const [componentFilter, setComponentFilter] = useState("");
   const [partitionFilter, setPartitionFilter] = useState(searchParams.get("partition") ?? "");
+  const [logGroup, setLogGroup] = useState(searchParams.get("logGroup") ?? "");
   const [sevActive, setSevActive] = useState<Record<SevKey, boolean>>(() =>
     parseSevParam(searchParams.get("sev"))
   );
@@ -177,34 +177,47 @@ export default function LogsPage() {
   const [allRecords, setAllRecords] = useState<LogRecord[]>([]);
   const [services, setServices] = useState<string[]>([]);
   const [partitions, setPartitions] = useState<string[]>([]);
+  const [logGroups, setLogGroups] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("Searching…");
   const [copiedView, setCopiedView] = useState(false);
+  const [facetFilters, setFacetFilters] = useState<Record<string, string>>({});
+  const autoAwsTried = useRef(false);
 
-  // Load the service list for the selected partition (and the full partition
-  // list seen in telemetry). The backend returns all partitions even when the
-  // service list is filtered.
   useEffect(() => {
     api
-      .getLogServices(config.default_tenant, partitionFilter)
+      .getLogServices(config.default_tenant, partitionFilter, false, true)
       .then((d) => {
         setServices(d.services ?? []);
+        setLogGroups(d.log_groups ?? []);
         setPartitions((prev) => [...new Set([...prev, ...(d.partitions ?? [])])].sort());
       })
       .catch(() => {});
   }, [config.default_tenant, partitionFilter]);
 
-  // Do not keep a service selected after the partition changes and that
-  // service is no longer present in the filtered catalog.
   useEffect(() => {
     if (componentFilter && !services.includes(componentFilter)) {
       setComponentFilter("");
     }
   }, [componentFilter, services]);
 
-  // Keep the partition picker aligned with the records currently loaded. The
-  // discovery endpoint only scans a short window, so this fills in any
-  // partitions that appear in the selected range.
+  useEffect(() => {
+    if (logGroup && !logGroups.includes(logGroup)) {
+      setLogGroup("");
+    }
+  }, [logGroup, logGroups]);
+
+  useEffect(() => {
+    autoAwsTried.current = false;
+  }, [partitionFilter]);
+
+  useEffect(() => {
+    if (!autoAwsTried.current && !loading && !logGroup && allRecords.length === 0 && logGroups.length > 0) {
+      autoAwsTried.current = true;
+      setLogGroup(logGroups[0]);
+    }
+  }, [allRecords.length, loading, logGroup, logGroups]);
+
   useEffect(() => {
     const seen = new Set(partitions);
     for (const record of allRecords) {
@@ -217,24 +230,21 @@ export default function LogsPage() {
     }
   }, [allRecords, partitions]);
 
-  // Keep the page in sync when another view (command palette, dashboard
-  // triage links) navigates here with a different investigation context.
+  // Keep params in sync when navigated here from elsewhere.
   const paramKey = searchParams.toString();
   useEffect(() => {
-    const range = Number(searchParams.get("range"));
-    if (PRESET_RANGES.includes(range)) setMinutes(range);
     const nextQuery = searchParams.get("q") ?? "";
     setQueryInput(nextQuery);
     setQueryApplied(nextQuery);
     setPartitionFilter(searchParams.get("partition") ?? "");
+    setLogGroup(searchParams.get("logGroup") ?? "");
     setSevActive(parseSevParam(searchParams.get("sev")));
   }, [paramKey]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const to = new Date();
-      const from = new Date(to.getTime() - minutes * 60000);
+      const { from, to } = tr.resolve();
       const params = new URLSearchParams({
         tenant: config.default_tenant,
         from: from.toISOString(),
@@ -243,6 +253,7 @@ export default function LogsPage() {
       });
       if (queryApplied) params.set("q", queryApplied);
       if (partitionFilter) params.set("partition", partitionFilter);
+      if (logGroup) params.set("logGroup", logGroup);
       const data = await api.searchLogs(params);
       setAllRecords(data.results ?? []);
     } catch (err) {
@@ -250,11 +261,11 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [config.default_tenant, minutes, queryApplied, partitionFilter]);
+  }, [config.default_tenant, tr, queryApplied, partitionFilter, logGroup]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, tr.refreshTick]);
 
   useEffect(() => {
     if (!liveOn) return;
@@ -286,10 +297,15 @@ export default function LogsPage() {
       )
         return false;
     }
+    // Facet filters from sidebar
+    for (const [field, value] of Object.entries(facetFilters)) {
+      const rv = getFieldValue(r, field);
+      if (rv !== value) return false;
+    }
     return true;
   });
 
-  const rangeLabel = minutes < 60 ? `${minutes}m` : `${minutes / 60}h`;
+  const rangeLabel = tr.rangeString();
 
   useEffect(() => {
     if (loading) {
@@ -307,8 +323,8 @@ export default function LogsPage() {
 
   const copyViewLink = () => {
     const params = new URLSearchParams();
-    params.set("range", String(minutes));
     if (partitionFilter) params.set("partition", partitionFilter);
+    if (logGroup) params.set("logGroup", logGroup);
     if (queryApplied) params.set("q", queryApplied);
     const active = (Object.keys(sevActive) as SevKey[]).filter((key) => sevActive[key]);
     if (active.length > 0 && active.length < 4) params.set("sev", active.join(","));
@@ -320,6 +336,16 @@ export default function LogsPage() {
     });
   };
 
+  const handleFacetInclude = (field: string, value: string) => {
+    setFacetFilters((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleFacetExclude = (field: string, value: string) => {
+    // Add a negated query fragment to textFilter
+    setQueryInput((q) => q ? `${q} AND NOT ${field}="${value}"` : `NOT ${field}="${value}"`);
+    setQueryApplied((q) => q ? `${q} AND NOT ${field}="${value}"` : `NOT ${field}="${value}"`);
+  };
+
   return (
     <div className="tab-panel">
       <div className="panel-header">
@@ -328,17 +354,6 @@ export default function LogsPage() {
           <p>{status}</p>
         </div>
         <div className="xp-toolbar">
-          <div className="xp-presets">
-            {PRESETS.map((m) => (
-              <button
-                key={m}
-                className={"xp-preset" + (minutes === m ? " xp-active" : "")}
-                onClick={() => setMinutes(m)}
-              >
-                {m < 60 ? `${m}m` : `${m / 60}h`}
-              </button>
-            ))}
-          </div>
           <label className="filter-label">
             Partition
             <select
@@ -362,6 +377,24 @@ export default function LogsPage() {
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
+          {logGroups.length > 0 && (
+            <label className="filter-label">
+              CloudWatch log group
+              <select
+                className="xp-select"
+                value={logGroup}
+                onChange={(e) => {
+                  setLogGroup(e.target.value);
+                  if (e.target.value) setComponentFilter("");
+                }}
+              >
+                <option value="">All local logs</option>
+                {logGroups.map((group) => (
+                  <option key={group} value={group}>{group}</option>
+                ))}
+              </select>
+            </label>
+          )}
           <div className="sev-filter">
             {SEV_PILLS.map(({ key, cls, label }) => (
               <button
@@ -391,6 +424,13 @@ export default function LogsPage() {
           </button>
           <button
             className="xp-live-btn"
+            onClick={() => downloadJSON(filtered, "logs.json")}
+            title="Download filtered logs as JSON"
+          >
+            <Download size={11} /> Download
+          </button>
+          <button
+            className="xp-live-btn"
             onClick={copyViewLink}
             title="Copy a shareable link to this log view"
           >
@@ -412,7 +452,7 @@ export default function LogsPage() {
           <input
             type="text"
             className="log-query-input"
-            placeholder='Search log bodies — e.g.  error   or   timeout'
+            placeholder='Search log bodies — e.g. error  or  timeout  or  {service="guardiand"} |= "error" (LogQL)'
             value={queryInput}
             onChange={(e) => setQueryInput(e.target.value)}
             spellCheck={false}
@@ -459,56 +499,99 @@ export default function LogsPage() {
                 <div className="log-query-help-head">Tips</div>
                 <div className="log-query-help-row">
                   <code>&#9679; Time range</code>
-                  <span>Use the 15m / 1h / 6h / 24h presets to narrow the window</span>
+                  <span>Use the global time picker in the top bar to control the window</span>
                 </div>
                 <div className="log-query-help-row">
-                  <code>&#9679; Partition filter</code>
-                  <span>Pick a partition in the dropdown to filter results client-side</span>
+                  <code>&#9679; Facet sidebar</code>
+                  <span>Click + / − on any field value to include or exclude it</span>
                 </div>
                 <div className="log-query-help-row">
-                  <code>&#9679; Quick filter</code>
-                  <span>"Filter loaded results…" box filters already-fetched rows instantly (no round-trip)</span>
-                </div>
-                <div className="log-query-help-row">
-                  <code>&#9679; Severity pills</code>
-                  <span>ERR / WARN / INFO / DBG toggle visibility of matching severity levels</span>
-                </div>
-                <div className="log-query-help-row">
-                  <code>&#9679; Live</code>
-                  <span>Re-fetches every 30 s when enabled — disable while browsing</span>
+                  <code>&#9679; Download</code>
+                  <span>Export filtered results as JSON</span>
                 </div>
               </div>
             </div>
           </div>
         )}
+        {/* Active facet filter chips */}
+        {Object.entries(facetFilters).length > 0 && (
+          <div className="log-facet-chips">
+            {Object.entries(facetFilters).map(([field, value]) => (
+              <span key={field} className="facet-chip">
+                {field}="{value}"
+                <button
+                  className="facet-chip__remove"
+                  onClick={() => setFacetFilters((prev) => {
+                    const next = { ...prev };
+                    delete next[field];
+                    return next;
+                  })}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
+      {/* 3-pane layout: sidebar + histogram + log table */}
       <div className="panel-body">
-        <div className="xp-body">
-          <div className="logs-hist-wrap">
-            <LogHistogram records={allRecords} />
+        <div className="logs-3pane">
+          {/* Left: Facet sidebar */}
+          <div className="logs-3pane__sidebar">
+            <LogFacetSidebar
+              records={allRecords}
+              activeFilters={facetFilters}
+              onInclude={handleFacetInclude}
+              onExclude={handleFacetExclude}
+            />
           </div>
-          <div className="xp-table-header log-header">
-            <span>Time</span>
-            <span>Sev</span>
-            <span>Partition / Service</span>
-            <span>Message</span>
-          </div>
-          <div className="xp-rows">
-            {filtered.length === 0 ? (
-              <div className="xp-empty">
-                {allRecords.length === 0
-                  ? "No logs found for this time range."
-                  : "No logs match the current filters."}
-              </div>
-            ) : (
-              filtered.map((r, i) => (
-                <LogRow key={i} record={r} onOpenTrace={openTrace} />
-              ))
-            )}
+
+          {/* Right: histogram + table */}
+          <div className="logs-3pane__main">
+            <div className="logs-hist-wrap">
+              <LogHistogram records={allRecords} />
+            </div>
+            <div className="xp-table-header log-header">
+              <span>Time</span>
+              <span>Sev</span>
+              <span>Partition / Service</span>
+              <span>Message</span>
+            </div>
+            <div className="xp-rows">
+              {filtered.length === 0 ? (
+                <div className="xp-empty">
+                  {allRecords.length === 0
+                    ? "No logs found for this time range."
+                    : "No logs match the current filters."}
+                </div>
+              ) : (
+                filtered.map((r, i) => (
+                  <LogRow key={i} record={r} onOpenTrace={openTrace} />
+                ))
+              )}
+            </div>
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+function getFieldValue(r: LogRecord, field: string): string {
+  if (field === "severity_text") {
+    const s = (r.severity_text ?? "INFO").toUpperCase();
+    if (s.includes("ERROR") || s.includes("FATAL")) return "ERROR";
+    if (s.includes("WARN")) return "WARN";
+    if (s.includes("DEBUG") || s.includes("TRACE")) return "DEBUG";
+    return "INFO";
+  }
+  if (field === "service") return r.service ?? "";
+  if (field === "partition") return logPartition(r);
+  if (field === "intent") return r.intent ?? "";
+  if (field === "asset") return r.asset ?? "";
+  if (field.startsWith("attr.")) return r.attributes?.[field.slice(5)] ?? "";
+  if (field.startsWith("res.")) return r.resource_attributes?.[field.slice(4)] ?? "";
+  return "";
 }

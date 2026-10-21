@@ -17,6 +17,7 @@ import (
 type fakeAWSBackend struct {
 	logs              []awsstore.LogRecord
 	services          []awsstore.ServiceInfo
+	logGroups         []string
 	metricDescriptors []awsstore.MetricDescriptor
 	traces            []awsstore.TraceSummary
 	spans             []awsstore.Span
@@ -33,6 +34,10 @@ func (f *fakeAWSBackend) ListMetrics(context.Context, string, string) ([]awsstor
 
 func (f *fakeAWSBackend) ListServices(context.Context) ([]awsstore.ServiceInfo, error) {
 	return f.services, nil
+}
+
+func (f *fakeAWSBackend) ListLogGroups(context.Context) ([]string, error) {
+	return f.logGroups, nil
 }
 
 func (f *fakeAWSBackend) QueryLogs(_ context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error) {

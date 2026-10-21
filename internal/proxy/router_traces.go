@@ -30,7 +30,7 @@ func (r *Router) ListServices(ctx context.Context, tenant string) ([]string, []W
 		services, err := upstream.ListServices(callCtx, tenant)
 		cancel()
 		if err != nil {
-			r.recordFailure(target.backend.Name, time.Now())
+			r.noteBackendFailure(target.backend, err)
 			warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: err.Error()})
 			continue
 		}
@@ -51,7 +51,8 @@ func (r *Router) ListServices(ctx context.Context, tenant string) ([]string, []W
 
 // SearchTraces fans a trace search out and merges the summaries.
 func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSearch) ([]TraceSummary, []Warning, error) {
-	targets, accessWarnings, err := r.traceTargets(ctx)
+	criteria := parseTraceSearchCriteria(search)
+	targets, accessWarnings, err := r.traceTargetsWithCriteria(ctx, criteria)
 	if err != nil {
 		return nil, accessWarnings, err
 	}
@@ -141,7 +142,7 @@ func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segmen
 				return
 			}
 			defer func() { <-sem }()
-			if !r.breakerFor(target.backend.Name).allow(time.Now()) {
+			if !r.backendAllowed(target.backend, time.Now()) {
 				results[i] = result{index: i, err: fmt.Errorf("backend %s circuit breaker open", target.backend.Name)}
 				return
 			}
@@ -162,7 +163,7 @@ func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segmen
 	for _, res := range results {
 		target := targets[res.index]
 		if res.err != nil {
-			r.recordFailure(target.backend.Name, time.Now())
+			r.noteBackendFailure(target.backend, res.err)
 			if isLocalBackend(target.backend) {
 				return nil, warnings, res.err
 			}
@@ -262,7 +263,8 @@ func (r *Router) TraceTagValues(ctx context.Context, tenant, tag string) ([]stri
 // SearchSpanSets returns the matched spans of a search grouped by trace ID.
 // Only span-capable upstreams contribute; the trace access gate applies.
 func (r *Router) SearchSpanSets(ctx context.Context, tenant string, search TraceSearch, spss int) (map[string]tempo.SpanSet, []Warning, error) {
-	targets, accessWarnings, err := r.traceTargets(ctx)
+	criteria := parseTraceSearchCriteria(search)
+	targets, accessWarnings, err := r.traceTargetsWithCriteria(ctx, criteria)
 	if err != nil {
 		return nil, accessWarnings, err
 	}
@@ -422,12 +424,19 @@ type traceTarget struct {
 }
 
 func (r *Router) traceTargets(ctx context.Context) ([]traceTarget, []Warning, error) {
+	return r.traceTargetsWithCriteria(ctx, selectorCriteria{})
+}
+
+func (r *Router) traceTargetsWithCriteria(ctx context.Context, criteria selectorCriteria) ([]traceTarget, []Warning, error) {
 	entries := make([]traceTarget, 0)
 	var warnings []Warning
 	enforced := 0
 	denied := 0
 	for _, backend := range r.snapshot() {
 		if !backend.Supports(SignalTraces) {
+			continue
+		}
+		if !backendMatchesCriteria(backend, criteria) {
 			continue
 		}
 		entry := r.entryFor(backend)
@@ -445,7 +454,7 @@ func (r *Router) traceTargets(ctx context.Context) ([]traceTarget, []Warning, er
 				continue
 			}
 		}
-		entries = append(entries, traceTarget{upstreamEntry: entry, index: len(entries)})
+		entries = append(entries, traceTarget{upstreamEntry: entry})
 	}
 	if enforced > 0 && denied == enforced {
 		return nil, warnings, access.ErrAccessDenied
@@ -453,7 +462,68 @@ func (r *Router) traceTargets(ctx context.Context) ([]traceTarget, []Warning, er
 	sort.SliceStable(entries, func(i, j int) bool {
 		return targetRank(entries[i].backend) < targetRank(entries[j].backend)
 	})
+	maxRemote := r.cfg.MaxFanoutBackends
+	if maxRemote > 0 && len(entries) > maxRemote {
+		capped := make([]traceTarget, 0, maxRemote+1)
+		remoteCount := 0
+		totalRemote := 0
+		for _, e := range entries {
+			if isLocalBackend(e.backend) {
+				capped = append(capped, e)
+				continue
+			}
+			totalRemote++
+			if remoteCount < maxRemote {
+				capped = append(capped, e)
+				remoteCount++
+			}
+		}
+		if totalRemote > maxRemote {
+			entries = capped
+			warnings = append(warnings, Warning{
+				Backend: "router",
+				Signal:  SignalTraces,
+				Message: fmt.Sprintf("remote fan-out capped at %d of %d matching backends; narrow query by region, account, cluster, or partition", maxRemote, totalRemote),
+			})
+		}
+	}
+	for i := range entries {
+		entries[i].index = i
+	}
 	return entries, warnings, nil
+}
+
+func parseTraceSearchCriteria(search TraceSearch) selectorCriteria {
+	c := parseSelectorCriteria(search.TraceQL)
+	add := func(dst *map[string]struct{}, v string) {
+		val := strings.ToLower(strings.TrimSpace(v))
+		if val == "" {
+			return
+		}
+		if *dst == nil {
+			*dst = make(map[string]struct{}, 2)
+		}
+		(*dst)[val] = struct{}{}
+	}
+	for _, tag := range search.Tags {
+		if tag.Regex != nil {
+			continue
+		}
+		key := strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(tag.Key)), "resource."), "span.")
+		switch key {
+		case "region", "aws_region", "cloud.region":
+			add(&c.region, tag.Value)
+		case "account", "aws_account", "cloud.account.id":
+			add(&c.account, tag.Value)
+		case "cluster", "k8s.cluster.name":
+			add(&c.cluster, tag.Value)
+		case "partition", "guardian_partition":
+			add(&c.partition, tag.Value)
+		case "shard", "pusher", "backend":
+			add(&c.backend, tag.Value)
+		}
+	}
+	return c
 }
 
 // forEachTraceTarget runs fn for each trace target with bounded concurrency.
@@ -477,7 +547,7 @@ func (r *Router) forEachTraceTarget(ctx context.Context, targets []traceTarget, 
 				return
 			}
 			defer func() { <-sem }()
-			if !r.breakerFor(target.backend.Name).allow(time.Now()) {
+			if !r.backendAllowed(target.backend, time.Now()) {
 				results[i] = result{target: target, err: fmt.Errorf("backend %s circuit breaker open", target.backend.Name)}
 				return
 			}
@@ -494,7 +564,7 @@ func (r *Router) forEachTraceTarget(ctx context.Context, targets []traceTarget, 
 			r.recordSuccess(res.target.backend.Name)
 			continue
 		}
-		r.recordFailure(res.target.backend.Name, time.Now())
+		r.noteBackendFailure(res.target.backend, res.err)
 		if isLocalBackend(res.target.backend) {
 			return warnings, res.err
 		}

@@ -49,6 +49,7 @@ type Service struct {
 	guardianClient   *http.Client
 	rulesProxy       *httputil.ReverseProxy
 	policyGate       *access.PolicyGate
+	dashboardStore   DashboardStore
 }
 
 // SetPolicyGate installs the repo-managed access policy. Logs and traces are
@@ -88,6 +89,11 @@ func (s *Service) SetGuardianAPIURL(u string) { s.guardianAPIURL = u }
 
 // SetDefaultPartition sets the partition pre-filled in the topology form.
 func (s *Service) SetDefaultPartition(p string) { s.defaultPartition = p }
+
+// SetDashboardStore installs the shared dashboard persistence store.
+func (s *Service) SetDashboardStore(store DashboardStore) {
+	s.dashboardStore = store
+}
 
 // SetRulesURL configures the doctor-rules API base URL used by the UI proxy.
 func (s *Service) SetRulesURL(raw string) {
@@ -501,11 +507,14 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/rules/", s.handleRulesProxy)
 	mux.HandleFunc("/v1/services/discover", s.handleServiceDiscovery)
 	mux.HandleFunc("/v1/services/suggest", s.handleServiceSuggest)
+	mux.HandleFunc("/v1/dashboards", s.handleDashboardsRouter)
+	mux.HandleFunc("/v1/dashboards/", s.handleDashboardsRouter)
 	mux.HandleFunc("/v1/proxy/endpoints", s.handleProxyEndpoints)
 	mux.HandleFunc("/v1/guardian/topology", s.handleGuardianTopology)
 	mux.HandleFunc("/v1/guardian/events", s.handleGuardianEvents)
 	mux.HandleFunc("/v1/guardian/health", s.handleGuardianHealth)
 	mux.HandleFunc("/v1/guardian/overview", s.handleGuardianOverview)
+	mux.HandleFunc("/v1/guardian/probes", s.handleGuardianProbes)
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
 	mux.HandleFunc("/", s.handleUI)
@@ -720,6 +729,10 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 	partition := partitionFromRequest(r)
 	service := strings.TrimSpace(r.URL.Query().Get("service"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	logGroup := strings.TrimSpace(r.URL.Query().Get("logGroup"))
+	if logGroup == "" {
+		logGroup = strings.TrimSpace(r.URL.Query().Get("log_group"))
+	}
 	from := parseTime(r.URL.Query().Get("from"))
 	to := parseTime(r.URL.Query().Get("to"))
 	limit := parseLimit(r.URL.Query().Get("limit"), 100, 1000)
@@ -733,7 +746,7 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 
 	var results []segment.LogRecord
 	if s.proxyRouter != nil {
-		records, warnings, err := s.proxyRouter.Logs(r.Context(), tenant, logSearchPushdown(service, query), from, to, limit)
+		records, warnings, err := s.proxyRouter.Logs(r.Context(), tenant, logSearchPushdown(service, query, logGroup), from, to, limit)
 		if err != nil {
 			if isAccessDenied(err) {
 				http.Error(w, err.Error(), http.StatusForbidden)
@@ -751,6 +764,10 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		writeProxyWarnings(w, warnings)
 		results = records
+	} else if logGroup != "" {
+		// A log group selector is AWS-specific; without the proxy router there
+		// is no CloudWatch backend to query.
+		results = nil
 	} else {
 		var err error
 		results, err = s.logEngine.QueryLogs(r.Context(), tenant, query, service, from, to, limit)
@@ -758,6 +775,15 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	if service != "" {
+		filtered := results[:0]
+		for _, result := range results {
+			if result.Service == service {
+				filtered = append(filtered, result)
+			}
+		}
+		results = filtered
 	}
 	if partition != "" {
 		filtered := results[:0]
@@ -1575,7 +1601,11 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	// Federated X-Ray services have no local log records, but should still be
 	// selectable alongside native services and carry their AWS partition.
 	for _, svc := range s.awsServiceInfos(r.Context()) {
-		part := awsPartition(svc.Region, svc.Account)
+		part, allowed := s.policyPartitionAllowed(r.Context(), svc.Account, svc.Region,
+			awsPartition(svc.Region, svc.Account), policy.SignalLogs)
+		if !allowed {
+			continue
+		}
 		if part != "" && !seenParts[part] {
 			seenParts[part] = true
 			partitions = append(partitions, part)
@@ -1588,13 +1618,31 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 			components = append(components, svc.Name)
 		}
 	}
+	logGroups := make([]string, 0)
+	if strings.Contains(include, "aws") && s.awsReady() {
+		for _, group := range proxy.AWSLogGroups(r.Context(), s.aws) {
+			groupPartition := proxy.LogGroupPartition(group)
+			if groupPartition == "" {
+				continue
+			}
+			if partition != "" && groupPartition != partition {
+				continue
+			}
+			if _, allowed := s.policyPartitionAllowed(r.Context(), "", "", groupPartition, policy.SignalLogs); !allowed {
+				continue
+			}
+			logGroups = append(logGroups, group)
+		}
+	}
 	sort.Strings(components)
 	sort.Strings(partitions)
+	sort.Strings(logGroups)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant":     tenant,
 		"services":   components,
 		"partitions": partitions,
+		"log_groups": logGroups,
 	})
 }
 
@@ -1615,7 +1663,11 @@ type svcInfo struct {
 }
 
 type discoveredService struct {
-	Name          string   `json:"name"`
+	// Name is the canonical service identity emitted by the query service.
+	Name string `json:"name"`
+	// Service is kept as a compatibility alias for API consumers that used the
+	// older service field. New clients should read name.
+	Service       string   `json:"service"`
 	FullName      string   `json:"full_name,omitempty"`
 	Truncated     bool     `json:"truncated,omitempty"`
 	HasMetrics    bool     `json:"has_metrics"`
@@ -1817,6 +1869,7 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		}
 		services = append(services, discoveredService{
 			Name:          name,
+			Service:       name,
 			FullName:      fullName,
 			Truncated:     info.truncated,
 			HasMetrics:    info.hasMetrics,

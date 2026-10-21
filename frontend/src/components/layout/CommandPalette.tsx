@@ -4,8 +4,10 @@ import {
   Activity,
   BarChart3,
   Copy,
+  Cpu,
   FileText,
   GitBranch,
+  Layers,
   LayoutDashboard,
   ListChecks,
   Search,
@@ -79,6 +81,32 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         keywords: "dashboard home triage incidents",
         icon: LayoutDashboard,
         run: go("/"),
+      },
+      {
+        id: "nav-dashboards",
+        group: "Go to",
+        label: "Dashboards",
+        hint: "g b",
+        keywords: "dashboard studio shared widgets presets",
+        icon: Layers,
+        run: go("/dashboards"),
+      },
+      {
+        id: "nav-services",
+        group: "Go to",
+        label: "APM service catalog",
+        hint: "g s",
+        keywords: "services apm red latency errors traces catalog",
+        icon: Activity,
+        run: go("/services"),
+      },
+      {
+        id: "nav-probes",
+        group: "Go to",
+        label: "Synthetic probes",
+        keywords: "synthetics probes health blackbox http tcp",
+        icon: Cpu,
+        run: go("/probes"),
       },
       {
         id: "nav-rules",
@@ -348,7 +376,7 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
             <kbd>↵</kbd> open
           </span>
           <span>
-            <kbd>g</kbd> then <kbd>d</kbd>/<kbd>s</kbd>/<kbd>t</kbd>/<kbd>l</kbd>/<kbd>m</kbd>/<kbd>f</kbd> jump
+            <kbd>g</kbd> then <kbd>d</kbd>/<kbd>b</kbd>/<kbd>s</kbd>/<kbd>t</kbd>/<kbd>l</kbd>/<kbd>m</kbd>/<kbd>f</kbd>/<kbd>p</kbd> jump
           </span>
           <span>{notice || `${filtered.length} commands`}</span>
         </div>

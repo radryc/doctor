@@ -180,6 +180,19 @@ func (c *Client) ListMetrics(ctx context.Context, namespace, metric string) ([]M
 	return out, nil
 }
 
+// ListLogGroups returns the CloudWatch log groups exposed by the pusher read
+// API. It is used by the logs UI and Grafana variables to discover what can be
+// queried.
+func (c *Client) ListLogGroups(ctx context.Context) ([]string, error) {
+	var resp struct {
+		LogGroups []string `json:"log_groups"`
+	}
+	if err := c.get(ctx, "/v1/aws/log-groups", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.LogGroups, nil
+}
+
 // QueryMetric fetches a CloudWatch metric series.
 func (c *Client) QueryMetric(ctx context.Context, q MetricQuery) ([]MetricSeries, error) {
 	params := url.Values{}

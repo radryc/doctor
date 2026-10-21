@@ -253,6 +253,38 @@ func AWSMetricNames(ctx context.Context, client AWSClient) []string {
 	return out
 }
 
+// AWSLogGroups returns the CloudWatch log groups available from the pusher.
+func AWSLogGroups(ctx context.Context, client AWSClient) []string {
+	if client == nil || !client.Enabled() {
+		return nil
+	}
+	groups, err := client.ListLogGroups(ctx)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(groups))
+	out := make([]string, 0, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		if _, exists := seen[group]; exists {
+			continue
+		}
+		seen[group] = struct{}{}
+		out = append(out, group)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LogGroupPartition extracts the Guardian partition from a CloudWatch log
+// group name.
+func LogGroupPartition(logGroup string) string {
+	return awsLogGroupPartition(logGroup)
+}
+
 // AWSServices returns X-Ray service names.
 func AWSServices(ctx context.Context, client AWSClient) []string {
 	if client == nil || !client.Enabled() {

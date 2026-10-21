@@ -2,6 +2,9 @@ import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import AppLayout from "./components/layout/AppLayout";
 import { ConfigProvider } from "./context/ConfigContext";
 import DashboardPage from "./pages/DashboardPage";
+import DashboardsPage from "./pages/DashboardsPage";
+import ServicesPage from "./pages/ServicesPage";
+import ProbesPage from "./pages/ProbesPage";
 import TracesPage from "./pages/TracesPage";
 import LogsPage from "./pages/LogsPage";
 import MetricsPage from "./pages/MetricsPage";
@@ -17,6 +20,11 @@ export default function App() {
         <Routes>
           <Route element={<AppLayout />}>
             <Route path="/" element={<DashboardPage />} />
+            <Route path="/dashboards" element={<DashboardsPage />} />
+            <Route path="/dashboards/:id" element={<DashboardsPage />} />
+            <Route path="/services" element={<ServicesPage />} />
+            <Route path="/services/:name" element={<ServicesPage />} />
+            <Route path="/probes" element={<ProbesPage />} />
             <Route path="/rules" element={<RecordingRulesPage />} />
             <Route path="/traces" element={<TracesPage />} />
             <Route path="/logs" element={<LogsPage />} />

@@ -16,6 +16,7 @@ spec:
       properties:
         image: doctor-rules:latest
         env:
+          DOCTOR_RULES_ENABLED: "true"
           DOCTOR_RULES_HTTP_ADDR: :18081
           DOCTOR_RULES_QUERY_URL: http://doctor-query:18080
           DOCTOR_RULES_RULER_ID: doctor-rules

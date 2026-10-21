@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +47,9 @@ func IsParseError(err error) bool {
 type RouterConfig struct {
 	// MaxInflight bounds concurrent upstream calls across all requests.
 	MaxInflight int
+	// MaxFanoutBackends bounds how many remote backends a single pull query
+	// may fan out to after label/partition pruning. Defaults to 32.
+	MaxFanoutBackends int
 	// BackendTimeout bounds each upstream call.
 	BackendTimeout time.Duration
 	// Logger receives upstream failures.
@@ -75,10 +80,14 @@ type Router struct {
 	logger   *log.Logger
 	access   *access.Gate
 
-	mu       sync.RWMutex
-	explicit map[string]upstreamEntry
-	built    map[string]upstreamEntry
-	breakers map[string]*breaker
+	mu                sync.RWMutex
+	explicit          map[string]upstreamEntry
+	explicitRev       uint64
+	cachedSnap        []Backend
+	cachedSnapRev     uint64
+	cachedSnapRefresh time.Time
+	built             map[string]upstreamEntry
+	breakers          map[string]*breaker
 }
 
 // NewRouter builds a router over a registry.
@@ -87,16 +96,21 @@ func NewRouter(cfg RouterConfig, registry Registry) *Router {
 	if maxInflight <= 0 {
 		maxInflight = 32
 	}
+	maxFanout := cfg.MaxFanoutBackends
+	if maxFanout <= 0 {
+		maxFanout = 32
+	}
 	timeout := cfg.BackendTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
 	return &Router{
 		cfg: RouterConfig{
-			MaxInflight:    maxInflight,
-			BackendTimeout: timeout,
-			Logger:         cfg.Logger,
-			Access:         cfg.Access,
+			MaxInflight:       maxInflight,
+			MaxFanoutBackends: maxFanout,
+			BackendTimeout:    timeout,
+			Logger:            cfg.Logger,
+			Access:            cfg.Access,
 		},
 		registry: registry,
 		logger:   cfg.Logger,
@@ -148,7 +162,229 @@ func (r *Router) Register(backend Backend, upstreams Upstreams) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.explicit[backend.Name] = upstreamEntry{backend: backend, upstreams: upstreams}
+	r.explicitRev++
+	r.cachedSnap = nil
 	return nil
+}
+
+// EndpointSummary aggregates fleet-wide health and dimension counts across all
+// registered/discovered endpoints without serializing 50,000 rows.
+type EndpointSummary struct {
+	Total     int            `json:"total"`
+	Healthy   int            `json:"healthy"`
+	Unhealthy int            `json:"unhealthy"`
+	ByKind    map[string]int `json:"byKind"`
+	ByStatus  map[string]int `json:"byStatus"`
+	ByRegion  map[string]int `json:"byRegion"`
+	ByAccount map[string]int `json:"byAccount"`
+	ByCluster map[string]int `json:"byCluster"`
+	ByVersion map[string]int `json:"byVersion"`
+}
+
+// EndpointPageFilter scopes and paginates the endpoint list for 50,000-pusher fleets.
+type EndpointPageFilter struct {
+	Kind      string
+	Status    string
+	Region    string
+	Account   string
+	Cluster   string
+	Version   string
+	Query     string
+	Outliers  bool
+	Unhealthy bool
+	Limit     int
+	Cursor    string
+}
+
+// EndpointPage holds one page of EndpointInfo plus fleet summary.
+type EndpointPage struct {
+	Endpoints  []EndpointInfo  `json:"endpoints"`
+	NextCursor string          `json:"nextCursor,omitempty"`
+	TotalMatch int             `json:"totalMatched"`
+	Summary    EndpointSummary `json:"summary"`
+}
+
+// SummarizeEndpoints computes fleet-wide counts in O(N) memory-only pass.
+func (r *Router) SummarizeEndpoints() EndpointSummary {
+	now := time.Now()
+	backends := r.snapshot()
+	summary := EndpointSummary{
+		Total:     len(backends),
+		ByKind:    make(map[string]int),
+		ByStatus:  make(map[string]int),
+		ByRegion:  make(map[string]int),
+		ByAccount: make(map[string]int),
+		ByCluster: make(map[string]int),
+		ByVersion: make(map[string]int),
+	}
+	for _, b := range backends {
+		if r.backendHealthy(b, now) {
+			summary.Healthy++
+		} else {
+			summary.Unhealthy++
+		}
+		if b.Kind != "" {
+			summary.ByKind[b.Kind]++
+		}
+		status := b.Status
+		if status == "" {
+			status = "active"
+		}
+		summary.ByStatus[status]++
+		if b.Region != "" {
+			summary.ByRegion[b.Region]++
+		}
+		if b.Account != "" {
+			summary.ByAccount[b.Account]++
+		}
+		if b.Cluster != "" {
+			summary.ByCluster[b.Cluster]++
+		}
+		if b.Version != "" {
+			summary.ByVersion[b.Version]++
+		}
+	}
+	return summary
+}
+
+// EndpointsPage returns a filtered, optionally outlier-sorted page of endpoints
+// along with the fleet summary. Only the page slice evaluates access decisions.
+func (r *Router) EndpointsPage(ctx context.Context, filter EndpointPageFilter) EndpointPage {
+	now := time.Now()
+	backends := r.snapshot()
+	summary := r.SummarizeEndpoints()
+
+	kindFilter := strings.ToLower(strings.TrimSpace(filter.Kind))
+	statusFilter := strings.ToLower(strings.TrimSpace(filter.Status))
+	regionFilter := strings.ToLower(strings.TrimSpace(filter.Region))
+	accountFilter := strings.ToLower(strings.TrimSpace(filter.Account))
+	clusterFilter := strings.ToLower(strings.TrimSpace(filter.Cluster))
+	versionFilter := strings.ToLower(strings.TrimSpace(filter.Version))
+	qFilter := strings.ToLower(strings.TrimSpace(filter.Query))
+
+	matched := make([]Backend, 0, 256)
+	for _, b := range backends {
+		healthy := r.backendHealthy(b, now)
+		if filter.Unhealthy && healthy {
+			continue
+		}
+		if kindFilter != "" && !strings.EqualFold(b.Kind, kindFilter) {
+			continue
+		}
+		if statusFilter != "" && !strings.EqualFold(b.Status, statusFilter) {
+			continue
+		}
+		if regionFilter != "" && !strings.EqualFold(b.Region, regionFilter) {
+			continue
+		}
+		if accountFilter != "" && !strings.EqualFold(b.Account, accountFilter) {
+			continue
+		}
+		if clusterFilter != "" && !strings.EqualFold(b.Cluster, clusterFilter) {
+			continue
+		}
+		if versionFilter != "" && !strings.EqualFold(b.Version, versionFilter) {
+			continue
+		}
+		if qFilter != "" {
+			if !strings.Contains(strings.ToLower(b.Name), qFilter) &&
+				!strings.Contains(strings.ToLower(b.Account), qFilter) &&
+				!strings.Contains(strings.ToLower(b.Region), qFilter) &&
+				!strings.Contains(strings.ToLower(b.Cluster), qFilter) {
+				continue
+			}
+		}
+		matched = append(matched, b)
+	}
+
+	if filter.Outliers {
+		sort.SliceStable(matched, func(i, j int) bool {
+			hi := r.backendHealthy(matched[i], now)
+			hj := r.backendHealthy(matched[j], now)
+			if hi != hj {
+				return !hi // unhealthy first
+			}
+			si := endpointStatusRank(matched[i].Status)
+			sj := endpointStatusRank(matched[j].Status)
+			if si != sj {
+				return si < sj
+			}
+			if !matched[i].LastHeartbeat.Equal(matched[j].LastHeartbeat) {
+				if matched[i].LastHeartbeat.IsZero() {
+					return false
+				}
+				if matched[j].LastHeartbeat.IsZero() {
+					return true
+				}
+				return matched[i].LastHeartbeat.Before(matched[j].LastHeartbeat)
+			}
+			return matched[i].Name < matched[j].Name
+		})
+	}
+
+	totalMatched := len(matched)
+	offset := 0
+	if filter.Cursor != "" {
+		if parsed, err := strconv.Atoi(filter.Cursor); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+	if offset > totalMatched {
+		offset = totalMatched
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	end := offset + limit
+	var nextCursor string
+	if end < totalMatched {
+		nextCursor = strconv.Itoa(end)
+	} else {
+		end = totalMatched
+	}
+
+	pageSlice := matched[offset:end]
+	out := make([]EndpointInfo, 0, len(pageSlice))
+	for _, backend := range pageSlice {
+		out = append(out, r.endpointInfoFor(ctx, backend, now))
+	}
+	return EndpointPage{
+		Endpoints:  out,
+		NextCursor: nextCursor,
+		TotalMatch: totalMatched,
+		Summary:    summary,
+	}
+}
+
+func endpointStatusRank(status string) int {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "error", "failed", "unhealthy", "degraded", "offline":
+		return 0
+	case "stale", "warning":
+		return 1
+	case "active", "healthy", "ready", "ok", "":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func endpointHealthLabel(healthy bool, status string) string {
+	if !healthy {
+		return "offline"
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "degraded", "attention", "warning", "stale", "drifted", "drift":
+		return "degraded"
+	case "offline", "down", "failed", "error", "unhealthy":
+		return "offline"
+	default:
+		return "healthy"
+	}
 }
 
 // Endpoints returns the registry snapshot with health and access state.
@@ -157,46 +393,54 @@ func (r *Router) Endpoints(ctx context.Context) []EndpointInfo {
 	backends := r.snapshot()
 	out := make([]EndpointInfo, 0, len(backends))
 	for _, backend := range backends {
-		info := EndpointInfo{
-			Name:          backend.Name,
-			Kind:          backend.Kind,
-			Signals:       append([]Signal(nil), backend.Signals...),
-			OwnersPath:    backend.OwnersPath,
-			Origin:        backend.Origin,
-			Public:        backend.Public,
-			Healthy:       r.breakerFor(backend.Name).allow(now),
-			Allowed:       true,
-			Resolver:      "none",
-			Provider:      backend.Provider,
-			Version:       backend.Version,
-			Cluster:       backend.Cluster,
-			Account:       backend.Account,
-			Region:        backend.Region,
-			Capabilities:  append([]string(nil), backend.Capabilities...),
-			Status:        backend.Status,
-			LastHeartbeat: backend.LastHeartbeat,
-		}
-		if r.access != nil {
-			identity, _ := authz.IdentityFromContext(ctx)
-			decision := r.access.Decide(ctx, identity, EndpointFor(backend), gatedSignal(backend))
-			info.Allowed = decision.Allowed
-			info.Resolver = decision.Resolver
-			info.Reason = decision.Reason
-		}
-		out = append(out, info)
+		out = append(out, r.endpointInfoFor(ctx, backend, now))
 	}
 	return out
 }
 
+func (r *Router) endpointInfoFor(ctx context.Context, backend Backend, now time.Time) EndpointInfo {
+	info := EndpointInfo{
+		Name:          backend.Name,
+		Kind:          backend.Kind,
+		Signals:       append([]Signal(nil), backend.Signals...),
+		OwnersPath:    backend.OwnersPath,
+		Origin:        backend.Origin,
+		Public:        backend.Public,
+		Healthy:       r.backendHealthy(backend, now),
+		Allowed:       true,
+		Resolver:      "none",
+		Provider:      backend.Provider,
+		Version:       backend.Version,
+		Cluster:       backend.Cluster,
+		Account:       backend.Account,
+		Region:        backend.Region,
+		Capabilities:  append([]string(nil), backend.Capabilities...),
+		Status:        backend.Status,
+		LastHeartbeat: backend.LastHeartbeat,
+	}
+	info.Health = endpointHealthLabel(info.Healthy, backend.Status)
+	if r.access != nil {
+		identity, _ := authz.IdentityFromContext(ctx)
+		decision := r.access.Decide(ctx, identity, EndpointFor(backend), gatedSignal(backend))
+		info.Allowed = decision.Allowed
+		info.Resolver = decision.Resolver
+		info.Reason = decision.Reason
+	}
+	return info
+}
+
 // EndpointInfo is the public view of a backend.
 type EndpointInfo struct {
-	Name          string    `json:"name"`
-	Kind          string    `json:"kind"`
-	Signals       []Signal  `json:"signals"`
-	OwnersPath    string    `json:"ownersPath,omitempty"`
-	Origin        string    `json:"origin,omitempty"`
-	Public        bool      `json:"public"`
-	Healthy       bool      `json:"healthy"`
+	Name       string   `json:"name"`
+	Kind       string   `json:"kind"`
+	Signals    []Signal `json:"signals"`
+	OwnersPath string   `json:"ownersPath,omitempty"`
+	Origin     string   `json:"origin,omitempty"`
+	Public     bool     `json:"public"`
+	Healthy    bool     `json:"healthy"`
+	// Health is a presentation-friendly rollup of Healthy and Status. It keeps
+	// older UI clients (which read health instead of healthy) working.
+	Health        string    `json:"health"`
 	Allowed       bool      `json:"allowed"`
 	Resolver      string    `json:"resolver,omitempty"`
 	Reason        string    `json:"reason,omitempty"`
@@ -238,7 +482,8 @@ func (r *Router) MetricsRange(ctx context.Context, tenant, query string, start, 
 
 // Logs fans a reduced LogQL query out and merges the records.
 func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, from, to time.Time, limit int) ([]segment.LogRecord, []Warning, error) {
-	targets, accessWarnings, err := r.logTargets(ctx)
+	criteria := parseSelectorCriteria(pushdown.Selector)
+	targets, accessWarnings, err := r.logTargets(ctx, criteria)
 	if err != nil {
 		return nil, accessWarnings, err
 	}
@@ -249,6 +494,10 @@ func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, 
 	sort.SliceStable(targets, func(i, j int) bool {
 		return targetRank(targets[i].backend) < targetRank(targets[j].backend)
 	})
+	targets, capWarn := r.capLogTargets(targets)
+	if capWarn != nil {
+		accessWarnings = append(accessWarnings, *capWarn)
+	}
 
 	type result struct {
 		index   int
@@ -269,7 +518,7 @@ func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, 
 				return
 			}
 			defer func() { <-sem }()
-			if !r.breakerFor(target.backend.Name).allow(time.Now()) {
+			if !r.backendAllowed(target.backend, time.Now()) {
 				results[i] = result{index: i, err: fmt.Errorf("backend %s circuit breaker open", target.backend.Name)}
 				return
 			}
@@ -290,7 +539,7 @@ func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, 
 	for _, res := range results {
 		target := targets[res.index]
 		if res.err != nil {
-			r.recordFailure(target.backend.Name, time.Now())
+			r.noteBackendFailure(target.backend, res.err)
 			if isLocalBackend(target.backend) {
 				return nil, warnings, res.err
 			}
@@ -312,15 +561,19 @@ type logTarget struct {
 	upstream LogsUpstream
 }
 
-// logTargets selects logs backends, applying access enforcement. Denied
-// backends produce warnings in observe mode and are excluded in enforce mode.
-func (r *Router) logTargets(ctx context.Context) ([]logTarget, []Warning, error) {
+// logTargets selects logs backends, applying partition/label pruning and access
+// enforcement. Denied backends produce warnings in observe mode and are excluded
+// in enforce mode.
+func (r *Router) logTargets(ctx context.Context, criteria selectorCriteria) ([]logTarget, []Warning, error) {
 	targets := make([]logTarget, 0)
 	var warnings []Warning
 	enforced := 0
 	denied := 0
 	for _, backend := range r.snapshot() {
 		if !backend.Supports(SignalLogs) {
+			continue
+		}
+		if !backendMatchesCriteria(backend, criteria) {
 			continue
 		}
 		upstream := r.logsUpstream(backend)
@@ -346,6 +599,35 @@ func (r *Router) logTargets(ctx context.Context) ([]logTarget, []Warning, error)
 	return targets, warnings, nil
 }
 
+func (r *Router) capLogTargets(targets []logTarget) ([]logTarget, *Warning) {
+	maxRemote := r.cfg.MaxFanoutBackends
+	if maxRemote <= 0 || len(targets) <= maxRemote {
+		return targets, nil
+	}
+	out := make([]logTarget, 0, maxRemote+1)
+	remoteCount := 0
+	totalRemote := 0
+	for _, t := range targets {
+		if isLocalBackend(t.backend) {
+			out = append(out, t)
+			continue
+		}
+		totalRemote++
+		if remoteCount < maxRemote {
+			out = append(out, t)
+			remoteCount++
+		}
+	}
+	if totalRemote <= maxRemote {
+		return targets, nil
+	}
+	return out, &Warning{
+		Backend: "router",
+		Signal:  SignalLogs,
+		Message: fmt.Sprintf("remote fan-out capped at %d of %d matching backends; narrow query by region, account, cluster, or partition", maxRemote, totalRemote),
+	}
+}
+
 type metricsTarget struct {
 	backend  Backend
 	upstream MetricsUpstream
@@ -359,6 +641,7 @@ func (r *Router) metricsQuery(
 	exec func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error),
 ) (map[string]any, []Warning, error) {
 	stripped, mode := AWSQueryMode(query)
+	criteria := parseSelectorCriteria(query)
 	var (
 		primary  []metricsTarget
 		fallback []metricsTarget
@@ -366,6 +649,9 @@ func (r *Router) metricsQuery(
 	)
 	for _, backend := range r.snapshot() {
 		if !backend.Supports(SignalMetrics) {
+			continue
+		}
+		if !backendMatchesCriteria(backend, criteria) {
 			continue
 		}
 		upstream := r.metricsUpstream(backend)
@@ -398,6 +684,27 @@ func (r *Router) metricsQuery(
 		primary = append(primary, target)
 	}
 
+	var capWarnings []Warning
+	maxRemote := r.cfg.MaxFanoutBackends
+	if maxRemote > 0 && len(primary) > maxRemote {
+		total := len(primary)
+		primary = primary[:maxRemote]
+		capWarnings = append(capWarnings, Warning{
+			Backend: "router",
+			Signal:  SignalMetrics,
+			Message: fmt.Sprintf("remote fan-out capped at %d of %d matching backends; narrow query by region, account, cluster, or partition", maxRemote, total),
+		})
+	}
+	if maxRemote > 0 && len(fallback) > maxRemote {
+		total := len(fallback)
+		fallback = fallback[:maxRemote]
+		capWarnings = append(capWarnings, Warning{
+			Backend: "router",
+			Signal:  SignalMetrics,
+			Message: fmt.Sprintf("remote fallback fan-out capped at %d of %d matching backends; narrow query by region, account, cluster, or partition", maxRemote, total),
+		})
+	}
+
 	type result struct {
 		target metricsTarget
 		data   map[string]any
@@ -419,7 +726,7 @@ func (r *Router) metricsQuery(
 					return
 				}
 				defer func() { <-sem }()
-				if !r.breakerFor(target.backend.Name).allow(time.Now()) {
+				if !r.backendAllowed(target.backend, time.Now()) {
 					results[i] = result{target: target, err: fmt.Errorf("backend %s circuit breaker open", target.backend.Name)}
 					return
 				}
@@ -443,7 +750,7 @@ func (r *Router) metricsQuery(
 	}
 
 	var (
-		warnings   []Warning
+		warnings   = append([]Warning(nil), capWarnings...)
 		localData  map[string]any
 		localEmpty = true
 		remoteData []PromRemote
@@ -468,7 +775,7 @@ func (r *Router) metricsQuery(
 		}
 		for _, res := range results {
 			if res.err != nil {
-				r.recordFailure(res.target.backend.Name, time.Now())
+				r.noteBackendFailure(res.target.backend, res.err)
 				warnings = append(warnings, Warning{Backend: res.target.backend.Name, Signal: SignalMetrics, Message: res.err.Error()})
 				continue
 			}
@@ -488,7 +795,7 @@ func (r *Router) metricsQuery(
 		}
 		for _, res := range results {
 			if res.err != nil {
-				r.recordFailure(res.target.backend.Name, time.Now())
+				r.noteBackendFailure(res.target.backend, res.err)
 				warnings = append(warnings, Warning{Backend: res.target.backend.Name, Signal: SignalMetrics, Message: res.err.Error()})
 				continue
 			}
@@ -506,8 +813,31 @@ func (r *Router) metricsQuery(
 }
 
 func (r *Router) snapshot() []Backend {
-	seen := make(map[string]struct{})
-	out := make([]Backend, 0)
+	r.mu.RLock()
+	explicitCount := len(r.explicit)
+	explicitRev := r.explicitRev
+	cached := r.cachedSnap
+	cachedRev := r.cachedSnapRev
+	cachedRefresh := r.cachedSnapRefresh
+	r.mu.RUnlock()
+
+	if explicitCount == 0 {
+		if r.registry == nil {
+			return nil
+		}
+		return r.registry.Snapshot()
+	}
+
+	var regRefresh time.Time
+	if r.registry != nil {
+		regRefresh = r.registry.LastRefresh()
+	}
+	if cached != nil && cachedRev == explicitRev && !regRefresh.IsZero() && cachedRefresh.Equal(regRefresh) {
+		return cached
+	}
+
+	seen := make(map[string]struct{}, explicitCount)
+	out := make([]Backend, 0, explicitCount)
 	r.mu.RLock()
 	for name, entry := range r.explicit {
 		seen[name] = struct{}{}
@@ -523,7 +853,175 @@ func (r *Router) snapshot() []Backend {
 		}
 	}
 	SortBackends(out)
+
+	if !regRefresh.IsZero() {
+		r.mu.Lock()
+		if r.explicitRev == explicitRev {
+			r.cachedSnap = out
+			r.cachedSnapRev = explicitRev
+			r.cachedSnapRefresh = regRefresh
+		}
+		r.mu.Unlock()
+	}
 	return out
+}
+
+// selectorCriteria holds normalized equality/alternation values extracted from
+// PromQL, LogQL, or TraceQL/TraceSearch selectors to prune 50,000 remote pushers
+// before fan-out.
+type selectorCriteria struct {
+	region    map[string]struct{}
+	account   map[string]struct{}
+	cluster   map[string]struct{}
+	partition map[string]struct{}
+	backend   map[string]struct{}
+}
+
+func (c selectorCriteria) isEmpty() bool {
+	return len(c.region) == 0 && len(c.account) == 0 && len(c.cluster) == 0 && len(c.partition) == 0 && len(c.backend) == 0
+}
+
+var (
+	scopingLabelRe   = regexp.MustCompile(`\b(region|aws_region|account|aws_account|cluster|partition|guardian_partition|shard|pusher|backend)\s*(=|=~)\s*"([^"]+)"`)
+	scopingLogGrpRe  = regexp.MustCompile(`\baws_log_group\s*(=|=~)\s*"([^"]+)"`)
+	simpleAltValueRe = regexp.MustCompile(`^[a-zA-Z0-9_.:/-]+(\|[a-zA-Z0-9_.:/-]+)*$`)
+)
+
+func parseSelectorCriteria(selector string) selectorCriteria {
+	var c selectorCriteria
+	if strings.TrimSpace(selector) == "" {
+		return c
+	}
+	addValues := func(dst *map[string]struct{}, op, raw string) {
+		if op == "=~" && !simpleAltValueRe.MatchString(raw) {
+			return
+		}
+		for _, part := range strings.Split(raw, "|") {
+			val := strings.ToLower(strings.TrimSpace(part))
+			if val == "" {
+				continue
+			}
+			if *dst == nil {
+				*dst = make(map[string]struct{}, 2)
+			}
+			(*dst)[val] = struct{}{}
+		}
+	}
+	for _, m := range scopingLabelRe.FindAllStringSubmatch(selector, -1) {
+		if len(m) != 4 {
+			continue
+		}
+		key, op, val := m[1], m[2], m[3]
+		switch key {
+		case "region", "aws_region":
+			addValues(&c.region, op, val)
+		case "account", "aws_account":
+			addValues(&c.account, op, val)
+		case "cluster":
+			addValues(&c.cluster, op, val)
+		case "partition", "guardian_partition":
+			addValues(&c.partition, op, val)
+		case "shard", "pusher", "backend":
+			addValues(&c.backend, op, val)
+		}
+	}
+	for _, m := range scopingLogGrpRe.FindAllStringSubmatch(selector, -1) {
+		if len(m) != 3 {
+			continue
+		}
+		for _, grp := range strings.Split(m[2], "|") {
+			acct, reg, part := parseGuardianLogGroupScope(grp)
+			if acct != "" {
+				addValues(&c.account, "=", acct)
+			}
+			if reg != "" {
+				addValues(&c.region, "=", reg)
+			}
+			if part != "" {
+				addValues(&c.partition, "=", part)
+			}
+		}
+	}
+	return c
+}
+
+func parseGuardianLogGroupScope(logGroup string) (account, region, partition string) {
+	logGroup = strings.TrimSpace(logGroup)
+	if idx := strings.Index(logGroup, "guardian/"); idx >= 0 {
+		logGroup = logGroup[idx:]
+	}
+	parts := strings.Split(strings.Trim(logGroup, "/"), "/")
+	if len(parts) < 4 || parts[0] != "guardian" {
+		return "", "", ""
+	}
+	return strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2]), strings.TrimSpace(parts[3])
+}
+
+func backendMatchesCriteria(backend Backend, c selectorCriteria) bool {
+	if c.isEmpty() || isLocalBackend(backend) {
+		return true
+	}
+	if !backendMatchesField(backend, "backend", c.backend) {
+		return false
+	}
+	if !backendMatchesField(backend, "region", c.region) {
+		return false
+	}
+	if !backendMatchesField(backend, "account", c.account) {
+		return false
+	}
+	if !backendMatchesField(backend, "cluster", c.cluster) {
+		return false
+	}
+	if !backendMatchesField(backend, "partition", c.partition) {
+		return false
+	}
+	return true
+}
+
+func backendMatchesField(backend Backend, field string, allowed map[string]struct{}) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	var candidates []string
+	add := func(v string) {
+		if trimmed := strings.ToLower(strings.TrimSpace(v)); trimmed != "" {
+			candidates = append(candidates, trimmed)
+		}
+	}
+	switch field {
+	case "backend":
+		add(backend.Name)
+	case "region":
+		add(backend.Region)
+		add(backend.Labels["region"])
+		add(backend.Labels["aws_region"])
+	case "account":
+		add(backend.Account)
+		add(backend.Labels["account"])
+		add(backend.Labels["aws_account"])
+	case "cluster":
+		add(backend.Cluster)
+		add(backend.Labels["cluster"])
+	case "partition":
+		add(backend.Labels["partition"])
+		add(backend.Labels["guardian_partition"])
+		add(backend.Cluster)
+		add(backend.Region)
+		add(backend.Name)
+	}
+	if len(candidates) == 0 {
+		if backend.Origin == "guardian-pusher" || isAWSBackend(backend) {
+			return false
+		}
+		return true
+	}
+	for _, cand := range candidates {
+		if _, ok := allowed[cand]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Router) metricsUpstream(backend Backend) MetricsUpstream {
@@ -572,6 +1070,16 @@ func (r *Router) entryFor(backend Backend) upstreamEntry {
 	return entry
 }
 
+func (r *Router) breakerAllow(name string, now time.Time) bool {
+	r.mu.RLock()
+	b, ok := r.breakers[name]
+	r.mu.RUnlock()
+	if !ok {
+		return true
+	}
+	return b.allow(now)
+}
+
 func (r *Router) breakerFor(name string) *breaker {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -587,8 +1095,44 @@ func (r *Router) recordFailure(name string, now time.Time) {
 	r.breakerFor(name).recordFailure(now)
 }
 
+// noteBackendFailure records an upstream failure for circuit-breaker purposes.
+// Client errors (query parse failures) and the in-process local backend must
+// not mark a healthy backend as degraded: the local store is this process, and
+// a bad query says nothing about backend availability.
+func (r *Router) noteBackendFailure(backend Backend, err error) {
+	if err == nil || isLocalBackend(backend) || IsParseError(err) {
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	r.recordFailure(backend.Name, time.Now())
+}
+
+// backendHealthy reports circuit-breaker health for the endpoint UI. The local
+// in-process backend is healthy whenever the query service is serving requests.
+func (r *Router) backendHealthy(backend Backend, now time.Time) bool {
+	if isLocalBackend(backend) {
+		return true
+	}
+	return r.breakerAllow(backend.Name, now)
+}
+
+// backendAllowed is the query-path equivalent of backendHealthy.
+func (r *Router) backendAllowed(backend Backend, now time.Time) bool {
+	if isLocalBackend(backend) {
+		return true
+	}
+	return r.breakerAllow(backend.Name, now)
+}
+
 func (r *Router) recordSuccess(name string) {
-	r.breakerFor(name).recordSuccess()
+	r.mu.RLock()
+	b, ok := r.breakers[name]
+	r.mu.RUnlock()
+	if ok {
+		b.recordSuccess()
+	}
 }
 
 func (r *Router) backendTimeout(backend Backend) time.Duration {
