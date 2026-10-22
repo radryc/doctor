@@ -27,28 +27,30 @@ export default function DataTable<T extends Record<string, unknown>>({
       {rows.length === 0 ? (
         <p className="empty">No matching records.</p>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              {columns.map((col) => (
-                <th key={String(col.key)}>{col.label}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr key={i}>
+        <div className="data-table-wrap">
+          <table>
+            <thead>
+              <tr>
                 {columns.map((col) => (
-                  <td key={String(col.key)}>
-                    {col.render
-                      ? col.render(row)
-                      : formatValue(row[col.key as keyof T])}
-                  </td>
+                  <th key={String(col.key)}>{col.label}</th>
                 ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i}>
+                  {columns.map((col) => (
+                    <td key={String(col.key)}>
+                      {col.render
+                        ? col.render(row)
+                        : formatValue(row[col.key as keyof T])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

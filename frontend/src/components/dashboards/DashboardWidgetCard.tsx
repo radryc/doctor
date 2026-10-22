@@ -324,6 +324,7 @@ function TimeseriesWidget({ widget, tenant, variableValues, macros, from, to, re
           series={series}
           displayMode={displayMode}
           stacked={widget.visualization?.stacked}
+          unit={widget.visualization?.unit}
           onExpand={() => setExpanded(true)}
         />
       </div>
@@ -337,6 +338,7 @@ function TimeseriesWidget({ widget, tenant, variableValues, macros, from, to, re
         queries={chartQueries}
         from={from}
         to={to}
+        unit={widget.visualization?.unit}
         onClose={() => setExpanded(false)}
       />
     </>

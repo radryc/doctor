@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
-import TimeSeriesChart, { CHART_PALETTE, type ChartDisplayMode } from "./TimeSeriesChart";
+import TimeSeriesChart, { type ChartDisplayMode } from "./TimeSeriesChart";
+import SeriesDetails from "./SeriesDetails";
 import type { MetricSeries } from "../../types/api";
 
 interface ChartExpandModalProps {
@@ -14,6 +15,8 @@ interface ChartExpandModalProps {
   from: Date;
   to: Date;
   onClose: () => void;
+  maxSeries?: number;
+  unit?: string;
 }
 
 export default function ChartExpandModal({
@@ -27,6 +30,8 @@ export default function ChartExpandModal({
   from,
   to,
   onClose,
+  maxSeries = 50,
+  unit,
 }: ChartExpandModalProps) {
   useEffect(() => {
     if (!open) return;
@@ -58,24 +63,17 @@ export default function ChartExpandModal({
           {description && <p className="chart-modal__description">{description}</p>}
           <TimeSeriesChart
             series={series}
-            height={440}
+            height={460}
             displayMode={displayMode}
             stacked={stacked}
             showLegend
+            maxSeries={maxSeries}
+            unit={unit}
           />
-          {series.length > 0 && (
-            <div className="chart-modal__legend">
-              {series.map((item, index) => (
-                <span key={`${item.label}-${index}`} className="chart-modal__legend-item" title={item.label}>
-                  <span
-                    className="chart-modal__swatch"
-                    style={{ backgroundColor: CHART_PALETTE[index % CHART_PALETTE.length] }}
-                  />
-                  <code>{item.label}</code>
-                </span>
-              ))}
-            </div>
-          )}
+          <div>
+            <div className="chart-modal__section-title">Series details</div>
+            <SeriesDetails series={series} maxSeries={maxSeries} />
+          </div>
           {queries.length > 0 && (
             <div className="chart-modal__queries">
               <div className="chart-modal__section-title">Queries</div>
