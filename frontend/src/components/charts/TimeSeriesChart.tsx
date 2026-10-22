@@ -157,6 +157,8 @@ export default function TimeSeriesChart({
           borderRadius: 6,
           color: "var(--ui-text)",
           fontSize: 11,
+          maxHeight: 280,
+          overflowY: "auto",
         }}
         labelStyle={{ color: "var(--ui-muted)" }}
         itemStyle={{ color: "var(--ui-text)" }}
