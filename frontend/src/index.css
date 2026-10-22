@@ -2468,6 +2468,7 @@ pre {
 .signal-badge--l { color: var(--ui-green); background: color-mix(in oklab, var(--ui-green) 12%, transparent); }
 .signal-badge--truncated { color: var(--ui-amber); background: color-mix(in oklab, var(--ui-amber) 12%, transparent); }
 .service-detail__red { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.6rem; }
+.service-detail__recent { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; margin-top: 1rem; }
 .red-card { padding: 0.8rem 0.9rem; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-elevated); }
 .red-card__label { color: var(--ui-faint); font-size: 0.68rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
 .red-card__value { margin-top: 0.35rem; color: var(--ui-text); font-family: "Space Grotesk", sans-serif; font-size: 1.35rem; font-weight: 700; }
