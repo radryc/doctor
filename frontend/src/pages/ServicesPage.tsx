@@ -325,7 +325,12 @@ function REDCard({
 
     const set = (v: number | null) => {
       if (!active) return;
-      setValue(v == null || !Number.isFinite(v) ? "—" : `${v.toFixed(unit === "ms" ? 1 : 2)}${unit === "reqps" ? "/s" : unit}`);
+      if (v == null || !Number.isFinite(v)) {
+        setValue("—");
+        return;
+      }
+      const digits = unit === "ms" && Math.abs(v) < 1 ? 2 : unit === "ms" ? 1 : 2;
+      setValue(`${v.toFixed(digits)}${unit === "reqps" ? "/s" : unit}`);
     };
 
     const traceMetrics = (q: string): Promise<number | null> => {
@@ -367,21 +372,21 @@ function REDCard({
 
     const fallback = () => {
       if (traceqlAgg === "ratio" && traceqlDenominator) {
-        traceRatio(traceqlExpr, traceqlDenominator)
+        traceRatio(traceqlExprShort, traceqlDenominatorShort)
           .then((value) => {
             if (!active) return;
             if (value != null) {
               set(value);
               return;
             }
-            return traceRatio(traceqlExprShort, traceqlDenominatorShort).then((shortValue) => {
-              if (active) set(shortValue);
+            return traceRatio(traceqlExpr, traceqlDenominator).then((canonicalValue) => {
+              if (active) set(canonicalValue);
             });
           })
           .catch(() => set(null));
         return;
       }
-      traceValue(traceqlExpr, traceqlExprShort)
+      traceValue(traceqlExprShort, traceqlExpr)
         .then((v) => {
           if (active) set(v);
         })
@@ -529,18 +534,18 @@ function RecentTraces({ service, tenant }: { service: string; tenant: string }) 
         limit: "20",
       });
     api
-      .getRecentTraces(params(service))
+      .getRecentTraces(params(short))
       .then(async (r) => {
         if (!active) return;
         if ((r.traces ?? []).length > 0 || short === service) {
           setTraces(r.traces ?? []);
-          setSource(service);
+          setSource(short);
           return;
         }
-        const alternate = await api.getRecentTraces(params(short));
+        const alternate = await api.getRecentTraces(params(service));
         if (!active) return;
         setTraces(alternate.traces ?? []);
-        setSource(short);
+        setSource(service);
       })
       .catch(() => {
         if (active) setTraces([]);
@@ -605,18 +610,18 @@ function RecentLogs({ service, tenant }: { service: string; tenant: string }) {
         limit: "50",
       });
     api
-      .searchLogs(params(service))
+      .searchLogs(params(short))
       .then(async (r) => {
         if (!active) return;
         if ((r.results ?? []).length > 0 || short === service) {
           setLogs(r.results ?? []);
-          setSource(service);
+          setSource(short);
           return;
         }
-        const alternate = await api.searchLogs(params(short));
+        const alternate = await api.searchLogs(params(service));
         if (!active) return;
         setLogs(alternate.results ?? []);
-        setSource(short);
+        setSource(service);
       })
       .catch(() => {
         if (active) setLogs([]);
