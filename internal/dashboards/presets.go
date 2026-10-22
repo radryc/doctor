@@ -43,12 +43,14 @@ func presetFleetOverview() DashboardDocument {
 			{
 				ID: "fleet-failing-assets", Title: "Failing Assets", Kind: WidgetStat,
 				GridPos:       GridPos{X: 6, Y: 0, W: 3, H: 3},
+				Description:   "Assets whose latest health observation is Unhealthy, Failed, Critical, or Attention. Locked intents are reported separately below.",
 				Queries:       []WidgetQuery{{RefID: "A", Datasource: DatasourcePrometheus, Expr: `sum(guardian_asset_observation_current{status=~"Unhealthy|Failed|Critical|Attention",guardian_partition=~"$partition"}) or vector(0)`}},
 				Visualization: &WidgetVisualization{Unit: "short", Thresholds: []ThresholdLevel{{Value: 0, Color: "green"}, {Value: 1, Color: "amber"}, {Value: 5, Color: "red"}}},
 			},
 			{
-				ID: "fleet-drifted-intents", Title: "Drifted Intents", Kind: WidgetStat,
+				ID: "fleet-drifted-intents", Title: "Drifted / Locked Intents", Kind: WidgetStat,
 				GridPos:       GridPos{X: 9, Y: 0, W: 3, H: 3},
+				Description:   "Intents that have drifted from their applied state or are locked. A locked intent is not a failing asset.",
 				Queries:       []WidgetQuery{{RefID: "A", Datasource: DatasourcePrometheus, Expr: `sum(guardian_dispatcher_intent_status_current{status=~"Drifted.*"}) or vector(0)`}},
 				Visualization: &WidgetVisualization{Unit: "short", Thresholds: []ThresholdLevel{{Value: 0, Color: "green"}, {Value: 1, Color: "amber"}}},
 			},
