@@ -17,6 +17,7 @@ export default function MetricLineChart({ series, metricName }: MetricLineChartP
   const min = Math.min(...values);
   const max = Math.max(...values);
   const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const maxSeries = 30;
 
   return (
     <section className="result-block">
@@ -27,8 +28,13 @@ export default function MetricLineChart({ series, metricName }: MetricLineChartP
         <span>avg {formatChartValue(avg)}</span>
         <span>max {formatChartValue(max)}</span>
       </div>
+      {series.length > maxSeries && (
+        <p className="metric-chart-note">
+          Showing {maxSeries} of {series.length} series. Aggregate with sum/avg/topk or add label filters to see the rest.
+        </p>
+      )}
       <div style={{ height: 220 }}>
-        <TimeSeriesChart series={series} displayMode="line" showLegend />
+        <TimeSeriesChart series={series} displayMode="line" showLegend maxSeries={maxSeries} />
       </div>
     </section>
   );
