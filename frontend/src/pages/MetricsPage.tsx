@@ -531,6 +531,8 @@ export default function MetricsPage() {
   const graphSeries = response?.data.resultType === "matrix" ? matrixToSeries(response.data.result) : [];
   const hasGraphSeries = graphSeries.some((series) => series.points.length >= 2);
   const rows = tableRows(response);
+  const tableRowLimit = 2000;
+  const visibleRows = rows.length > tableRowLimit ? rows.slice(0, tableRowLimit) : rows;
   const activeExpression = query.trim() || selectedMetric.trim();
   const currentRange = rangeLabel(from, to);
   const parsedFrom = new Date(from);
@@ -912,9 +914,9 @@ export default function MetricsPage() {
                   )
                 ) : view === "table" ? (
                   <DataTable
-                    title="Samples"
+                    title={`Samples${rows.length > tableRowLimit ? ` (first ${tableRowLimit} of ${rows.length})` : ""}`}
                     columns={tableColumns(response)}
-                    rows={rows}
+                    rows={visibleRows}
                   />
                 ) : (
                   <pre className="max-h-[520px] overflow-auto rounded-lg bg-dark-900 p-3 text-[11px] leading-relaxed text-gray-300">
