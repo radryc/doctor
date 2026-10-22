@@ -146,7 +146,7 @@ func presetServiceRED() DashboardDocument {
 				ID: "red-top-failing-ops", Title: "Top Failing Operations", Kind: WidgetToplist,
 				GridPos: GridPos{X: 6, Y: 3, W: 6, H: 6},
 				Queries: []WidgetQuery{{RefID: "A", Datasource: DatasourceTempo,
-					Expr:         `{resource.service.name=~"$service"} | status = error | rate()`,
+					Expr:         `{resource.service.name=~"$service" && status = error} | rate() by (span.name)`,
 					LegendFormat: "{{span.name}}",
 				}},
 				Visualization: &WidgetVisualization{Unit: "reqps"},
