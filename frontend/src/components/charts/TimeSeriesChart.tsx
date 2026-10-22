@@ -35,6 +35,7 @@ interface TimeSeriesChartProps {
   stacked?: boolean;
   showLegend?: boolean;
   onExpand?: () => void;
+  maxSeries?: number;
 }
 
 function formatTime(ts: number): string {
@@ -61,20 +62,22 @@ export default function TimeSeriesChart({
   stacked = false,
   showLegend = true,
   onExpand,
+  maxSeries = 50,
 }: TimeSeriesChartProps) {
+  const visibleSeries = maxSeries > 0 && series.length > maxSeries ? series.slice(0, maxSeries) : series;
   const keys = useMemo(
     () =>
-      series.map((item, index) => ({
+      visibleSeries.map((item, index) => ({
         key: `s${index}`,
         label: item.label,
         color: CHART_PALETTE[index % CHART_PALETTE.length],
       })),
-    [series]
+    [visibleSeries]
   );
 
   const data = useMemo(() => {
     const byTime = new Map<number, Record<string, number>>();
-    series.forEach((item, index) => {
+    visibleSeries.forEach((item, index) => {
       const key = `s${index}`;
       for (const point of item.points) {
         const ts = new Date(point.timestamp).getTime();
@@ -89,7 +92,7 @@ export default function TimeSeriesChart({
       }
     });
     return [...byTime.values()].sort((a, b) => a.ts - b.ts);
-  }, [series]);
+  }, [visibleSeries]);
 
   if (keys.length === 0 || data.length === 0) {
     return <div className="dash-empty">No series in range.</div>;

@@ -2381,6 +2381,7 @@ pre {
 .timeseries-chart--clickable { cursor: zoom-in; }
 .timeseries-chart--clickable:hover { filter: brightness(1.04); }
 .metric-chart-stats { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 0.4rem; color: var(--ui-faint); font-size: 0.68rem; font-family: monospace; }
+.metric-chart-note { margin: 0 0 0.5rem; color: var(--ui-amber); font-size: 0.72rem; line-height: 1.4; }
 .import-dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.4rem; min-height: 110px; padding: 1rem; border: 1px dashed var(--ui-border-strong); border-radius: 8px; color: var(--ui-faint); font-size: 0.8rem; text-align: center; cursor: pointer; }
 .import-dropzone:hover { border-color: var(--ui-accent); color: var(--ui-accent); background: var(--ui-overlay); }
 .import-paste { width: 100%; margin-top: 0.7rem; font: 0.72rem/1.4 ui-monospace, monospace; }
