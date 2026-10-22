@@ -17,6 +17,7 @@ import { useConfig } from "../context/ConfigContext";
 import { copyText } from "../lib/clipboard";
 import MetricLineChart from "../components/charts/MetricLineChart";
 import ChartExpandModal from "../components/charts/ChartExpandModal";
+import { formatDateTimeFull } from "../components/charts/TimeSeriesChart";
 import DataTable from "../components/ui/DataTable";
 import type {
   MetricPoint,
@@ -871,7 +872,7 @@ export default function MetricsPage() {
                   <span className="pill">samples: {stats.samples}</span>
                   {response?.data.resultType && <span className="pill">type: {response.data.resultType}</span>}
                   <span className="pill">step: {step}</span>
-                  <span className="pill">{chartFrom.toLocaleString()} → {chartTo.toLocaleString()}</span>
+                  <span className="pill">{formatDateTimeFull(chartFrom)} → {formatDateTimeFull(chartTo)}</span>
                 </div>
               </div>
 

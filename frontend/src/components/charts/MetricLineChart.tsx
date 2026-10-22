@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Maximize2 } from "lucide-react";
-import TimeSeriesChart, { formatChartValue } from "./TimeSeriesChart";
+import TimeSeriesChart, { formatChartValue, formatDateTimeFull } from "./TimeSeriesChart";
 import SeriesDetails from "./SeriesDetails";
 import type { MetricSeries } from "../../types/api";
 
@@ -70,7 +70,7 @@ export default function MetricLineChart({
           <h3>{metricName ? `Metric: ${metricName}` : "Metric values over time"}</h3>
           {from && to && (
             <div className="metric-chart-subtitle">
-              {from.toLocaleString()} → {to.toLocaleString()}
+              {formatDateTimeFull(from)} → {formatDateTimeFull(to)}
               {step ? ` · step ${step}` : ""}
             </div>
           )}

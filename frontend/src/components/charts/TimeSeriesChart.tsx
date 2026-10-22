@@ -64,6 +64,12 @@ export function formatChartValue(value: number): string {
   return value.toFixed(3);
 }
 
+export function formatDateTimeFull(value: number | Date | string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString(undefined, { timeZoneName: "short" });
+}
+
 export default function TimeSeriesChart({
   series,
   height,
@@ -143,7 +149,7 @@ export default function TimeSeriesChart({
         stroke="var(--ui-border)"
       />
       <Tooltip
-        labelFormatter={(label) => new Date(Number(label)).toLocaleString()}
+        labelFormatter={(label) => formatDateTimeFull(Number(label))}
         formatter={(value, name) => [formatChartValue(Number(value)), name]}
         contentStyle={{
           background: "var(--ui-elevated)",
