@@ -72,17 +72,28 @@ type seriesPresence struct {
 	max time.Time
 }
 
-// countPresentSeries counts series with a sample covering t.
+// countPresentSeries counts series active at t. Prometheus keeps a series
+// visible for the lookback delta after its last sample, so compare against
+// t-lookback rather than requiring t to be inside [min, max].
 func countPresentSeries(groups map[string]map[string]*seriesPresence, t time.Time) int {
 	count := 0
 	for _, series := range groups {
 		for _, presence := range series {
-			if !t.Before(presence.min) && !t.After(presence.max) {
+			if seriesActiveAt(presence, t) {
 				count++
 			}
 		}
 	}
 	return count
+}
+
+// seriesActiveAt reports whether the series has a sample in the Prometheus
+// lookback window ending at t.
+func seriesActiveAt(presence *seriesPresence, t time.Time) bool {
+	if presence == nil || t.Before(presence.min) {
+		return false
+	}
+	return !presence.max.Before(t.Add(-doctorPrometheusLookback))
 }
 
 // execCountByNameRange answers a range query from the chunk series index.
@@ -128,7 +139,7 @@ func (s *Service) execCountByNameRange(ctx context.Context, tenant, partition st
 		for t := start; !t.After(end); t = t.Add(step) {
 			count := 0
 			for _, presence := range series {
-				if !t.Before(presence.min) && !t.After(presence.max) {
+				if seriesActiveAt(presence, t) {
 					count++
 				}
 			}
@@ -170,7 +181,7 @@ func (s *Service) execCountByNameInstant(ctx context.Context, tenant, partition 
 	for _, name := range names {
 		count := 0
 		for _, presence := range groups[name] {
-			if !at.Before(presence.min) && !at.After(presence.max) {
+			if seriesActiveAt(presence, at) {
 				count++
 			}
 		}
