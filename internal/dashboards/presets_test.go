@@ -76,3 +76,31 @@ func TestServiceREDPresetTopFailingOperationsIsTraceQL(t *testing.T) {
 	}
 	t.Fatal("red-top-failing-ops widget not found")
 }
+
+// The Active Series stat must match both a short service name and its
+// canonical doctor.<intent>.<asset> variants.
+func TestServiceREDPresetActiveSeriesMatchesCanonicalServices(t *testing.T) {
+	var preset DashboardDocument
+	for _, candidate := range builtInPresets() {
+		if candidate.ID == "preset-service-red" {
+			preset = candidate
+			break
+		}
+	}
+	if preset.ID == "" {
+		t.Fatal("preset-service-red not found")
+	}
+	for _, widget := range preset.Layout {
+		if widget.ID != "red-active-series" {
+			continue
+		}
+		if len(widget.Queries) == 0 {
+			t.Fatal("red-active-series has no queries")
+		}
+		if expr := widget.Queries[0].Expr; !strings.Contains(expr, `$service(\..*)?`) {
+			t.Fatalf("active-series query %q must include canonical service variants", expr)
+		}
+		return
+	}
+	t.Fatal("red-active-series widget not found")
+}
