@@ -2366,6 +2366,21 @@ pre {
 .modal__header button { border: 0; background: transparent; color: var(--ui-faint); cursor: pointer; }
 .modal__body { flex: 1; min-height: 0; overflow: auto; padding: 0.9rem; }
 .modal__footer { display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0.7rem 0.9rem; border-top: 1px solid var(--ui-border); }
+.chart-modal { width: min(1180px, 96vw); }
+.chart-modal__body { display: grid; gap: 0.85rem; }
+.chart-modal__description { margin: 0; color: var(--ui-muted); font-size: 0.8rem; line-height: 1.45; }
+.chart-modal__legend { display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; }
+.chart-modal__legend-item { display: inline-flex; align-items: center; gap: 0.35rem; min-width: 0; color: var(--ui-muted); font-size: 0.72rem; }
+.chart-modal__swatch { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; }
+.chart-modal__legend-item code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 42ch; }
+.chart-modal__section-title { margin-bottom: 0.3rem; color: var(--ui-faint); font-size: 0.65rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+.chart-modal__queries { display: grid; gap: 0.3rem; }
+.chart-modal__query { display: block; padding: 0.35rem 0.45rem; border: 1px solid var(--ui-border); border-radius: 5px; background: var(--ui-input); color: var(--ui-muted); font-size: 0.7rem; white-space: pre-wrap; word-break: break-word; }
+.chart-modal__range { align-items: center; gap: 0.5rem; color: var(--ui-faint); font-size: 0.7rem; }
+.timeseries-chart { width: 100%; }
+.timeseries-chart--clickable { cursor: zoom-in; }
+.timeseries-chart--clickable:hover { filter: brightness(1.04); }
+.metric-chart-stats { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 0.4rem; color: var(--ui-faint); font-size: 0.68rem; font-family: monospace; }
 .import-dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.4rem; min-height: 110px; padding: 1rem; border: 1px dashed var(--ui-border-strong); border-radius: 8px; color: var(--ui-faint); font-size: 0.8rem; text-align: center; cursor: pointer; }
 .import-dropzone:hover { border-color: var(--ui-accent); color: var(--ui-accent); background: var(--ui-overlay); }
 .import-paste { width: 100%; margin-top: 0.7rem; font: 0.72rem/1.4 ui-monospace, monospace; }
