@@ -413,6 +413,9 @@ func (u *AWSUpstream) SearchTraces(ctx context.Context, _ string, search TraceSe
 	}
 	out := make([]TraceSummary, 0, len(summaries))
 	for _, summary := range summaries {
+		if !awsSummaryMatchesSearch(summary, search) {
+			continue
+		}
 		out = append(out, TraceSummary{
 			TraceID:         normalizeXRayTraceID(summary.TraceID),
 			RootServiceName: firstNonEmpty(summary.Service, SourceAWS),
@@ -430,6 +433,41 @@ func (u *AWSUpstream) SearchTraces(ctx context.Context, _ string, search TraceSe
 		out = u.FilterSummaries(ctx, out)
 	}
 	return out, nil
+}
+
+// awsSummaryMatchesSearch applies the TraceQL tags Doctor can evaluate on an
+// X-Ray trace summary. Arbitrary span attributes are not available on a
+// summary, so unknown keys are left to the span-level matcher and do not
+// exclude the summary.
+func awsSummaryMatchesSearch(summary awsstore.TraceSummary, search TraceSearch) bool {
+	for _, tag := range search.Tags {
+		value, known := awsSummaryTagValue(summary, tag.Key)
+		if known && !tag.Matches(value) {
+			return false
+		}
+	}
+	for _, tag := range search.NotTags {
+		value, known := awsSummaryTagValue(summary, tag.Key)
+		if known && tag.Matches(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func awsSummaryTagValue(summary awsstore.TraceSummary, key string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "source":
+		return SourceAWS, true
+	case "region", "aws_region", "aws.region":
+		return summary.Region, true
+	case "account", "aws_account", "aws.account":
+		return summary.Account, true
+	case "service", "service.name":
+		return firstNonEmpty(summary.Service, SourceAWS), true
+	default:
+		return "", false
+	}
 }
 
 // GetTrace implements TracesUpstream.

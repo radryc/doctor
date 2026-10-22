@@ -243,6 +243,34 @@ func TestTempoSearchTraceQLSubsetFiltersLocalTraces(t *testing.T) {
 	}
 }
 
+func TestTempoSearchTraceQLSubsetFiltersLocalTracesWithoutRouter(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{
+		{TraceID: "trace-a", SpanID: "span-a", Name: "GET /a", Service: "api", StartTime: base, EndTime: base.Add(time.Second), Attributes: map[string]string{"source": "aws"}},
+		{TraceID: "trace-b", SpanID: "span-b", Name: "GET /b", Service: "worker", StartTime: base, EndTime: base.Add(time.Second)},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=%7B%20source%20%3D%20%22aws%22%20%7D", nil)
+	rec := httptest.NewRecorder()
+	svc.handleTempoSearch(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Traces []struct {
+			TraceID string `json:"traceID"`
+		} `json:"traces"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Traces) != 1 || resp.Traces[0].TraceID != "trace-a" {
+		t.Fatalf("traces = %#v", resp.Traces)
+	}
+}
+
 func TestTempoSearchRejectsInvalidDuration(t *testing.T) {
 	svc := &Service{defaultTenant: "default", logEngine: &fakeLogEngineBackend{}}
 	req := httptest.NewRequest(http.MethodGet, "/api/search?minDuration=notaduration", nil)

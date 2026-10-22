@@ -320,6 +320,16 @@ func (s *Service) handleTempoSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		// The local/AWS fallback does not speak TraceQL directly; fold the
+		// supported subset into tag matchers before searching.
+		if err := search.ApplyTraceQL(); err != nil {
+			writeTempoError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if search.MatchNone {
+			writeJSON(w, http.StatusOK, tempoSearchResponse(nil, nil))
+			return
+		}
 		local := localTracesUpstream{svc: s}
 		localSummaries, localErr := local.SearchTraces(r.Context(), tenant, search)
 		if localErr != nil {

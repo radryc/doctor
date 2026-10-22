@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"regexp"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ type fakeAWSClient struct {
 	metrics      []awsstore.MetricDescriptor
 	services     []awsstore.ServiceInfo
 	logGroups    []string
+	traces       []awsstore.TraceSummary
 }
 
 func (f *fakeAWSClient) Enabled() bool { return f.enabled }
@@ -37,7 +39,7 @@ func (f *fakeAWSClient) QueryLogs(_ context.Context, q awsstore.LogQuery) ([]aws
 }
 
 func (f *fakeAWSClient) QueryTraces(context.Context, awsstore.TraceQuery) ([]awsstore.TraceSummary, error) {
-	return nil, nil
+	return f.traces, nil
 }
 
 func (f *fakeAWSClient) GetTrace(context.Context, string) ([]awsstore.Span, error) {
@@ -169,6 +171,41 @@ func TestAWSPartitionPrefersRegion(t *testing.T) {
 	}
 	if got := AWSPartition("", ""); got != SourceAWS {
 		t.Fatalf("partition = %q, want aws", got)
+	}
+}
+
+func TestAWSUpstreamSearchTracesFiltersRegion(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	client := &fakeAWSClient{
+		enabled: true,
+		traces: []awsstore.TraceSummary{
+			{TraceID: "1-us", Service: "api", Region: "us-east-1", Account: "111", StartTime: base.Add(-time.Minute), EndTime: base, Duration: time.Second},
+			{TraceID: "1-eu", Service: "api", Region: "eu-west-1", Account: "222", StartTime: base.Add(-time.Minute), EndTime: base, Duration: time.Second},
+		},
+	}
+	upstream := &AWSUpstream{Client: client}
+
+	out, err := upstream.SearchTraces(context.Background(), "default", TraceSearch{
+		Tags: []TraceTag{
+			{Key: "source", Value: SourceAWS},
+			{Key: "region", Value: "eu-.*", Regex: regexp.MustCompile("eu-.*")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SearchTraces: %v", err)
+	}
+	if len(out) != 1 || out[0].TraceID != "1-eu" || out[0].Region != "eu-west-1" {
+		t.Fatalf("traces = %#v, want only 1-eu in eu-west-1", out)
+	}
+
+	out, err = upstream.SearchTraces(context.Background(), "default", TraceSearch{
+		Tags: []TraceTag{{Key: "source", Value: SourceDoctor}},
+	})
+	if err != nil {
+		t.Fatalf("SearchTraces(source=doctor): %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("traces = %#v, want none for source=doctor", out)
 	}
 }
 
