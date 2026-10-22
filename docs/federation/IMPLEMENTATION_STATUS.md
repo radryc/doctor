@@ -37,6 +37,12 @@ bffa647 feat/multi-account-federation     multi-account AWS federation
 ### Next stage — OTel **traces** relay
 
 Trace-store option: [ClickHouse traces plan](./clickhouse-traces-plan.md).
+Deployment design: [ClickHouse via Guardian, production S3](./clickhouse-guardian-assets-design.md).
+
+**Trace path decision:** Guardian deploys ClickHouse; MonoFS uses ClickHouse as
+its trace backend; Doctor and Grafana keep the existing MonoFS/Tempo API. This
+keeps ClickHouse behind one `DoctorBackend` seam instead of adding a second
+Doctor storage client.
 
 **Decision:** the first relay implementation is **traces only** (OTLP
 `ExportTraceServiceRequest`). Metrics and logs keep their current paths:
@@ -63,10 +69,14 @@ Out of scope for this stage:
 Remaining decisions:
 
 1. Gateway topology: pusher → regional OTel gateway → central store.
-2. Trace store: current MonoFS logengine vs external Tempo/ClickHouse.
-3. Trace index: `trace_id -> account/region` built at ingest.
+2. Trace store: MonoFS logengine (today) vs MonoFS + ClickHouse (planned).
+   ClickHouse runs in a Guardian partition with S3-backed storage.
+3. Trace index: `trace_id -> account/region` built at ingest; in ClickHouse the
+   first version is a time-bounded bloom-filter lookup, not a separate index.
 4. Whether relayed traces are tagged `source="doctor"` and queried only through
    the central store (recommended), never through the pusher.
+5. Tenant propagation: add `tenant` to the MonoFS trace proto before enabling
+   multi-tenant ClickHouse traces.
 
 ## Done
 
