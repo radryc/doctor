@@ -205,11 +205,12 @@ export default function TracesPage() {
       .catch(() => {});
   }, [config.default_tenant, partitionFilter]);
 
-  useEffect(() => {
-    if (service && !services.includes(service)) {
-      setService("");
-    }
-  }, [service, services]);
+  // Keep an explicitly requested service even when it is absent from the
+  // recent-window catalog. Clearing it silently replaces a canonical trace
+  // link with every trace in the tenant, including unrelated partitions.
+  const serviceOptions = service && !services.includes(service)
+    ? [service, ...services]
+    : services;
 
   // Keep the partition picker aligned with the traces currently loaded. This
   // covers partitions that have traces but no log records in the scan window.
@@ -281,6 +282,7 @@ export default function TracesPage() {
   const copyViewLink = () => {
     const params = new URLSearchParams();
     params.set("range", String(minutes));
+    if (service) params.set("service", service);
     if (partitionFilter) params.set("partition", partitionFilter);
     const base = window.location.href.split("#")[0];
     void copyText(`${base}#/traces?${params.toString()}`).then((ok) => {
@@ -341,7 +343,7 @@ export default function TracesPage() {
             onChange={(e) => setService(e.target.value)}
           >
             <option value="">All services</option>
-            {services.map((s) => (
+            {serviceOptions.map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>

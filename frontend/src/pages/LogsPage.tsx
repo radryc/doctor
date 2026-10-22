@@ -201,17 +201,17 @@ export default function LogsPage() {
     if (service) setComponentFilter(service);
   }, [searchParams]);
 
-  useEffect(() => {
-    if (componentFilter && services.length > 0 && !services.includes(componentFilter)) {
-      setComponentFilter("");
-    }
-  }, [componentFilter, services]);
-
-  useEffect(() => {
-    if (logGroup && !logGroups.includes(logGroup)) {
-      setLogGroup("");
-    }
-  }, [logGroup, logGroups]);
+  // Keep an explicitly requested service/log group even when the telemetry
+  // scan does not list it (the catalog only covers the recent window). Clearing
+  // it here silently turns a canonical link such as
+  // /logs?service=div-a-orders.app.DivAOrdersStack into the global firehose,
+  // which shows unrelated partitions instead of "no matches".
+  const serviceOptions = componentFilter && !services.includes(componentFilter)
+    ? [componentFilter, ...services]
+    : services;
+  const logGroupOptions = logGroup && !logGroups.includes(logGroup)
+    ? [logGroup, ...logGroups]
+    : logGroups;
 
   useEffect(() => {
     autoAwsTried.current = false;
@@ -258,6 +258,9 @@ export default function LogsPage() {
         limit: "500",
       });
       if (queryApplied) params.set("q", queryApplied);
+      // Filter server-side as well: a canonical service may not appear in the
+      // first page of the tenant-wide firehose.
+      if (componentFilter) params.set("service", componentFilter);
       if (partitionFilter) params.set("partition", partitionFilter);
       if (logGroup) params.set("logGroup", logGroup);
       const data = await api.searchLogs(params);
@@ -267,7 +270,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [config.default_tenant, tr, queryApplied, partitionFilter, logGroup]);
+  }, [config.default_tenant, tr, queryApplied, componentFilter, partitionFilter, logGroup]);
 
   useEffect(() => {
     void load();
@@ -329,6 +332,7 @@ export default function LogsPage() {
 
   const copyViewLink = () => {
     const params = new URLSearchParams();
+    if (componentFilter) params.set("service", componentFilter);
     if (partitionFilter) params.set("partition", partitionFilter);
     if (logGroup) params.set("logGroup", logGroup);
     if (queryApplied) params.set("q", queryApplied);
@@ -379,11 +383,11 @@ export default function LogsPage() {
             onChange={(e) => setComponentFilter(e.target.value)}
           >
             <option value="">All services</option>
-            {services.map((s) => (
+            {serviceOptions.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
-          {logGroups.length > 0 && (
+          {(logGroupOptions.length > 0 || logGroup) && (
             <label className="filter-label">
               CloudWatch log group
               <select
@@ -395,7 +399,7 @@ export default function LogsPage() {
                 }}
               >
                 <option value="">All local logs</option>
-                {logGroups.map((group) => (
+                {logGroupOptions.map((group) => (
                   <option key={group} value={group}>{group}</option>
                 ))}
               </select>
