@@ -94,20 +94,6 @@ export default function MetricLineChart({
         <span>avg {formatChartValue(avg)}</span>
         <span>max {formatChartValue(max)}</span>
       </div>
-      {labelSummary.length > 0 && (
-        <div className="series-label-summary" aria-label="Labels across returned series">
-          {labelSummary.map(({ key, values }) => {
-            const shown = values.slice(0, 4).join(" · ");
-            const extra = values.length > 4 ? ` +${values.length - 4}` : "";
-            return (
-              <span className="label-chip" key={key} title={`${key}: ${values.join(", ")}`}>
-                <strong>{key}</strong>
-                <span>{shown}{extra}</span>
-              </span>
-            );
-          })}
-        </div>
-      )}
       {series.length > maxSeries && (
         <p className="metric-chart-note">
           Showing {maxSeries} of {series.length} series. Aggregate with sum/avg/topk or add label filters to see the rest.
@@ -123,6 +109,23 @@ export default function MetricLineChart({
         />
       </div>
       <SeriesDetails series={series} maxSeries={maxSeries} />
+      {labelSummary.length > 0 && (
+        <details className="metric-label-details">
+          <summary>Label values across returned series ({labelSummary.length})</summary>
+          <div className="series-label-summary" aria-label="Labels across returned series">
+            {labelSummary.map(({ key, values }) => {
+              const shown = values.slice(0, 4).join(" · ");
+              const extra = values.length > 4 ? ` +${values.length - 4}` : "";
+              return (
+                <span className="label-chip" key={key} title={`${key}: ${values.join(", ")}`}>
+                  <strong>{key}</strong>
+                  <span>{shown}{extra}</span>
+                </span>
+              );
+            })}
+          </div>
+        </details>
+      )}
     </section>
   );
 }
