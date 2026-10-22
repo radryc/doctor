@@ -83,6 +83,11 @@ type QueryConfig struct {
 	AWSBackendURL       string
 	AWSBackendToken     string
 
+	FederationEnabled     bool
+	FederationCatalogFile string
+	FederationMaxFanout   int
+	FederationTimeout     time.Duration
+
 	ProxyEnabled              bool
 	ProxyBackendsFile         string
 	ProxyRegistryInterval     time.Duration
@@ -245,6 +250,11 @@ func LoadQuery(service string) QueryConfig {
 		AWSEnabled:          envBool("DOCTOR_AWS_ENABLED", true),
 		AWSBackendURL:       envString("DOCTOR_AWS_BACKEND_URL", ""),
 		AWSBackendToken:     envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
+
+		FederationEnabled:     envBool("DOCTOR_FEDERATION_ENABLED", false),
+		FederationCatalogFile: envString("DOCTOR_FEDERATION_CATALOG_FILE", ""),
+		FederationMaxFanout:   int(envInt64("DOCTOR_FEDERATION_MAX_FANOUT", 32)),
+		FederationTimeout:     envDuration("DOCTOR_FEDERATION_TIMEOUT", 5*time.Second),
 
 		ProxyEnabled:              envBool("DOCTOR_PROXY_ENABLED", true),
 		ProxyBackendsFile:         envString("DOCTOR_PROXY_BACKENDS_FILE", ""),

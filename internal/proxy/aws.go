@@ -41,7 +41,7 @@ var (
 	selectorTailSpace = regexp.MustCompile(`\s+\}`)
 
 	lokiSourceAWSPattern = regexp.MustCompile(`source\s*=~?\s*"(aws|aws\|[^"]*)"`)
-	lokiLogGroupPattern  = regexp.MustCompile(`aws_log_group\s*=~?\s*"([^"]+)"`)
+	lokiLogGroupPattern  = regexp.MustCompile(`aws_log_group\s*(=~?)\s*"([^"]+)"`)
 )
 
 // AWSQueryMode classifies a query and returns it with the source matcher
@@ -135,10 +135,51 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 	}
 
 	var logGroups []string
-	if match := lokiLogGroupPattern.FindStringSubmatch(pushdown.Selector); len(match) == 2 {
-		for _, group := range strings.Split(match[1], "|") {
-			if trimmed := strings.TrimSpace(group); trimmed != "" {
-				logGroups = append(logGroups, trimmed)
+	if match := lokiLogGroupPattern.FindStringSubmatch(pushdown.Selector); len(match) == 3 {
+		op, raw := match[1], match[2]
+		if op == "=~" {
+			// A log-group regex (the Grafana dashboards use one so they work
+			// with and without the account prefix) must be resolved against
+			// the pusher catalog before calling Logs Insights; Insights only
+			// accepts concrete log-group names.
+			if resolver, ok := client.(interface {
+				ResolveLogGroups(context.Context, string) ([]string, error)
+			}); ok {
+				groups, err := resolver.ResolveLogGroups(ctx, raw)
+				if err != nil {
+					return nil
+				}
+				logGroups = append(logGroups, groups...)
+			} else {
+				patterns := make([]*regexp.Regexp, 0, 2)
+				for _, part := range strings.Split(raw, "|") {
+					if trimmed := strings.TrimSpace(part); trimmed != "" {
+						if re, err := regexp.Compile(trimmed); err == nil {
+							patterns = append(patterns, re)
+						}
+					}
+				}
+				if len(patterns) == 0 {
+					return nil
+				}
+				groups, err := client.ListLogGroups(ctx)
+				if err != nil {
+					return nil
+				}
+				for _, group := range groups {
+					for _, re := range patterns {
+						if re.MatchString(group) {
+							logGroups = append(logGroups, group)
+							break
+						}
+					}
+				}
+			}
+		} else {
+			for _, group := range strings.Split(raw, "|") {
+				if trimmed := strings.TrimSpace(group); trimmed != "" {
+					logGroups = append(logGroups, trimmed)
+				}
 			}
 		}
 	}
@@ -176,8 +217,28 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 		return nil
 	}
 
+	defaultGroup := ""
+	if len(logGroups) == 1 {
+		defaultGroup = logGroups[0]
+	}
+	return AWSLogRecords(records, tenant, defaultGroup, "", "")
+}
+
+// AWSLogRecords converts awsread log records into the segment shape used by
+// Doctor, stamping AWS provenance and the target's account/region when the
+// pusher response omits them.
+func AWSLogRecords(records []awsstore.LogRecord, tenant, defaultLogGroup, defaultAccount, defaultRegion string) []segment.LogRecord {
 	out := make([]segment.LogRecord, 0, len(records))
 	for _, record := range records {
+		if record.LogGroup == "" {
+			record.LogGroup = defaultLogGroup
+		}
+		if record.Account == "" {
+			record.Account = defaultAccount
+		}
+		if record.Region == "" {
+			record.Region = defaultRegion
+		}
 		attributes := map[string]string{
 			LabelSource:     SourceAWS,
 			"aws_log_group": record.LogGroup,

@@ -182,13 +182,23 @@ func (c *Client) ListMetrics(ctx context.Context, namespace, metric string) ([]M
 
 // ListLogGroups returns the CloudWatch log groups exposed by the pusher read
 // API. It is used by the logs UI and Grafana variables to discover what can be
-// queried.
+// queried. The pusher returns a bare JSON array; accept the legacy object form
+// (`{"log_groups":[...]}`) as well so Doctor and the pusher can be rolled
+// independently.
 func (c *Client) ListLogGroups(ctx context.Context) ([]string, error) {
+	var raw json.RawMessage
+	if err := c.get(ctx, "/v1/aws/log-groups", nil, &raw); err != nil {
+		return nil, err
+	}
+	var groups []string
+	if err := json.Unmarshal(raw, &groups); err == nil {
+		return groups, nil
+	}
 	var resp struct {
 		LogGroups []string `json:"log_groups"`
 	}
-	if err := c.get(ctx, "/v1/aws/log-groups", nil, &resp); err != nil {
-		return nil, err
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("decode aws log groups: %w", err)
 	}
 	return resp.LogGroups, nil
 }

@@ -7,11 +7,20 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+)
+
+// ErrScopeRequired and ErrTooBroad are shared by the federated AWS upstream
+// and the query handlers so broad live-AWS queries can return HTTP 422 instead
+// of a silent partial result.
+var (
+	ErrScopeRequired = errors.New("scope required for live AWS federation")
+	ErrTooBroad      = errors.New("query matches too many AWS federation targets")
 )
 
 // Signal identifies one telemetry signal.
@@ -91,6 +100,7 @@ type Backend struct {
 	Modes      map[Signal]Mode
 	Policy     QueryPolicy // always (default) or fallback
 	Origin     string      // "config" | "guardian-pusher" | "guardian-partition"
+	Federated  bool        // target selection owned by an internal planner (e.g. aws-federated)
 
 	// Pusher metadata surfaced by /v1/proxy/endpoints.
 	Provider      string

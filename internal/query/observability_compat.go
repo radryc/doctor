@@ -130,6 +130,13 @@ func (s *Service) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := s.tenantFromRequest(r)
 
+	if _, awsMode := proxy.AWSQueryMode(query); awsMode != proxy.AWSQueryNone {
+		if err := s.checkAWSLogScope(r.Context(), query, nil); err != nil {
+			writeLokiError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+	}
+
 	plan, err := parseLokiPlan(query)
 	if err != nil {
 		writeLokiError(w, http.StatusBadRequest, err.Error())
@@ -311,10 +318,13 @@ func (s *Service) fetchLokiRecords(ctx context.Context, tenant string, plan loki
 		if err != nil {
 			return records, err
 		}
-		// The proxy router serves native storage; federate CloudWatch logs when
-		// the selector explicitly targets the AWS source.
-		if awsLogs := s.queryAWSLogsForLoki(ctx, tenant, plan, from, to, limit); len(awsLogs) > 0 {
-			records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
+		// The proxy router serves native storage and the single logical AWS
+		// federated backend. Only use the direct fallback when the router does
+		// not own AWS, otherwise the same query is sent twice.
+		if !s.awsViaRouter {
+			if awsLogs := s.queryAWSLogsForLoki(ctx, tenant, plan, from, to, limit); len(awsLogs) > 0 {
+				records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
+			}
 		}
 		return records, nil
 	}
