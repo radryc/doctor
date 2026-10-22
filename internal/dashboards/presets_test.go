@@ -39,3 +39,40 @@ func TestAWSFederationPresetScopesXRayTraces(t *testing.T) {
 	}
 	t.Fatal("aws-xray-traces widget not found")
 }
+
+// The Service RED "Top Failing Operations" panel must use TraceQL metrics
+// syntax; a LogQL-style pipeline filter is rejected by the metrics parser.
+func TestServiceREDPresetTopFailingOperationsIsTraceQL(t *testing.T) {
+	var preset DashboardDocument
+	for _, candidate := range builtInPresets() {
+		if candidate.ID == "preset-service-red" {
+			preset = candidate
+			break
+		}
+	}
+	if preset.ID == "" {
+		t.Fatal("preset-service-red not found")
+	}
+
+	for _, widget := range preset.Layout {
+		if widget.ID != "red-top-failing-ops" {
+			continue
+		}
+		if len(widget.Queries) == 0 {
+			t.Fatal("red-top-failing-ops has no queries")
+		}
+		query := widget.Queries[0]
+		if query.Datasource != DatasourceTempo {
+			t.Fatalf("datasource = %q, want %q", query.Datasource, DatasourceTempo)
+		}
+		if strings.Contains(query.Expr, "| status = error |") {
+			t.Fatalf("query %q uses a LogQL-style filter stage", query.Expr)
+		}
+		if !strings.Contains(query.Expr, "status = error") ||
+			!strings.Contains(query.Expr, "rate() by (span.name)") {
+			t.Fatalf("query %q must filter status=error and group by span.name", query.Expr)
+		}
+		return
+	}
+	t.Fatal("red-top-failing-ops widget not found")
+}
