@@ -8,19 +8,19 @@ import { useTimeRange } from "../context/TimeRangeContext";
 import type { DiscoveredService, LogRecord } from "../types/api";
 
 // Services are emitted with both short names ("doctor") and canonical names
-// ("doctor.query.query"). PromQL anchors regex matchers, so match the exact
-// service or any dot-prefixed child. Backslashes are doubled because PromQL and
-// TraceQL string literals consume one escape level.
+// ("doctor.query.query"). Match the exact service or any dot-prefixed child.
+// Dots in the service name are written as [.] so the expression stays valid in
+// both PromQL and TraceQL string literals without backslash escaping.
 function escapeServiceRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\\\$&");
+  return value.replaceAll(".", "[.]");
 }
 
 function promServiceMatcher(name: string): string {
-  return `${escapeServiceRegex(name)}(\\\\..*)?`;
+  return `${escapeServiceRegex(name)}([.].*)?`;
 }
 
 function traceServiceMatcher(name: string): string {
-  return `^${escapeServiceRegex(name)}($|\\\\.)`;
+  return `^${escapeServiceRegex(name)}([.].*)?`;
 }
 
 // ── APM Service Catalog (/services) ──────────────────────────────────────────
@@ -380,39 +380,44 @@ function REDCard({
 function RecentTraces({ service, tenant }: { service: string; tenant: string }) {
   const tr = useTimeRange();
   const { from, to } = tr.resolve();
+  const { open } = useInspector();
   const [traces, setTraces] = useState<Array<{ trace_id: string; span_count: number; min_time: string; duration_ms?: number }>>([]);
 
   useEffect(() => {
     const params = new URLSearchParams({
-      q: `{ resource.service.name =~ "${traceServiceMatcher(service)}" }`,
-      start: (from.getTime() / 1000).toFixed(0),
-      end: (to.getTime() / 1000).toFixed(0),
-      limit: "20",
       tenant,
+      service,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      limit: "20",
     });
     api
-      .searchTraces(params)
-      .then((r) =>
-        setTraces(
-          (r.traces ?? []).map((t) => ({
-            trace_id: t.traceID,
-            span_count: 0,
-            duration_ms: t.durationMs,
-            min_time: t.startTimeUnixNano
-              ? new Date(Number(BigInt(t.startTimeUnixNano) / 1_000_000n)).toISOString()
-              : "",
-          }))
-        )
-      )
+      .getRecentTraces(params)
+      .then((r) => setTraces(r.traces ?? []))
       .catch(() => setTraces([]));
   }, [service, tenant, from, to, tr.refreshTick]);
 
   if (traces.length === 0) return <div className="xp-empty">No recent traces.</div>;
 
+  const openTrace = (traceId: string) => open({ kind: "trace", id: traceId, tenant });
+
   return (
     <div>
       {traces.map((t) => (
-        <div key={t.trace_id} className="trace-row">
+        <div
+          key={t.trace_id}
+          className="trace-row"
+          role="button"
+          tabIndex={0}
+          title="Open trace"
+          onClick={() => openTrace(t.trace_id)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openTrace(t.trace_id);
+            }
+          }}
+        >
           <code className="trace-row__id">{t.trace_id.slice(0, 16)}…</code>
           <span>{t.duration_ms != null ? `${t.duration_ms}ms` : `${t.span_count} spans`}</span>
           <span>{new Date(t.min_time).toLocaleTimeString()}</span>
