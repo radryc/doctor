@@ -922,11 +922,28 @@ func TestHandlePrometheusQueryRangeAcceptsFormEncodedPost(t *testing.T) {
 	}
 }
 
-func TestHandlePrometheusQueryRangeRejectsRawGuardianCumulativeTotals(t *testing.T) {
+func TestHandlePrometheusQueryRangeAllowsRawGuardianCumulativeTotals(t *testing.T) {
 	t.Helper()
 
 	base := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
-	backend := &fakeLogEngineBackend{}
+	backend := &fakeLogEngineBackend{metrics: []segment.MetricPointRecord{
+		{
+			Tenant:     "default",
+			MetricName: "guardian_pusher_task_executions",
+			Timestamp:  base.Add(-time.Minute),
+			HasValue:   true,
+			Value:      1,
+			Attributes: map[string]string{"guardian_operation": "APPLY"},
+		},
+		{
+			Tenant:     "default",
+			MetricName: "guardian_pusher_task_executions",
+			Timestamp:  base,
+			HasValue:   true,
+			Value:      2,
+			Attributes: map[string]string{"guardian_operation": "APPLY"},
+		},
+	}}
 	svc := &Service{defaultTenant: "default", logEngine: backend}
 
 	req := httptest.NewRequest(
@@ -938,11 +955,11 @@ func TestHandlePrometheusQueryRangeRejectsRawGuardianCumulativeTotals(t *testing
 
 	svc.handlePrometheusQueryRange(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if backend.lastMetricQuery.MetricName != "" {
-		t.Fatalf("metric backend was queried for %q; range guard should reject before storage access", backend.lastMetricQuery.MetricName)
+	if backend.lastMetricQuery.MetricName != "guardian_pusher_task_executions" {
+		t.Fatalf("metric backend was queried for %q, want guardian_pusher_task_executions", backend.lastMetricQuery.MetricName)
 	}
 }
 
