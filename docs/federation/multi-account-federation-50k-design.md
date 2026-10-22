@@ -21,7 +21,7 @@
 | Live verification | 3 accounts, metrics/logs, policy isolation, 422 | **DONE** — see below |
 | MonoFS snapshot | `/doctor/v1/federation` sharded snapshot + manifest | **DONE** — store, CAS manifest, sharded publish, publisher CLI; in-cluster verification pending |
 | Catalog builder | partition + pusher registry + `/v1/aws/meta` join | **DONE** — builder, CLI, tests |
-| OTel relay | pusher OTLP receiver + buffer + gateway | Not started |
+| OTel traces relay | pusher OTLP **trace** receiver + buffer + gateway + trace index | Planned — traces only first; metrics/logs later |
 | Central rollups | broad-query store + trace index | Not started |
 | UI/dashboards | federation status page, `$account` variable | **PARTIAL** — `/v1/federation/status` added; Grafana `$account` not started |
 
@@ -44,7 +44,7 @@
 | D2 | Put target selection in an **indexed catalog + query planner** | A query must resolve to ≤32 targets without scanning 50k rows |
 | D3 | Use **pull federation for narrow queries**, **central data for broad queries** | CloudWatch quotas and tail latency make 50k live fan-out impossible |
 | D4 | Keep the pusher **account-scoped and stateless** for CW/X-Ray reads | Preserves the existing security/credential boundary |
-| D5 | Add an **OTel relay mode** in the pusher for isolated accounts; query OTel from central storage | Pusher-local OTel storage/query would duplicate the collector/Doctor and not scale |
+| D5 | Add an **OTel relay mode** in the pusher for isolated accounts; query OTel from central storage. **First implementation: traces only.** | Pusher-local OTel storage/query would duplicate the collector/Doctor and not scale; traces are the first priority |
 | D6 | Replace 50k explicit `aws_bindings` with **catalog-backed account→partition resolution** | Keeps policy bundles small and fast |
 | D7 | Make tracing/log search require a **scope predicate or central index** | Trace IDs do not encode account; text search over 50k accounts is not a pull query |
 | D8 | Keep `DOCTOR_AWS_BACKEND_URL` as a **one-entry compatibility catalog** | No breaking change for the current demo/deployments |
@@ -1041,6 +1041,12 @@ At 50k this list is large and pollutes the compiled policy. New model:
 ## 9. OTel Relay in the Pusher
 
 ### 9.1 Why relay, not store
+
+**Implementation scope (first stage): OTLP traces only.** The same receiver can
+later accept metrics and logs, but the first version handles
+`ExportTraceServiceRequest` so the trace store and `trace_id -> account` index
+can be built and validated independently. OTel metrics/logs keep their current
+paths.
 
 At 50k accounts:
 

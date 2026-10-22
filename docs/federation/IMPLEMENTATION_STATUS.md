@@ -34,21 +34,37 @@ bffa647 feat/multi-account-federation     multi-account AWS federation
 - Grafana multi-account metric queries verified.
 - X-Ray live data not verified because the demo AWS stacks had been deleted.
 
-### Next stage — OTel relay
+### Next stage — OTel **traces** relay
 
-**Clarification:** the relay is for **OTLP telemetry in general**, not only
-distributed tracing. The same pusher receiver can forward traces, metrics, and
-logs. Distributed tracing is the primary use case because spans need a central
-trace store and a `trace_id -> account` index.
+**Decision:** the first relay implementation is **traces only** (OTLP
+`ExportTraceServiceRequest`). Metrics and logs keep their current paths:
+OTel metrics/logs go direct to the collector/Doctor or through CloudWatch;
+they are not relayed by the pusher in this stage.
 
-Open decisions for tomorrow:
+In scope:
 
-1. Relay scope: traces only first, or traces + metrics + logs.
-2. Gateway topology: pusher → regional OTel gateway → central store.
-3. Trace store: current MonoFS logengine vs external Tempo/ClickHouse.
-4. Trace index: `trace_id -> account/region` built at ingest.
-5. Whether relayed OTel should be tagged `source="doctor"` and queried only
-   through the central store (recommended), never through the pusher.
+- `guardian-pusher-aws` OTLP gRPC/HTTP trace receiver (`:4317`/`:4318`).
+- Resource enrichment with `guardian.account`, `guardian.region`,
+  `guardian.partition`, `guardian.pusher`, `service.alias`.
+- Bounded disk WAL + retry/backoff.
+- Forward to a regional OTel gateway/collector.
+- Central trace store + `trace_id -> account/region` index.
+- Query remains in Doctor/Tempo; the pusher is never a trace query backend.
+
+Out of scope for this stage:
+
+- OTLP metrics relay.
+- OTLP logs relay.
+- Pusher-local trace storage/query.
+- Broad trace search without a central index.
+
+Remaining decisions:
+
+1. Gateway topology: pusher → regional OTel gateway → central store.
+2. Trace store: current MonoFS logengine vs external Tempo/ClickHouse.
+3. Trace index: `trace_id -> account/region` built at ingest.
+4. Whether relayed traces are tagged `source="doctor"` and queried only through
+   the central store (recommended), never through the pusher.
 
 ## Done
 
