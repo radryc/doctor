@@ -10,6 +10,7 @@ import type {
   LogRecord,
   LokiMatrixSeries,
   LokiStream,
+  MetricSeries,
   PrometheusMatrixResult,
   ProxyEndpointInfo,
   TempoMetricLabel,
@@ -18,7 +19,8 @@ import type {
 } from "../../types/api";
 import { useTimeRange } from "../../context/TimeRangeContext";
 import { useInspector } from "../../context/InspectorContext";
-import MetricLineChart from "../charts/MetricLineChart";
+import TimeSeriesChart from "../charts/TimeSeriesChart";
+import ChartExpandModal from "../charts/ChartExpandModal";
 
 interface Props {
   widget: DashboardWidget;
@@ -215,8 +217,9 @@ function StatWidget({ widget, tenant, variableValues, macros, from, to, refreshT
 // ── Timeseries ──────────────────────────────────────────────────────────────
 
 function TimeseriesWidget({ widget, tenant, variableValues, macros, from, to, refreshTick }: ContentProps) {
-  const [series, setSeries] = useState<Array<{ label: string; points: Array<{ timestamp: string; value: number }> }>>([]);
+  const [series, setSeries] = useState<MetricSeries[]>([]);
   const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -303,10 +306,40 @@ function TimeseriesWidget({ widget, tenant, variableValues, macros, from, to, re
   }, [widget, variableValues, macros, from, to, tenant, refreshTick]);
 
   if (error) return <div className="dash-widget__error">{error}</div>;
+
+  const displayMode: "line" | "area" | "bars" =
+    widget.visualization?.displayMode === "bars"
+      ? "bars"
+      : widget.visualization?.displayMode === "area"
+      ? "area"
+      : "line";
+  const chartQueries = widget.queries
+    .filter((query) => !query.disabled)
+    .map((query) => interpolate(query.expr, variableValues, macros));
+
   return (
-    <div style={{ height: "100%", minHeight: "120px" }}>
-      <MetricLineChart series={series} />
-    </div>
+    <>
+      <div style={{ height: "100%", minHeight: "120px" }}>
+        <TimeSeriesChart
+          series={series}
+          displayMode={displayMode}
+          stacked={widget.visualization?.stacked}
+          onExpand={() => setExpanded(true)}
+        />
+      </div>
+      <ChartExpandModal
+        open={expanded}
+        title={widget.title}
+        description={widget.description}
+        series={series}
+        displayMode={displayMode}
+        stacked={widget.visualization?.stacked}
+        queries={chartQueries}
+        from={from}
+        to={to}
+        onClose={() => setExpanded(false)}
+      />
+    </>
   );
 }
 
