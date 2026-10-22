@@ -51,14 +51,29 @@ func filterPrometheusDataByPartition(data map[string]any, partition string) map[
 		if !ok {
 			continue
 		}
-		value := ""
+		value, source := "", ""
 		switch metric := entry["metric"].(type) {
 		case map[string]string:
-			value = metric["guardian_partition"]
+			value = firstNonEmpty(
+				metric["guardian_partition"],
+				metric["@aws.tag.guardian.io/partition"],
+				metric["@aws.tag.strata.io/partition"],
+				metric["partition"],
+			)
+			source = metric["source"]
 		case map[string]any:
-			value, _ = metric["guardian_partition"].(string)
+			for _, key := range []string{"guardian_partition", "@aws.tag.guardian.io/partition", "@aws.tag.strata.io/partition", "partition"} {
+				if candidate, ok := metric[key].(string); ok && candidate != "" {
+					value = candidate
+					break
+				}
+			}
+			source, _ = metric["source"].(string)
 		}
-		if value == partition {
+		// Dimension-only AWS series may not carry a partition tag. The AWS
+		// backend is account-scoped, so keep them instead of silently dropping
+		// every CloudWatch metric when a partition filter is active.
+		if value == partition || (value == "" && source == proxy.SourceAWS) {
 			filtered = append(filtered, item)
 		}
 	}
