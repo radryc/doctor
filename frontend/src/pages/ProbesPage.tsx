@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Activity, CheckCircle2, RefreshCw, TriangleAlert, XCircle } from "lucide-react";
 import { api } from "../api/client";
+import { useConfig } from "../context/ConfigContext";
 import type { ProbeResult } from "../types/api";
 
 export default function ProbesPage() {
   const navigate = useNavigate();
+  const { config } = useConfig();
   const [probes, setProbes] = useState<ProbeResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -112,6 +114,15 @@ export default function ProbesPage() {
           <button className="xp-live-btn" onClick={load} disabled={loading}>
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} /> Refresh
           </button>
+          <button
+            className="xp-live-btn"
+            onClick={() =>
+              navigate(`/metrics?query=${encodeURIComponent("guardian_probe_up")}&tenant=${encodeURIComponent(config.default_tenant)}`)
+            }
+            title="Open default probe availability metric"
+          >
+            <Activity size={12} /> Probe metrics
+          </button>
         </div>
       </div>
 
@@ -182,6 +193,18 @@ export default function ProbesPage() {
                       onClick={() => navigate(`/logs?q=${encodeURIComponent(probe.service)}`)}
                     >
                       Logs
+                    </button>
+                    <button
+                      className="xp-live-btn"
+                      onClick={() =>
+                        navigate(
+                          `/metrics?query=${encodeURIComponent(
+                            `guardian_probe_up{service="${probe.service}"}`
+                          )}&tenant=${encodeURIComponent(config.default_tenant)}`
+                        )
+                      }
+                    >
+                      Metrics
                     </button>
                   </span>
                   {probe.error && (

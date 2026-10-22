@@ -2484,6 +2484,7 @@ pre {
 .signal-badge--l { color: var(--ui-green); background: color-mix(in oklab, var(--ui-green) 12%, transparent); }
 .signal-badge--truncated { color: var(--ui-amber); background: color-mix(in oklab, var(--ui-amber) 12%, transparent); }
 .service-detail__red { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.6rem; }
+.service-detail__probes { margin-top: 1rem; }
 .service-detail__recent { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; margin-top: 1rem; }
 .service-detail__recent .trace-row { display: grid; grid-template-columns: 130px 80px 1fr; gap: 0.5rem; align-items: center; padding: 0.3rem 0.4rem; border-radius: 5px; font-size: 0.75rem; }
 .service-detail__recent .trace-row:hover, .service-detail__recent .trace-row:focus-visible { background: var(--ui-hover); outline: none; }

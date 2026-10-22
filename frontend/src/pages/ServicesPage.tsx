@@ -213,7 +213,11 @@ function ServiceDetail({ name }: { name: string }) {
           </button>
           <button
             className="xp-live-btn"
-            onClick={() => navigate(`/metrics?q=${encodeURIComponent(`{service=~"${promSvc}"}`)}`)}
+            onClick={() =>
+              navigate(
+                `/metrics?query=${encodeURIComponent(`{service=~"${promSvc}"}`)}&tenant=${encodeURIComponent(config.default_tenant)}`
+              )
+            }
           >
             <BarChart3 size={12} /> Metrics
           </button>
@@ -258,6 +262,7 @@ function ServiceDetail({ name }: { name: string }) {
             tenant={config.default_tenant}
           />
         </div>
+        <ProbeCards service={name} />
         <div className="service-detail__recent">
           <div>
             <h3 style={{ fontSize: "0.85rem", opacity: 0.7, marginBottom: "0.5rem" }}>Recent Traces</h3>
@@ -377,6 +382,102 @@ function REDCard({
   );
 }
 
+function formatProbeAge(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  return `${Math.round(seconds / 3600)}h ago`;
+}
+
+function ProbeCards({ service }: { service: string }) {
+  const tr = useTimeRange();
+  const [values, setValues] = useState<{
+    up: boolean | null;
+    latencyMs: number | null;
+    failures: number | null;
+    lastSuccessAge: number | null;
+  } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const matcher = promServiceMatcher(service);
+    const queryValue = (expr: string): Promise<number | null> => {
+      const params = new URLSearchParams({
+        query: expr,
+        time: (Date.now() / 1000).toFixed(0),
+      });
+      return api
+        .queryPrometheus(params)
+        .then((r) => {
+          if (r.data.resultType !== "vector" || r.data.result.length === 0) return null;
+          const value = Number(r.data.result[0].value[1]);
+          return Number.isFinite(value) ? value : null;
+        })
+        .catch(() => null);
+    };
+
+    Promise.all([
+      queryValue(`max(guardian_probe_up{service=~"${matcher}"})`),
+      queryValue(`max(guardian_probe_duration_seconds{service=~"${matcher}"})`),
+      queryValue(`max(guardian_probe_consecutive_failures{service=~"${matcher}"})`),
+      queryValue(`time() - max(guardian_probe_last_success_timestamp_seconds{service=~"${matcher}"})`),
+    ]).then(([up, latency, failures, lastSuccessAge]) => {
+      if (!active) return;
+      if (up == null && latency == null && failures == null && lastSuccessAge == null) {
+        setValues(null);
+        return;
+      }
+      setValues({
+        up: up == null ? null : up > 0,
+        latencyMs: latency == null ? null : latency * 1000,
+        failures,
+        lastSuccessAge,
+      });
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [service, tr.refreshTick]);
+
+  if (!values) return null;
+
+  return (
+    <div className="service-detail__probes">
+      <h3 style={{ fontSize: "0.85rem", opacity: 0.7, marginBottom: "0.5rem" }}>
+        Synthetic Probe Health
+      </h3>
+      <div className="service-detail__red">
+        <div className="red-card">
+          <div className="red-card__label">Probe Status</div>
+          <div
+            className="red-card__value"
+            style={{ color: values.up == null ? undefined : values.up ? "var(--ui-green)" : "var(--ui-red)" }}
+          >
+            {values.up == null ? "—" : values.up ? "Up" : "Down"}
+          </div>
+        </div>
+        <div className="red-card">
+          <div className="red-card__label">Probe Latency</div>
+          <div className="red-card__value">
+            {values.latencyMs == null ? "—" : `${values.latencyMs.toFixed(0)}ms`}
+          </div>
+        </div>
+        <div className="red-card">
+          <div className="red-card__label">Consecutive Failures</div>
+          <div className="red-card__value">{values.failures == null ? "—" : values.failures.toFixed(0)}</div>
+        </div>
+        <div className="red-card">
+          <div className="red-card__label">Last Success</div>
+          <div className="red-card__value">
+            {values.lastSuccessAge == null ? "—" : formatProbeAge(values.lastSuccessAge)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RecentTraces({ service, tenant }: { service: string; tenant: string }) {
   const tr = useTimeRange();
   const { from, to } = tr.resolve();
@@ -397,7 +498,8 @@ function RecentTraces({ service, tenant }: { service: string; tenant: string }) 
       .catch(() => setTraces([]));
   }, [service, tenant, from, to, tr.refreshTick]);
 
-  if (traces.length === 0) return <div className="xp-empty">No recent traces.</div>;
+  if (traces.length === 0)
+    return <div className="xp-empty">No recent traces. Services covered only by synthetic probes have probe health above but no spans.</div>;
 
   const openTrace = (traceId: string) => open({ kind: "trace", id: traceId, tenant });
 
@@ -447,7 +549,8 @@ function RecentLogs({ service, tenant }: { service: string; tenant: string }) {
       .catch(() => setLogs([]));
   }, [service, tenant, from, to, tr.refreshTick]);
 
-  if (logs.length === 0) return <div className="xp-empty">No recent logs.</div>;
+  if (logs.length === 0)
+    return <div className="xp-empty">No recent logs. Synthetic probes do not emit application logs; use probe health above.</div>;
 
   return (
     <div className="dash-logs">
