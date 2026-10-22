@@ -278,6 +278,8 @@ Notes:
   `clickhouse.clickhouse.svc.cluster.local`; verify with
   `kubectl -n clickhouse get svc`.
 - No public LoadBalancer.
+- The `Secret` values above are placeholders. For production, use `secretRef`
+  or an external secret manager; do not commit real credentials.
 - The `Config` mount is a `config.d` merge, so the image's default config stays
   intact.
 - `use_environment_credentials` lets ClickHouse read the AWS env vars from the
@@ -424,6 +426,18 @@ IAM policy:
 
 Use a dedicated role/user for ClickHouse. Do not reuse the MonoFS bucket
 credentials.
+
+### 7.1 Who creates the bucket
+
+Guardian's Kubernetes `ObjectStore` asset deploys MinIO; it is not an AWS S3
+bucket provisioner. For production S3, use one of:
+
+- pre-create the bucket with Terraform/CLI and put the endpoint in the
+  ClickHouse `Config`;
+- use a Guardian AWS `ObjectStore` asset in an AWS-targeted intent and reference
+  its bucket/region outputs.
+
+Do not use the Kubernetes MinIO `ObjectStore` asset for production S3.
 
 For EKS, an instance role is the simplest path. If using IRSA, verify that the
 ClickHouse version's AWS SDK picks up the web-identity token; otherwise use the
