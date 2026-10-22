@@ -115,6 +115,91 @@ func TestCountByNameFastPathInstant(t *testing.T) {
 	}
 }
 
+// The Service RED "Active Series" panel uses a bare count(...) over all metric
+// names. It must be answered from the series index like count by (__name__),
+// otherwise the broad selector scans every sample and times out.
+func TestBareCountFastPathInstantUsesSeriesIndex(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	backend := &fakeLogEngineBackend{metrics: []segment.MetricPointRecord{
+		{MetricName: "up", Service: "a", HasValue: true, Value: 1, Timestamp: base},
+		{MetricName: "up", Service: "b", HasValue: true, Value: 1, Timestamp: base},
+		{MetricName: "worker_requests_total", Service: "c", HasValue: true, Value: 1, Timestamp: base},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	params := url.Values{}
+	params.Set("query", `count({__name__=~".+"})`)
+	params.Set("time", base.Format(time.RFC3339Nano))
+
+	rec := doRequest(t, svc.handlePrometheusQuery, "/api/v1/query?"+params.Encode())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Data struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric map[string]string `json:"metric"`
+				Value  []any             `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if response.Data.ResultType != "vector" || len(response.Data.Result) != 1 {
+		t.Fatalf("response = %s", rec.Body.String())
+	}
+	if got := response.Data.Result[0].Value[1]; got != "3" {
+		t.Fatalf("count = %v, want 3", got)
+	}
+}
+
+func TestBareCountFastPathRangeUsesSeriesIndex(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	backend := &fakeLogEngineBackend{metrics: []segment.MetricPointRecord{
+		{MetricName: "up", Service: "a", HasValue: true, Value: 1, Timestamp: base},
+		{MetricName: "up", Service: "b", HasValue: true, Value: 1, Timestamp: base},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	params := url.Values{}
+	params.Set("query", `count({__name__=~".+"})`)
+	params.Set("start", base.Add(-time.Minute).Format(time.RFC3339Nano))
+	params.Set("end", base.Add(time.Minute).Format(time.RFC3339Nano))
+	params.Set("step", "60s")
+
+	rec := doRequest(t, svc.handlePrometheusQueryRange, "/api/v1/query_range?"+params.Encode())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Data struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric map[string]string `json:"metric"`
+				Values [][]any           `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if response.Data.ResultType != "matrix" || len(response.Data.Result) != 1 {
+		t.Fatalf("response = %s", rec.Body.String())
+	}
+	want := []string{"0", "2", "0"}
+	values := response.Data.Result[0].Values
+	if len(values) != len(want) {
+		t.Fatalf("values = %v, want %v", values, want)
+	}
+	for i, expected := range want {
+		if got := values[i][1]; got != expected {
+			t.Fatalf("values = %v, want %v", values, want)
+		}
+	}
+}
+
 // TestCountByNameFastPathRespectsLabelMatchers ensures selector filters still
 // apply when answering from the series index.
 func TestCountByNameFastPathRespectsLabelMatchers(t *testing.T) {
