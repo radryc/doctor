@@ -130,48 +130,53 @@ export default function TimeSeriesChart({
     data,
     margin: { top: 8, right: 12, bottom: 4, left: 0 },
   };
-  const axes = (
-    <>
-      <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} />
-      <XAxis
-        dataKey="ts"
-        type="number"
-        domain={["dataMin", "dataMax"]}
-        tickFormatter={(value) => formatAxisTime(Number(value), withDate)}
-        minTickGap={28}
-        tick={{ fill: "var(--chart-text)", fontSize: 10 }}
-        stroke="var(--ui-border)"
-      />
-      <YAxis
-        width={48}
-        tickFormatter={(value) => formatChartValue(Number(value))}
-        tick={{ fill: "var(--chart-text)", fontSize: 10 }}
-        stroke="var(--ui-border)"
-      />
-      <Tooltip
-        labelFormatter={(label) => formatDateTimeFull(Number(label))}
-        formatter={(value, name) => [formatChartValue(Number(value)), name]}
-        contentStyle={{
-          background: "var(--ui-elevated)",
-          border: "1px solid var(--ui-border-strong)",
-          borderRadius: 6,
-          color: "var(--ui-text)",
-          fontSize: 11,
-          maxHeight: 280,
-          overflowY: "auto",
-        }}
-        labelStyle={{ color: "var(--ui-muted)" }}
-        itemStyle={{ color: "var(--ui-text)" }}
-        cursor={{ stroke: "var(--ui-border-strong)", strokeDasharray: "3 3" }}
-      />
-    </>
+  const grid = <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} />;
+  const xAxis = (
+    <XAxis
+      dataKey="ts"
+      type="number"
+      domain={["dataMin", "dataMax"]}
+      tickFormatter={(value) => formatAxisTime(Number(value), withDate)}
+      minTickGap={28}
+      tick={{ fill: "var(--chart-text)", fontSize: 10 }}
+      stroke="var(--ui-border)"
+    />
+  );
+  const yAxis = (
+    <YAxis
+      width={48}
+      tickFormatter={(value) => formatChartValue(Number(value))}
+      tick={{ fill: "var(--chart-text)", fontSize: 10 }}
+      stroke="var(--ui-border)"
+    />
+  );
+  const tooltip = (
+    <Tooltip
+      labelFormatter={(label) => formatDateTimeFull(Number(label))}
+      formatter={(value, name) => [formatChartValue(Number(value)), name]}
+      contentStyle={{
+        background: "var(--ui-elevated)",
+        border: "1px solid var(--ui-border-strong)",
+        borderRadius: 6,
+        color: "var(--ui-text)",
+        fontSize: 11,
+        maxHeight: 280,
+        overflowY: "auto",
+      }}
+      labelStyle={{ color: "var(--ui-muted)" }}
+      itemStyle={{ color: "var(--ui-text)" }}
+      cursor={{ stroke: "var(--ui-border-strong)", strokeDasharray: "3 3" }}
+    />
   );
 
   let chart;
   if (displayMode === "bars") {
     chart = (
       <BarChart {...common}>
-        {axes}
+        {grid}
+        {xAxis}
+        {yAxis}
+        {tooltip}
         {renderedKeys.map((item) => (
           <Bar
             key={item.key}
@@ -188,7 +193,10 @@ export default function TimeSeriesChart({
   } else if (displayMode === "area") {
     chart = (
       <AreaChart {...common}>
-        {axes}
+        {grid}
+        {xAxis}
+        {yAxis}
+        {tooltip}
         {renderedKeys.map((item) => (
           <Area
             key={item.key}
@@ -207,7 +215,10 @@ export default function TimeSeriesChart({
   } else {
     chart = (
       <LineChart {...common}>
-        {axes}
+        {grid}
+        {xAxis}
+        {yAxis}
+        {tooltip}
         {renderedKeys.map((item) => (
           <Line
             key={item.key}
