@@ -60,11 +60,12 @@ func TestCountByNameFastPathUsesSeriesIndex(t *testing.T) {
 		}
 	}
 	// Steps land at base-60s, base, base+60s, base+120s.
-	// guardian: instance a covers [base, base+30s], instance b covers base+60s.
-	// worker: the single series covers base only.
+	// guardian: instance a covers [base, base+30s], instance b starts at base+60s.
+	// worker: the single series starts at base.
+	// Prometheus's 5m lookback keeps a series visible after its last sample.
 	want := map[string][]string{
-		"guardian_requests_total": {"0", "1", "1", "0"},
-		"worker_requests_total":   {"0", "1", "0", "0"},
+		"guardian_requests_total": {"0", "1", "2", "2"},
+		"worker_requests_total":   {"0", "1", "1", "1"},
 	}
 	for name, expected := range want {
 		got := counts[name]
@@ -188,7 +189,7 @@ func TestBareCountFastPathRangeUsesSeriesIndex(t *testing.T) {
 	if response.Data.ResultType != "matrix" || len(response.Data.Result) != 1 {
 		t.Fatalf("response = %s", rec.Body.String())
 	}
-	want := []string{"0", "2", "0"}
+	want := []string{"0", "2", "2"}
 	values := response.Data.Result[0].Values
 	if len(values) != len(want) {
 		t.Fatalf("values = %v, want %v", values, want)
