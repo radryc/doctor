@@ -36,6 +36,8 @@ bffa647 feat/multi-account-federation     multi-account AWS federation
 
 ### Next stage — OTel **traces** relay
 
+Trace-store option: [ClickHouse traces plan](./clickhouse-traces-plan.md).
+
 **Decision:** the first relay implementation is **traces only** (OTLP
 `ExportTraceServiceRequest`). Metrics and logs keep their current paths:
 OTel metrics/logs go direct to the collector/Doctor or through CloudWatch;
