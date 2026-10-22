@@ -32,32 +32,57 @@ const (
 	maxCountByNameSteps = 10_000
 )
 
-// countByNamePlan is a parsed `count by (__name__) (<selector>)` query.
+// countByNamePlan is a parsed presence aggregation:
+//
+//	count by (__name__) (<selector>)   (byName=true)
+//	count(<selector>)                  (byName=false)
 type countByNamePlan struct {
 	matchers []*promlabels.Matcher
+	byName   bool
 }
 
-// countByNamePlanFor matches the supported aggregation shape: an exact
-// `count by (__name__)` over a plain vector selector.
+// countByNamePlanFor matches the supported presence aggregation shapes over a
+// plain vector selector. Both `count by (__name__)` and a bare `count` are
+// answered from the chunk series index, so a dashboard total never scans raw
+// metric samples.
 func countByNamePlanFor(expr promparser.Expr) (countByNamePlan, bool) {
 	aggregation, ok := expr.(*promparser.AggregateExpr)
 	if !ok || aggregation.Op != promparser.COUNT {
-		return countByNamePlan{}, false
-	}
-	if aggregation.Without || len(aggregation.Grouping) != 1 || aggregation.Grouping[0] != promlabels.MetricName {
 		return countByNamePlan{}, false
 	}
 	selector, ok := aggregation.Expr.(*promparser.VectorSelector)
 	if !ok {
 		return countByNamePlan{}, false
 	}
-	return countByNamePlan{matchers: selector.LabelMatchers}, true
+	byName := false
+	switch {
+	case !aggregation.Without && len(aggregation.Grouping) == 1 && aggregation.Grouping[0] == promlabels.MetricName:
+		byName = true
+	case !aggregation.Without && len(aggregation.Grouping) == 0:
+		byName = false
+	default:
+		return countByNamePlan{}, false
+	}
+	return countByNamePlan{matchers: selector.LabelMatchers, byName: byName}, true
 }
 
 // seriesPresence tracks the first/last sample time of one series.
 type seriesPresence struct {
 	min time.Time
 	max time.Time
+}
+
+// countPresentSeries counts series with a sample covering t.
+func countPresentSeries(groups map[string]map[string]*seriesPresence, t time.Time) int {
+	count := 0
+	for _, series := range groups {
+		for _, presence := range series {
+			if !t.Before(presence.min) && !t.After(presence.max) {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // execCountByNameRange answers a range query from the chunk series index.
@@ -74,6 +99,20 @@ func (s *Service) execCountByNameRange(ctx context.Context, tenant, partition st
 	groups, err := s.loadSeriesPresence(ctx, tenant, partition, plan, start, end)
 	if err != nil {
 		return nil, err
+	}
+
+	if !plan.byName {
+		values := make([][]any, 0, steps)
+		for t := start; !t.After(end); t = t.Add(step) {
+			values = append(values, []any{prometheusJSONTime(t.UnixMilli()), strconv.Itoa(countPresentSeries(groups, t))})
+		}
+		return map[string]any{
+			"resultType": "matrix",
+			"result": []any{map[string]any{
+				"metric": map[string]string{},
+				"values": values,
+			}},
+		}, nil
 	}
 
 	names := make([]string, 0, len(groups))
@@ -109,6 +148,16 @@ func (s *Service) execCountByNameInstant(ctx context.Context, tenant, partition 
 	groups, err := s.loadSeriesPresence(ctx, tenant, partition, plan, window, at)
 	if err != nil {
 		return nil, err
+	}
+
+	if !plan.byName {
+		return map[string]any{
+			"resultType": "vector",
+			"result": []any{map[string]any{
+				"metric": map[string]string{},
+				"value":  []any{prometheusJSONTime(at.UnixMilli()), strconv.Itoa(countPresentSeries(groups, at))},
+			}},
+		}, nil
 	}
 
 	names := make([]string, 0, len(groups))
