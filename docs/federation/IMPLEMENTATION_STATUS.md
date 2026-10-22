@@ -4,6 +4,52 @@ Date: 2026-10-22
 Design: [`multi-account-federation-50k-design.md`](./multi-account-federation-50k-design.md)  
 Plan: [`multi-account-federation-50k.md`](./multi-account-federation-50k.md)
 
+## Session handoff — 2026-10-22
+
+Status saved for branch testing tomorrow.
+
+### Doctor branches (stacked)
+
+```text
+efd341c feat/federation-catalog-builder   build catalog from partition metadata
+48c5fcc feat/federation-monofs-catalog    persist catalog in MonoFS
+bffa647 feat/multi-account-federation     multi-account AWS federation
+58d5c3d feat/aws-observability-fixes      AWS dashboards + service filters
+123643b access-policy                     unchanged base
+```
+
+### Guardian / stratatools
+
+- `guardian` branch `aws-dashboard-panels` — `d638181`
+- `stratatools` branch `aws-dashboard-panels` — `20766ed`
+- `guardian/bin/guardianctl` and `stratatools` release-version bumps remain unstaged local artifacts.
+
+### Live kind cluster
+
+- Running image: multi-account federation branch.
+- 3 targets: `div-a-orders`, `div-a-billing`, `div-b-inventory`.
+- Metrics/logs verified for all three accounts.
+- `usera`/`userb` isolation verified.
+- Broad-query 422 verified.
+- Grafana multi-account metric queries verified.
+- X-Ray live data not verified because the demo AWS stacks had been deleted.
+
+### Next stage — OTel relay
+
+**Clarification:** the relay is for **OTLP telemetry in general**, not only
+distributed tracing. The same pusher receiver can forward traces, metrics, and
+logs. Distributed tracing is the primary use case because spans need a central
+trace store and a `trace_id -> account` index.
+
+Open decisions for tomorrow:
+
+1. Relay scope: traces only first, or traces + metrics + logs.
+2. Gateway topology: pusher → regional OTel gateway → central store.
+3. Trace store: current MonoFS logengine vs external Tempo/ClickHouse.
+4. Trace index: `trace_id -> account/region` built at ingest.
+5. Whether relayed OTel should be tagged `source="doctor"` and queried only
+   through the central store (recommended), never through the pusher.
+
 ## Done
 
 ### E1 — Catalog
