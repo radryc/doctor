@@ -1003,10 +1003,6 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", "end must be after start")
 		return
 	}
-	if isHighCardinalityCumulativeRangeQuery(queryString) {
-		writePrometheusError(w, http.StatusBadRequest, "bad_data", "range queries over Guardian cumulative task/result totals are disabled; use an instant query to avoid materializing high-cardinality raw metric segments")
-		return
-	}
 
 	if s.proxyRouter != nil {
 		s.handlePrometheusQueryRangeViaRouter(w, r, queryString, start, end, step)
@@ -1048,26 +1044,6 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 	}
 
 	writePrometheusSuccess(w, filterPrometheusDataByPartition(mergePrometheusQueryData(localData, awsData, "matrix"), partition))
-}
-
-// isHighCardinalityCumulativeRangeQuery reports whether a range query would
-// materialize raw Guardian cumulative task/result totals. Aggregated queries
-// (sum/avg/max/... over rate/increase) are allowed because the operator
-// dashboards depend on them; bare selectors stay blocked.
-func isHighCardinalityCumulativeRangeQuery(queryString string) bool {
-	if !strings.Contains(queryString, "guardian_pusher_task_executions") && !strings.Contains(queryString, "guardian_results_executions") {
-		return false
-	}
-	lower := strings.Join(strings.Fields(strings.ToLower(queryString)), " ")
-	for _, aggregator := range []string{
-		"sum", "avg", "min", "max", "count", "count_values",
-		"topk", "bottomk", "quantile", "histogram_quantile", "group",
-	} {
-		if strings.Contains(lower, aggregator+"(") || strings.Contains(lower, aggregator+" by") {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {
