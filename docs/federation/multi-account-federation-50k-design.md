@@ -19,7 +19,7 @@
 | E4 Query integration | `Service.aws` interface, one logical `aws-federated` router backend, legacy fallback, 422 propagation | **DONE** — build/tests pass; live rollout verified |
 | Demo catalog | ConfigMap + token Secret + deployment patch | **DONE** — live 3-account verification passed |
 | Live verification | 3 accounts, metrics/logs, policy isolation, 422 | **DONE** — see below |
-| MonoFS snapshot | `/doctor/v1/federation` sharded snapshot + manifest | Not started |
+| MonoFS snapshot | `/doctor/v1/federation` sharded snapshot + manifest | **DONE** — store, CAS manifest, sharded publish, publisher CLI; in-cluster verification pending |
 | OTel relay | pusher OTLP receiver + buffer + gateway | Not started |
 | Central rollups | broad-query store + trace index | Not started |
 | UI/dashboards | federation status page, `$account` variable | **PARTIAL** — `/v1/federation/status` added; Grafana `$account` not started |

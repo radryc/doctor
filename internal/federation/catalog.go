@@ -41,25 +41,44 @@ func LoadCatalogFile(path string) (*Catalog, error) {
 	return LoadCatalog(data)
 }
 
-// LoadCatalog parses a catalog document from bytes.
-func LoadCatalog(data []byte) (*Catalog, error) {
+// LoadSnapshotFile parses a catalog snapshot from a local file.
+func LoadSnapshotFile(path string) (Snapshot, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("read federation catalog %s: %w", path, err)
+	}
+	return ParseSnapshot(data)
+}
+
+// ParseSnapshot parses a catalog document. The file may be either a Snapshot
+// document (`targets: [...]`) or a bare list of targets.
+func ParseSnapshot(data []byte) (Snapshot, error) {
 	var snapshot Snapshot
 	snapErr := yaml.Unmarshal(data, &snapshot)
 	if snapErr == nil && len(snapshot.Targets) > 0 {
-		return NewCatalog(snapshot.Targets, snapshot.Version)
+		return snapshot, nil
 	}
 
 	var targets []Target
 	if err := yaml.Unmarshal(data, &targets); err != nil {
 		if snapErr != nil {
-			return nil, fmt.Errorf("parse federation catalog: snapshot: %v; list: %w", snapErr, err)
+			return Snapshot{}, fmt.Errorf("parse federation catalog: snapshot: %v; list: %w", snapErr, err)
 		}
-		return nil, fmt.Errorf("parse federation catalog: %w", err)
+		return Snapshot{}, fmt.Errorf("parse federation catalog: %w", err)
 	}
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("federation catalog contains no targets")
+		return Snapshot{}, fmt.Errorf("federation catalog contains no targets")
 	}
-	return NewCatalog(targets, snapshot.Version)
+	return Snapshot{Version: snapshot.Version, Targets: targets}, nil
+}
+
+// LoadCatalog parses a catalog document from bytes.
+func LoadCatalog(data []byte) (*Catalog, error) {
+	snapshot, err := ParseSnapshot(data)
+	if err != nil {
+		return nil, err
+	}
+	return NewCatalog(snapshot.Targets, snapshot.Version)
 }
 
 // NewCatalog builds indexes from targets.
