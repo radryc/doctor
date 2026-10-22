@@ -2352,6 +2352,8 @@ pre {
 .inspector-log-ts { color: var(--ui-faint); font-family: monospace; }
 .inspector-log-svc { color: var(--ui-accent); font-family: monospace; overflow: hidden; text-overflow: ellipsis; }
 .inspector-log-body { color: var(--ui-muted); word-break: break-word; }
+.inspector-log-detail { display: grid; gap: 0.75rem; }
+.inspector-log-full { margin: 0; padding: 0.75rem; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-input); color: var(--ui-text); font: 0.78rem/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
 .inspector-service { display: grid; gap: 1rem; }
 .inspector-service__links { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .inspector-service__links a { padding: 0.4rem 0.65rem; border: 1px solid var(--ui-border); border-radius: 6px; color: var(--ui-accent); font-size: 0.78rem; text-decoration: none; }
@@ -2412,6 +2414,8 @@ pre {
 .dash-toplist__value { color: var(--ui-text); font-family: monospace; font-size: 0.68rem; }
 .dash-logs { display: grid; gap: 0.15rem; }
 .dash-log-row { display: grid; grid-template-columns: 62px 42px 1fr; gap: 0.4rem; padding: 0.2rem 0; border-bottom: 1px solid var(--ui-border); font-size: 0.68rem; }
+.dash-log-row--clickable { cursor: pointer; border-radius: 4px; }
+.dash-log-row--clickable:hover, .dash-log-row--clickable:focus-visible { background: var(--ui-hover); outline: none; }
 .dash-log-ts { color: var(--ui-faint); font-family: monospace; }
 .dash-log-sev { font-weight: 800; font-size: 0.6rem; text-align: center; }
 .dash-log-sev--error, .dash-log-sev--fatal { color: var(--ui-red); }
