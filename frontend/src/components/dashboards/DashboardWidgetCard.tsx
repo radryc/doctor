@@ -7,6 +7,7 @@ import type {
   VariableValues,
 } from "../../types/dashboard";
 import type {
+  LogRecord,
   LokiMatrixSeries,
   LokiStream,
   PrometheusMatrixResult,
@@ -391,15 +392,9 @@ function ToplistWidget({ widget, tenant, variableValues, macros, from, to, refre
 
 // ── Logs ────────────────────────────────────────────────────────────────────
 
-interface DashboardLogRow {
-  timestamp: string;
-  severity_text?: string;
-  body: string;
-  service?: string;
-}
-
 function LogsWidget({ widget, tenant, variableValues, macros, from, to, refreshTick }: ContentProps) {
-  const [logs, setLogs] = useState<DashboardLogRow[]>([]);
+  const { open } = useInspector();
+  const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -421,14 +416,22 @@ function LogsWidget({ widget, tenant, variableValues, macros, from, to, refreshT
         .queryLokiRange(params)
         .then((r) => {
           if (!active) return;
-          const rows: DashboardLogRow[] = [];
+          const rows: LogRecord[] = [];
           for (const stream of (r.data.result as LokiStream[]) ?? []) {
+            const labels = stream.stream ?? {};
             for (const [ts, line] of stream.values ?? []) {
               rows.push({
+                tenant,
+                service: labels.service ?? "",
+                partition: labels.guardian_partition || labels.partition || "",
+                intent: labels.guardian_intent || labels.intent || "",
+                asset: labels.guardian_asset || labels.asset || "",
                 timestamp: lokiTimestamp(ts),
-                severity_text: stream.stream.level || stream.stream.severity || severityFromLine(line),
-                service: stream.stream.service,
+                severity_text: labels.level || labels.severity || severityFromLine(line),
                 body: line,
+                trace_id: labels.trace_id || undefined,
+                span_id: labels.span_id || undefined,
+                resource_attributes: labels,
               });
             }
           }
@@ -454,10 +457,31 @@ function LogsWidget({ widget, tenant, variableValues, macros, from, to, refreshT
 
   if (error) return <div className="dash-widget__error">{error}</div>;
 
+  const openLog = (log: LogRecord) =>
+    open({
+      kind: "log",
+      id: log.trace_id || `${log.service || "log"}@${log.timestamp}`,
+      tenant,
+      log,
+    });
+
   return (
     <div className="dash-logs">
       {logs.slice(0, 50).map((log, i) => (
-        <div key={i} className="dash-log-row">
+        <div
+          key={i}
+          className="dash-log-row dash-log-row--clickable"
+          role="button"
+          tabIndex={0}
+          title="Open full log details"
+          onClick={() => openLog(log)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openLog(log);
+            }
+          }}
+        >
           <span className="dash-log-ts">{formatLogTime(log.timestamp)}</span>
           <span className={`dash-log-sev dash-log-sev--${(log.severity_text ?? "INFO").toLowerCase()}`}>
             {(log.severity_text ?? "INFO").slice(0, 4)}

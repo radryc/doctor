@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import type { LogRecord } from "../types/api";
 
 export type InspectorKind = "trace" | "log" | "service" | "rollout";
 
@@ -11,6 +12,8 @@ export interface InspectorTarget {
   spanId?: string;
   /** Optional tenant context. */
   tenant?: string;
+  /** Full log record when the target was opened from a log row. */
+  log?: LogRecord;
 }
 
 interface InspectorState {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { useInspector } from "../../context/InspectorContext";
 import { useConfig } from "../../context/ConfigContext";
@@ -37,7 +37,11 @@ export default function InspectorDrawer() {
             <TracePanel traceId={target.id} tenant={target.tenant ?? config.default_tenant} />
           )}
           {target.kind === "log" && (
-            <LogPanel logId={target.id} tenant={target.tenant ?? config.default_tenant} />
+            <LogPanel
+              logId={target.id}
+              tenant={target.tenant ?? config.default_tenant}
+              record={target.log}
+            />
           )}
           {target.kind === "service" && (
             <ServicePanel serviceName={target.id} tenant={target.tenant ?? config.default_tenant} />
@@ -79,7 +83,85 @@ function TracePanel({ traceId, tenant }: { traceId: string; tenant: string }) {
   );
 }
 
-function LogPanel({ logId, tenant }: { logId: string; tenant: string }) {
+function LogPanel({
+  logId,
+  tenant,
+  record,
+}: {
+  logId: string;
+  tenant: string;
+  record?: LogRecord;
+}) {
+  if (record) return <LogDetail record={record} />;
+  return <LogSearchPanel logId={logId} tenant={tenant} />;
+}
+
+function logPartition(record: LogRecord): string {
+  return (
+    record.partition ||
+    record.resource_attributes?.["guardian_partition"] ||
+    record.resource_attributes?.["guardian.partition"] ||
+    record.resource_attributes?.["partition"] ||
+    ""
+  );
+}
+
+function LogDetail({ record }: { record: LogRecord }) {
+  const { open } = useInspector();
+  const partition = logPartition(record);
+  const values: Record<string, string> = {
+    timestamp: new Date(record.timestamp).toLocaleString(),
+    service: record.service ?? "",
+    partition,
+    intent: record.intent ?? "",
+    asset: record.asset ?? "",
+    severity: record.severity_text ?? "",
+  };
+  if (record.trace_id) {
+    values.trace_id = record.trace_id;
+    values.span_id = record.span_id ?? "";
+  }
+  for (const [key, value] of Object.entries(record.resource_attributes ?? {})) {
+    values[`res.${key}`] = value;
+  }
+  for (const [key, value] of Object.entries(record.attributes ?? {})) {
+    values[`attr.${key}`] = value;
+  }
+
+  return (
+    <div className="inspector-log-detail">
+      <div className="inspector-meta">
+        <span>{new Date(record.timestamp).toLocaleString()}</span>
+        <span>{record.service || "unknown service"}</span>
+        {partition && <span>partition: {partition}</span>}
+        {record.severity_text && <span>{record.severity_text}</span>}
+      </div>
+      <pre className="inspector-log-full">{record.body}</pre>
+      <div className="log-kv">
+        {Object.entries(values)
+          .filter(([, value]) => value)
+          .map(([key, value]) => (
+            <Fragment key={key}>
+              <div className="log-kv-key">{key}</div>
+              <div className="log-kv-val">{value}</div>
+            </Fragment>
+          ))}
+      </div>
+      {record.trace_id && (
+        <button
+          className="log-trace-btn"
+          onClick={() =>
+            open({ kind: "trace", id: record.trace_id!, tenant: record.tenant })
+          }
+        >
+          &#8594; View trace {record.trace_id.slice(0, 16)}…
+        </button>
+      )}
+    </div>
+  );
+}
+
+function LogSearchPanel({ logId, tenant }: { logId: string; tenant: string }) {
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
