@@ -128,7 +128,7 @@ export default function TimeSeriesChart({
 
   const common = {
     data,
-    margin: { top: 8, right: 12, bottom: 4, left: 0 },
+    margin: { top: 16, right: 12, bottom: 4, left: 0 },
   };
   const grid = <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} />;
   const xAxis = (

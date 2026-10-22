@@ -2390,7 +2390,7 @@ pre {
 .timeseries-chart__expand { position: absolute; top: 4px; right: 4px; z-index: 2; display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.18rem 0.35rem; border: 1px solid var(--ui-border); border-radius: 4px; background: color-mix(in oklab, var(--ui-panel) 88%, transparent); color: var(--ui-muted); font-size: 0.62rem; cursor: pointer; opacity: 0; transition: opacity 0.12s; }
 .timeseries-chart--clickable .timeseries-chart__expand { opacity: 0.65; }
 .timeseries-chart:hover .timeseries-chart__expand, .timeseries-chart:focus-within .timeseries-chart__expand { opacity: 1; }
-.timeseries-chart__unit { position: absolute; top: 4px; left: 6px; z-index: 2; color: var(--ui-faint); font-size: 0.62rem; font-family: monospace; }
+.timeseries-chart__unit { position: absolute; top: 4px; right: 76px; z-index: 2; color: var(--ui-faint); font-size: 0.62rem; font-family: monospace; }
 .timeseries-chart--clickable { cursor: zoom-in; }
 .timeseries-chart--clickable:hover { filter: brightness(1.04); }
 .metric-chart-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.35rem; }

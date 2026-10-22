@@ -52,6 +52,8 @@ const METRIC_HELPERS = [
       { name: "guardian_dispatcher_skipped_writes_total", hint: "Writes skipped because output did not change." },
       { name: "guardian_dispatcher_partition_status_current", hint: "Current partition status gauge." },
       { name: "guardian_dispatcher_intent_status_current", hint: "Current intent status gauge." },
+      { name: "guardian_registry_pusher_info", hint: "Registry pusher identity (value always 1). Labels show pusher, provider, cluster, partition, and status." },
+      { name: "guardian_registry_pusher_heartbeat_age_seconds", hint: "Seconds since the registry pusher last reported a heartbeat." },
     ],
   },
   {
