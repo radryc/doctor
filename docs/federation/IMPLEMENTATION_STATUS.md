@@ -76,6 +76,26 @@ Files:
 - `doctor/internal/proxy/backend.go`
 - `doctor/internal/proxy/router.go`
 
+### MonoFS catalog snapshot
+
+- [x] `SnapshotStore` interface (`Load`, `Save`).
+- [x] `FileSnapshotStore` for static/local catalogs.
+- [x] `MemorySnapshotStore` for tests.
+- [x] `MonoFSSnapshotStore` with sharded immutable shards and manifest-last publish.
+- [x] SHA-256 validation on load.
+- [x] CAS manifest version precondition.
+- [x] `doctor-federation-publish` CLI to seed/publish a static catalog to MonoFS.
+- [x] Tests: `internal/federation/snapshot_test.go`.
+- [ ] In-cluster publish/load verification — host-side read verification is blocked by per-node MonoFS DNS resolution; the store is covered by unit tests and the write path succeeded.
+
+Files:
+
+- `doctor/internal/federation/snapshot.go`
+- `doctor/internal/federation/snapshot_test.go`
+- `doctor/cmd/doctor-federation-publish/main.go`
+- `doctor/cmd/doctor-query/main.go`
+- `doctor/internal/config/config.go`
+
 ### Demo catalog wiring
 
 - [x] Step 3 generates a 3-target catalog from the deployment catalog + pusher `/v1/aws/meta`.
@@ -109,7 +129,6 @@ Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.
 
 ## Not started
 
-- [ ] MonoFS catalog snapshot (`/doctor/v1/federation/...` sharded manifest).
 - [ ] Pusher OTLP relay (`:4317/:4318` receiver + WAL + gateway).
 - [ ] Central rollups / trace index for broad queries.
 - [ ] Grafana `$account` variable and federation status UI.
@@ -142,4 +161,19 @@ curl -G -H "Authorization: Bearer $TOKEN" \
 curl -G -H "Authorization: Bearer $TOKEN" \
   http://localhost:18080/v1/logs/search \
   --data-urlencode 'logGroup=guardian/780603797542/us-east-1/div-a-orders/app'
+
+# Publish a static catalog to MonoFS (run in-cluster or with reachable node DNS)
+go run ./cmd/doctor-federation-publish \
+  --file /tmp/federation-catalog.json \
+  --monofs-router monofs-external.lb-edge.svc.cluster.local:9090 \
+  --monofs-token "$DOCTOR_MONOFS_TOKEN" \
+  --root /doctor/v1/federation --tenant default \
+  --shard-targets 500 --verify
+
+# Use MonoFS at startup
+DOCTOR_FEDERATION_SNAPSHOT_STORE=monofs \
+DOCTOR_FEDERATION_SNAPSHOT_ROOT=/doctor/v1/federation \
+DOCTOR_FEDERATION_SNAPSHOT_TENANT=default \
+DOCTOR_MONOFS_TOKEN=... \
+doctor-query
 ```

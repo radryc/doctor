@@ -83,10 +83,14 @@ type QueryConfig struct {
 	AWSBackendURL       string
 	AWSBackendToken     string
 
-	FederationEnabled     bool
-	FederationCatalogFile string
-	FederationMaxFanout   int
-	FederationTimeout     time.Duration
+	FederationEnabled              bool
+	FederationCatalogFile          string
+	FederationSnapshotStore        string
+	FederationSnapshotRoot         string
+	FederationSnapshotTenant       string
+	FederationSnapshotShardTargets int
+	FederationMaxFanout            int
+	FederationTimeout              time.Duration
 
 	ProxyEnabled              bool
 	ProxyBackendsFile         string
@@ -251,10 +255,14 @@ func LoadQuery(service string) QueryConfig {
 		AWSBackendURL:       envString("DOCTOR_AWS_BACKEND_URL", ""),
 		AWSBackendToken:     envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
 
-		FederationEnabled:     envBool("DOCTOR_FEDERATION_ENABLED", false),
-		FederationCatalogFile: envString("DOCTOR_FEDERATION_CATALOG_FILE", ""),
-		FederationMaxFanout:   int(envInt64("DOCTOR_FEDERATION_MAX_FANOUT", 32)),
-		FederationTimeout:     envDuration("DOCTOR_FEDERATION_TIMEOUT", 5*time.Second),
+		FederationEnabled:              envBool("DOCTOR_FEDERATION_ENABLED", false),
+		FederationCatalogFile:          envString("DOCTOR_FEDERATION_CATALOG_FILE", ""),
+		FederationSnapshotStore:        envString("DOCTOR_FEDERATION_SNAPSHOT_STORE", "file"),
+		FederationSnapshotRoot:         envString("DOCTOR_FEDERATION_SNAPSHOT_ROOT", "/doctor/v1/federation"),
+		FederationSnapshotTenant:       envString("DOCTOR_FEDERATION_SNAPSHOT_TENANT", "default"),
+		FederationSnapshotShardTargets: int(envInt64("DOCTOR_FEDERATION_SNAPSHOT_SHARD_TARGETS", 500)),
+		FederationMaxFanout:            int(envInt64("DOCTOR_FEDERATION_MAX_FANOUT", 32)),
+		FederationTimeout:              envDuration("DOCTOR_FEDERATION_TIMEOUT", 5*time.Second),
 
 		ProxyEnabled:              envBool("DOCTOR_PROXY_ENABLED", true),
 		ProxyBackendsFile:         envString("DOCTOR_PROXY_BACKENDS_FILE", ""),

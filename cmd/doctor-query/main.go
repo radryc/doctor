@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -84,9 +85,11 @@ func main() {
 		log.Printf("recording rules UI enabled via %s", cfg.RulesURL)
 	}
 
-	// Shared Dashboards Store: MonoFS CAS when token is set, in-memory fallback for local dev.
+	// Shared CAS file store: MonoFS when a token is set, in-memory fallback for
+	// local dev. Dashboards, recording rules and the federation catalog share
+	// the same file-store implementation.
+	var sharedFS ruler.FileStore
 	{
-		var dashFS ruler.FileStore
 		if strings.TrimSpace(cfg.MonoFSFileToken) != "" {
 			dashClient, err := monofsstore.NewGRPCClient(ctx, monofsstore.ClientConfig{
 				RouterAddr:  cfg.MonoFSLogEngineAddr,
@@ -98,17 +101,17 @@ func main() {
 			})
 			if err != nil {
 				log.Printf("dashboards: could not connect MonoFS file store: %v — using in-memory store", err)
-				dashFS = ruler.NewMemoryStore()
+				sharedFS = ruler.NewMemoryStore()
 			} else {
 				defer dashClient.Close()
-				dashFS = dashClient
-				log.Printf("dashboards: using MonoFS store at %s root %s", cfg.MonoFSLogEngineAddr, cfg.DashboardsStoreRoot)
+				sharedFS = dashClient
+				log.Printf("file store: using MonoFS at %s", cfg.MonoFSLogEngineAddr)
 			}
 		} else {
-			dashFS = ruler.NewMemoryStore()
-			log.Printf("dashboards: DOCTOR_MONOFS_TOKEN unset — using in-memory store (presets always available)")
+			sharedFS = ruler.NewMemoryStore()
+			log.Printf("file store: DOCTOR_MONOFS_TOKEN unset — using in-memory store")
 		}
-		dashStore := dashboards.NewStore(dashFS, cfg.MonoFSFileToken, cfg.DashboardsStoreRoot)
+		dashStore := dashboards.NewStore(sharedFS, cfg.MonoFSFileToken, cfg.DashboardsStoreRoot)
 		svc.SetDashboardStore(dashStore)
 	}
 
@@ -131,10 +134,18 @@ func main() {
 
 	var awsClient proxy.AWSClient
 	switch {
-	case cfg.FederationEnabled && cfg.FederationCatalogFile != "":
-		catalog, catalogErr := federation.LoadCatalogFile(cfg.FederationCatalogFile)
+	case cfg.FederationEnabled:
+		catalog, source, catalogErr := loadFederationCatalog(ctx, cfg, sharedFS)
 		if catalogErr != nil {
-			log.Fatalf("load aws federation catalog: %v", catalogErr)
+			if errors.Is(catalogErr, federation.ErrSnapshotNotFound) && cfg.AWSEnabled && cfg.AWSBackendURL != "" {
+				log.Printf("aws federation catalog not found (%v); falling back to legacy single backend %s", catalogErr, cfg.AWSBackendURL)
+				legacy := awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
+				awsClient = legacy
+				svc.SetAWSBackend(legacy)
+			} else {
+				log.Fatalf("load aws federation catalog: %v", catalogErr)
+			}
+			break
 		}
 		manager := federation.NewManager(catalog, federation.Options{
 			MaxFanout: cfg.FederationMaxFanout,
@@ -142,7 +153,7 @@ func main() {
 		})
 		awsClient = manager
 		svc.SetAWSBackend(manager)
-		log.Printf("multi-account aws federation enabled with %d target(s) from %s", catalog.Len(), cfg.FederationCatalogFile)
+		log.Printf("multi-account aws federation enabled with %d target(s) from %s", catalog.Len(), source)
 	case cfg.AWSEnabled && cfg.AWSBackendURL != "":
 		legacy := awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
 		awsClient = legacy
@@ -406,4 +417,50 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 	}
 	svc.SetProxyRouter(router)
 	log.Printf("proxy router enabled (max inflight %d, backend timeout %s)", cfg.ProxyMaxInflight, cfg.ProxyBackendTimeout)
+}
+
+// loadFederationCatalog loads the catalog from the configured snapshot store.
+// MonoFS is preferred when configured; a static file remains the bootstrap and
+// local-development fallback.
+func loadFederationCatalog(ctx context.Context, cfg config.QueryConfig, files ruler.FileStore) (*federation.Catalog, string, error) {
+	storeName := strings.ToLower(strings.TrimSpace(cfg.FederationSnapshotStore))
+	switch storeName {
+	case "", "file":
+		// Use the static file below.
+	case "monofs":
+		if files == nil || strings.TrimSpace(cfg.MonoFSFileToken) == "" {
+			return nil, "", fmt.Errorf("monofs federation snapshot store requires DOCTOR_MONOFS_TOKEN")
+		}
+		snapshotStore := federation.NewMonoFSSnapshotStore(
+			files,
+			cfg.MonoFSFileToken,
+			cfg.FederationSnapshotRoot,
+			cfg.FederationSnapshotTenant,
+		)
+		snapshotStore.ShardTargets = cfg.FederationSnapshotShardTargets
+		snapshot, err := snapshotStore.Load(ctx)
+		if err == nil {
+			catalog, catalogErr := federation.NewCatalog(snapshot.Targets, snapshot.Version)
+			return catalog, "monofs:" + snapshot.Version, catalogErr
+		}
+		if !errors.Is(err, federation.ErrSnapshotNotFound) {
+			return nil, "", err
+		}
+		// No snapshot yet: fall through to the static bootstrap file.
+	default:
+		return nil, "", fmt.Errorf("unknown DOCTOR_FEDERATION_SNAPSHOT_STORE %q", storeName)
+	}
+
+	if strings.TrimSpace(cfg.FederationCatalogFile) == "" {
+		return nil, "", federation.ErrSnapshotNotFound
+	}
+	snapshot, err := federation.LoadSnapshotFile(cfg.FederationCatalogFile)
+	if err != nil {
+		return nil, "", err
+	}
+	catalog, err := federation.NewCatalog(snapshot.Targets, snapshot.Version)
+	if err != nil {
+		return nil, "", err
+	}
+	return catalog, cfg.FederationCatalogFile, nil
 }
