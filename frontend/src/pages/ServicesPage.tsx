@@ -19,8 +19,9 @@ function promServiceMatcher(name: string): string {
   return `${escapeServiceRegex(name)}([.].*)?`;
 }
 
-function traceServiceMatcher(name: string): string {
-  return `^${escapeServiceRegex(name)}([.].*)?`;
+function traceServiceShort(name: string): string {
+  const parts = name.split(".").filter(Boolean);
+  return parts[parts.length - 1] ?? name;
 }
 
 // ── APM Service Catalog (/services) ──────────────────────────────────────────
@@ -187,7 +188,8 @@ function ServiceDetail({ name }: { name: string }) {
   const navigate = useNavigate();
   const { config } = useConfig();
   const promSvc = promServiceMatcher(name);
-  const traceSvc = traceServiceMatcher(name);
+  const traceSvc = name;
+  const traceSvcShort = traceServiceShort(name);
 
   return (
     <div className="tab-panel">
@@ -229,7 +231,8 @@ function ServiceDetail({ name }: { name: string }) {
           <REDCard
             label="Request Rate"
             expr={`sum(rate(http_server_request_duration_count{service=~"${promSvc}"}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}"}[$__rate_interval]))`}
-            traceqlExpr={`{resource.service.name=~"${traceSvc}"} | rate()`}
+            traceqlExpr={`{resource.service.name="${traceSvc}"} | rate()`}
+            traceqlExprShort={`{resource.service.name="${traceSvcShort}"} | rate()`}
             traceqlAgg="sum"
             unit="reqps"
             tenant={config.default_tenant}
@@ -237,8 +240,10 @@ function ServiceDetail({ name }: { name: string }) {
           <REDCard
             label="Error Rate"
             expr={`(sum(rate(http_server_request_duration_count{service=~"${promSvc}",http_response_status_code=~"5.."}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}",status_code=~"5.."}[$__rate_interval]))) / (sum(rate(http_server_request_duration_count{service=~"${promSvc}"}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}"}[$__rate_interval]))) * 100`}
-            traceqlExpr={`{resource.service.name=~"${traceSvc}" && status = error} | rate()`}
-            traceqlDenominator={`{resource.service.name=~"${traceSvc}"} | rate()`}
+            traceqlExpr={`{resource.service.name="${traceSvc}" && status = error} | rate()`}
+            traceqlExprShort={`{resource.service.name="${traceSvcShort}" && status = error} | rate()`}
+            traceqlDenominator={`{resource.service.name="${traceSvc}"} | rate()`}
+            traceqlDenominatorShort={`{resource.service.name="${traceSvcShort}"} | rate()`}
             traceqlAgg="ratio"
             unit="%"
             tenant={config.default_tenant}
@@ -246,7 +251,8 @@ function ServiceDetail({ name }: { name: string }) {
           <REDCard
             label="P95 Latency"
             expr={`histogram_quantile(0.95, sum(rate(http_server_request_duration_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000`}
-            traceqlExpr={`{resource.service.name=~"${traceSvc}"} | quantile_over_time(duration, 0.95)`}
+            traceqlExpr={`{resource.service.name="${traceSvc}"} | quantile_over_time(duration, 0.95)`}
+            traceqlExprShort={`{resource.service.name="${traceSvcShort}"} | quantile_over_time(duration, 0.95)`}
             traceqlAgg="max"
             traceqlScale={1e-6}
             unit="ms"
@@ -255,7 +261,8 @@ function ServiceDetail({ name }: { name: string }) {
           <REDCard
             label="P99 Latency"
             expr={`histogram_quantile(0.99, sum(rate(http_server_request_duration_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000`}
-            traceqlExpr={`{resource.service.name=~"${traceSvc}"} | quantile_over_time(duration, 0.99)`}
+            traceqlExpr={`{resource.service.name="${traceSvc}"} | quantile_over_time(duration, 0.99)`}
+            traceqlExprShort={`{resource.service.name="${traceSvcShort}"} | quantile_over_time(duration, 0.99)`}
             traceqlAgg="max"
             traceqlScale={1e-6}
             unit="ms"
@@ -282,7 +289,9 @@ interface REDCardProps {
   label: string;
   expr: string;
   traceqlExpr?: string;
+  traceqlExprShort?: string;
   traceqlDenominator?: string;
+  traceqlDenominatorShort?: string;
   traceqlAgg?: "sum" | "max" | "ratio";
   traceqlScale?: number;
   unit: string;
@@ -293,7 +302,9 @@ function REDCard({
   label,
   expr,
   traceqlExpr,
+  traceqlExprShort,
   traceqlDenominator,
+  traceqlDenominatorShort,
   traceqlAgg = "sum",
   traceqlScale = 1,
   unit,
@@ -337,22 +348,43 @@ function REDCard({
       });
     };
 
-    const fallback = () => {
-      if (!traceqlExpr) {
-        set(null);
-        return;
+    const traceValue = async (primary?: string, alternate?: string): Promise<number | null> => {
+      if (primary) {
+        const value = await traceMetrics(primary);
+        if (value != null) return value;
       }
+      if (alternate && alternate !== primary) return traceMetrics(alternate);
+      return null;
+    };
+
+    const traceRatio = async (numExpr?: string, denExpr?: string): Promise<number | null> => {
+      if (!numExpr || !denExpr) return null;
+      const [num, den] = await Promise.all([traceMetrics(numExpr), traceMetrics(denExpr)]);
+      if (den == null || den <= 0) return null;
+      // A missing error series means zero errors, not missing service data.
+      return ((num ?? 0) / den) * 100;
+    };
+
+    const fallback = () => {
       if (traceqlAgg === "ratio" && traceqlDenominator) {
-        Promise.all([traceMetrics(traceqlExpr), traceMetrics(traceqlDenominator)])
-          .then(([num, den]) => {
+        traceRatio(traceqlExpr, traceqlDenominator)
+          .then((value) => {
             if (!active) return;
-            set(num != null && den != null && den > 0 ? (num / den) * 100 : null);
+            if (value != null) {
+              set(value);
+              return;
+            }
+            return traceRatio(traceqlExprShort, traceqlDenominatorShort).then((shortValue) => {
+              if (active) set(shortValue);
+            });
           })
           .catch(() => set(null));
         return;
       }
-      traceMetrics(traceqlExpr)
-        .then((v) => set(v))
+      traceValue(traceqlExpr, traceqlExprShort)
+        .then((v) => {
+          if (active) set(v);
+        })
         .catch(() => set(null));
     };
 
@@ -372,7 +404,7 @@ function REDCard({
       .catch(fallback);
 
     return () => { active = false; };
-  }, [expr, traceqlExpr, traceqlDenominator, traceqlAgg, traceqlScale, unit, tenant, tr.refreshTick, from, to, tr]);
+  }, [expr, traceqlExpr, traceqlExprShort, traceqlDenominator, traceqlDenominatorShort, traceqlAgg, traceqlScale, unit, tenant, tr.refreshTick, from, to, tr]);
 
   return (
     <div className="red-card">
@@ -483,20 +515,40 @@ function RecentTraces({ service, tenant }: { service: string; tenant: string }) 
   const { from, to } = tr.resolve();
   const { open } = useInspector();
   const [traces, setTraces] = useState<Array<{ trace_id: string; span_count: number; min_time: string; duration_ms?: number }>>([]);
+  const [source, setSource] = useState(service);
+  const short = traceServiceShort(service);
 
   useEffect(() => {
-    const params = new URLSearchParams({
-      tenant,
-      service,
-      from: from.toISOString(),
-      to: to.toISOString(),
-      limit: "20",
-    });
+    let active = true;
+    const params = (target: string) =>
+      new URLSearchParams({
+        tenant,
+        service: target,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        limit: "20",
+      });
     api
-      .getRecentTraces(params)
-      .then((r) => setTraces(r.traces ?? []))
-      .catch(() => setTraces([]));
-  }, [service, tenant, from, to, tr.refreshTick]);
+      .getRecentTraces(params(service))
+      .then(async (r) => {
+        if (!active) return;
+        if ((r.traces ?? []).length > 0 || short === service) {
+          setTraces(r.traces ?? []);
+          setSource(service);
+          return;
+        }
+        const alternate = await api.getRecentTraces(params(short));
+        if (!active) return;
+        setTraces(alternate.traces ?? []);
+        setSource(short);
+      })
+      .catch(() => {
+        if (active) setTraces([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [service, short, tenant, from, to, tr.refreshTick]);
 
   if (traces.length === 0)
     return <div className="xp-empty">No recent traces. Services covered only by synthetic probes have probe health above but no spans.</div>;
@@ -505,6 +557,11 @@ function RecentTraces({ service, tenant }: { service: string; tenant: string }) 
 
   return (
     <div>
+      {source !== service && (
+        <div style={{ fontSize: "0.7rem", opacity: 0.7, marginBottom: "0.25rem" }}>
+          Showing traces for <code>{source}</code> (application service name).
+        </div>
+      )}
       {traces.map((t) => (
         <div
           key={t.trace_id}
@@ -534,26 +591,51 @@ function RecentLogs({ service, tenant }: { service: string; tenant: string }) {
   const { from, to } = tr.resolve();
   const { open } = useInspector();
   const [logs, setLogs] = useState<LogRecord[]>([]);
+  const [source, setSource] = useState(service);
+  const short = traceServiceShort(service);
 
   useEffect(() => {
-    const params = new URLSearchParams({
-      tenant,
-      service,
-      from: from.toISOString(),
-      to: to.toISOString(),
-      limit: "50",
-    });
+    let active = true;
+    const params = (target: string) =>
+      new URLSearchParams({
+        tenant,
+        service: target,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        limit: "50",
+      });
     api
-      .searchLogs(params)
-      .then((r) => setLogs(r.results ?? []))
-      .catch(() => setLogs([]));
-  }, [service, tenant, from, to, tr.refreshTick]);
+      .searchLogs(params(service))
+      .then(async (r) => {
+        if (!active) return;
+        if ((r.results ?? []).length > 0 || short === service) {
+          setLogs(r.results ?? []);
+          setSource(service);
+          return;
+        }
+        const alternate = await api.searchLogs(params(short));
+        if (!active) return;
+        setLogs(alternate.results ?? []);
+        setSource(short);
+      })
+      .catch(() => {
+        if (active) setLogs([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [service, short, tenant, from, to, tr.refreshTick]);
 
   if (logs.length === 0)
     return <div className="xp-empty">No recent logs. Synthetic probes do not emit application logs; use probe health above.</div>;
 
   return (
     <div className="dash-logs">
+      {source !== service && (
+        <div style={{ fontSize: "0.7rem", opacity: 0.7, marginBottom: "0.25rem" }}>
+          Showing logs for <code>{source}</code> (application service name).
+        </div>
+      )}
       {logs.slice(0, 50).map((log, i) => (
         <div
           key={i}
