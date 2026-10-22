@@ -4,7 +4,7 @@ import { useInspector } from "../../context/InspectorContext";
 import { useConfig } from "../../context/ConfigContext";
 import { api } from "../../api/client";
 import type { TraceRecord, LogRecord } from "../../types/api";
-import TraceWaterfall from "../charts/TraceWaterfall";
+import TraceDetails from "../charts/TraceDetails";
 
 export default function InspectorDrawer() {
   const { target, isOpen, close } = useInspector();
@@ -62,7 +62,23 @@ function TracePanel({ traceId, tenant }: { traceId: string; tenant: string }) {
     setLoading(true);
     api
       .getTrace(traceId, tenant)
-      .then((r) => { if (active) { setSpans(r.spans ?? []); setLoading(false); } })
+      .then((r) => {
+        if (!active) return;
+        const spans = (r.spans ?? []).map((span) => {
+          const duration = new Date(span.end_time).getTime() - new Date(span.start_time).getTime();
+          return {
+            ...span,
+            duration_ms:
+              isNaN(duration) || duration < 0
+                ? "-"
+                : duration >= 1000
+                ? `${(duration / 1000).toFixed(2)}s`
+                : `${duration}ms`,
+          };
+        });
+        setSpans(spans);
+        setLoading(false);
+      })
       .catch((e) => { if (active) { setError(e.message); setLoading(false); } });
     return () => { active = false; };
   }, [traceId, tenant]);
@@ -78,7 +94,7 @@ function TracePanel({ traceId, tenant }: { traceId: string; tenant: string }) {
         <span>{spans.length} spans</span>
         <span>Root: {spans[0]?.service ?? "—"}</span>
       </div>
-      <TraceWaterfall spans={spans} />
+      <TraceDetails spans={spans} />
     </div>
   );
 }
