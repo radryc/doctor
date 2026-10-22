@@ -197,7 +197,12 @@ export default function LogsPage() {
   }, [config.default_tenant, partitionFilter]);
 
   useEffect(() => {
-    if (componentFilter && !services.includes(componentFilter)) {
+    const service = searchParams.get("service");
+    if (service) setComponentFilter(service);
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (componentFilter && services.length > 0 && !services.includes(componentFilter)) {
       setComponentFilter("");
     }
   }, [componentFilter, services]);
