@@ -96,6 +96,24 @@ Files:
 - `doctor/cmd/doctor-query/main.go`
 - `doctor/internal/config/config.go`
 
+### Catalog builder from partition information
+
+- [x] `PartitionInfo`, `PusherInfo`, `TargetMeta`, `BuildInput`.
+- [x] Join partition ownership with account/region pusher endpoints.
+- [x] One target per account/region with all served partitions.
+- [x] Prefer healthy pushers, then priority/name.
+- [x] Merge labels, log groups, metric names, X-Ray services.
+- [x] Guardian log-group convention fallback.
+- [x] Skip non-AWS partitions and missing pushers with warnings.
+- [x] `doctor-federation-build` CLI (YAML/JSON input → snapshot JSON).
+- [x] Tests: `internal/federation/builder_test.go`.
+
+Files:
+
+- `doctor/internal/federation/builder.go`
+- `doctor/internal/federation/builder_test.go`
+- `doctor/cmd/doctor-federation-build/main.go`
+
 ### Demo catalog wiring
 
 - [x] Step 3 generates a 3-target catalog from the deployment catalog + pusher `/v1/aws/meta`.
@@ -161,6 +179,11 @@ curl -G -H "Authorization: Bearer $TOKEN" \
 curl -G -H "Authorization: Bearer $TOKEN" \
   http://localhost:18080/v1/logs/search \
   --data-urlencode 'logGroup=guardian/780603797542/us-east-1/div-a-orders/app'
+
+# Build a catalog from partition + pusher + /v1/aws/meta input
+go run ./cmd/doctor-federation-build \
+  --input federation-build-input.json \
+  --out federation-catalog.json
 
 # Publish a static catalog to MonoFS (run in-cluster or with reachable node DNS)
 go run ./cmd/doctor-federation-publish \

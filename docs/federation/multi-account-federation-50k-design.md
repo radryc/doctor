@@ -20,6 +20,7 @@
 | Demo catalog | ConfigMap + token Secret + deployment patch | **DONE** — live 3-account verification passed |
 | Live verification | 3 accounts, metrics/logs, policy isolation, 422 | **DONE** — see below |
 | MonoFS snapshot | `/doctor/v1/federation` sharded snapshot + manifest | **DONE** — store, CAS manifest, sharded publish, publisher CLI; in-cluster verification pending |
+| Catalog builder | partition + pusher registry + `/v1/aws/meta` join | **DONE** — builder, CLI, tests |
 | OTel relay | pusher OTLP receiver + buffer + gateway | Not started |
 | Central rollups | broad-query store + trace index | Not started |
 | UI/dashboards | federation status page, `$account` variable | **PARTIAL** — `/v1/federation/status` added; Grafana `$account` not started |
