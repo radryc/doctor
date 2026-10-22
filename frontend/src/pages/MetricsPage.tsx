@@ -16,6 +16,7 @@ import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import { copyText } from "../lib/clipboard";
 import MetricLineChart from "../components/charts/MetricLineChart";
+import ChartExpandModal from "../components/charts/ChartExpandModal";
 import DataTable from "../components/ui/DataTable";
 import type {
   MetricPoint,
@@ -31,6 +32,16 @@ type QueryMode = "range" | "instant";
 type StatusKind = "idle" | "loading" | "ok" | "error";
 
 const METRIC_HELPERS = [
+  {
+    group: "Doctor and HTTP",
+    items: [
+      { name: "doctor_component_up", hint: "1 when a Doctor component is reporting. Labels identify component, instance, partition, and build." },
+      { name: "doctor_ingest_requests_accepted", hint: "Ingest requests accepted by source and result." },
+      { name: "http_server_request_duration_count", hint: "HTTP request count by service, method, and status code." },
+      { name: "http_server_request_duration_bucket", hint: "HTTP latency histogram buckets. Use histogram_quantile with sum by (le) for p95/p99." },
+      { name: "http_server_request_body_size_bucket", hint: "Request body size histogram buckets. Aggregate with sum by (le) instead of plotting every label set." },
+    ],
+  },
   {
     group: "Guardian runtime",
     items: [
@@ -206,21 +217,33 @@ function resultStats(response: PrometheusQueryResponse | null) {
   return { series: 1, samples: 1 };
 }
 
+function metricLabelFields(metric: PrometheusSeriesMetric): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(metric)) {
+    if (key === "__name__") continue;
+    fields[`label_${key}`] = value;
+  }
+  return fields;
+}
+
 function tableRows(response: PrometheusQueryResponse | null): Record<string, unknown>[] {
   if (!response) return [];
   const data = response.data;
   if (data.resultType === "matrix") {
     return data.result.flatMap((series) => {
+      const labels = metricLabelFields(series.metric);
       const rows = (series.values ?? []).map(([timestamp, value]) => ({
         time: new Date(timestamp * 1000).toLocaleString(),
         series: metricLabel(series.metric),
         value: formatNumber(Number(value)),
+        ...labels,
       }));
       for (const [timestamp, histogram] of series.histograms ?? []) {
         rows.push({
           time: new Date(timestamp * 1000).toLocaleString(),
           series: metricLabel(series.metric),
           value: histogramSummary(histogram),
+          ...labels,
         });
       }
       return rows;
@@ -233,6 +256,7 @@ function tableRows(response: PrometheusQueryResponse | null): Record<string, unk
       value: sample.value
         ? formatNumber(Number(sample.value[1]))
         : histogramSummary(sample.histogram?.[1]),
+      ...metricLabelFields(sample.metric),
     }));
   }
   return [
@@ -242,6 +266,25 @@ function tableRows(response: PrometheusQueryResponse | null): Record<string, unk
       value: data.result[1],
     },
   ];
+}
+
+function tableColumns(response: PrometheusQueryResponse | null): { label: string; key: string }[] {
+  const columns: { label: string; key: string }[] = [{ label: "Time", key: "time" }];
+  const data = response?.data;
+  const labelKeys = new Set<string>();
+  if (data && (data.resultType === "matrix" || data.resultType === "vector")) {
+    for (const item of data.result) {
+      for (const key of Object.keys(item.metric ?? {})) {
+        if (key !== "__name__") labelKeys.add(key);
+      }
+    }
+  }
+  for (const key of [...labelKeys].sort()) {
+    columns.push({ label: key, key: `label_${key}` });
+  }
+  columns.push({ label: "Value", key: "value" });
+  columns.push({ label: "Series", key: "series" });
+  return columns;
 }
 
 function rangeLabel(from: string, to: string): string {
@@ -279,6 +322,7 @@ export default function MetricsPage() {
   const [step, setStep] = useState(searchParams.get("step") ?? "30s");
   const [mode, setMode] = useState<QueryMode>((searchParams.get("mode") as QueryMode) || "range");
   const [view, setView] = useState<ViewMode>("graph");
+  const [chartExpanded, setChartExpanded] = useState(false);
   const [response, setResponse] = useState<PrometheusQueryResponse | null>(null);
   const [requestUrl, setRequestUrl] = useState("");
   const [rawJson, setRawJson] = useState("{}");
@@ -488,6 +532,13 @@ export default function MetricsPage() {
   const rows = tableRows(response);
   const activeExpression = query.trim() || selectedMetric.trim();
   const currentRange = rangeLabel(from, to);
+  const parsedFrom = new Date(from);
+  const parsedTo = new Date(to);
+  const chartFrom = Number.isNaN(parsedFrom.getTime()) ? new Date(Date.now() - 60 * 60_000) : parsedFrom;
+  const chartTo = Number.isNaN(parsedTo.getTime()) ? new Date() : parsedTo;
+  const activeDescription = selectedMetric
+    ? metricHint(selectedMetric)
+    : "Custom PromQL expression. Hover the chart for values and click a legend item to hide or show a series.";
 
   const chooseMetric = (metricName: string) => {
     setSelectedMetric(metricName);
@@ -819,6 +870,8 @@ export default function MetricsPage() {
                   <span className="pill">series: {stats.series}</span>
                   <span className="pill">samples: {stats.samples}</span>
                   {response?.data.resultType && <span className="pill">type: {response.data.resultType}</span>}
+                  <span className="pill">step: {step}</span>
+                  <span className="pill">{chartFrom.toLocaleString()} → {chartTo.toLocaleString()}</span>
                 </div>
               </div>
 
@@ -838,7 +891,15 @@ export default function MetricsPage() {
                   </div>
                 ) : view === "graph" ? (
                   hasGraphSeries ? (
-                    <MetricLineChart series={graphSeries} metricName={activeExpression} />
+                    <MetricLineChart
+                      series={graphSeries}
+                      metricName={activeExpression}
+                      onExpand={() => setChartExpanded(true)}
+                      from={chartFrom}
+                      to={chartTo}
+                      step={step}
+                      description={activeDescription}
+                    />
                   ) : (
                     <div className="flex h-[300px] flex-col items-center justify-center gap-2 text-center">
                       <p className="text-sm font-medium text-gray-300">No graphable series</p>
@@ -851,11 +912,7 @@ export default function MetricsPage() {
                 ) : view === "table" ? (
                   <DataTable
                     title="Samples"
-                    columns={[
-                      { label: "Time", key: "time" },
-                      { label: "Series", key: "series" },
-                      { label: "Value", key: "value" },
-                    ]}
+                    columns={tableColumns(response)}
                     rows={rows}
                   />
                 ) : (
@@ -874,6 +931,17 @@ export default function MetricsPage() {
                 </details>
               )}
             </div>
+            <ChartExpandModal
+              open={chartExpanded}
+              title={activeExpression || "Metric chart"}
+              description={activeDescription}
+              series={graphSeries}
+              queries={activeExpression ? [activeExpression] : []}
+              from={chartFrom}
+              to={chartTo}
+              maxSeries={30}
+              onClose={() => setChartExpanded(false)}
+            />
           </section>
         </div>
       </div>

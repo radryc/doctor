@@ -1,11 +1,11 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { Maximize2 } from "lucide-react";
 import {
   Area,
   AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -36,6 +36,7 @@ interface TimeSeriesChartProps {
   showLegend?: boolean;
   onExpand?: () => void;
   maxSeries?: number;
+  unit?: string;
 }
 
 function formatTime(ts: number): string {
@@ -44,6 +45,14 @@ function formatTime(ts: number): string {
   return [d.getHours(), d.getMinutes(), d.getSeconds()]
     .map((n) => String(n).padStart(2, "0"))
     .join(":");
+}
+
+function formatAxisTime(ts: number, withDate: boolean): string {
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return "";
+  const time = formatTime(ts);
+  if (!withDate) return time;
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${time.slice(0, 5)}`;
 }
 
 export function formatChartValue(value: number): string {
@@ -63,7 +72,9 @@ export default function TimeSeriesChart({
   showLegend = true,
   onExpand,
   maxSeries = 50,
+  unit,
 }: TimeSeriesChartProps) {
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set());
   const visibleSeries = maxSeries > 0 && series.length > maxSeries ? series.slice(0, maxSeries) : series;
   const keys = useMemo(
     () =>
@@ -74,6 +85,7 @@ export default function TimeSeriesChart({
       })),
     [visibleSeries]
   );
+  const renderedKeys = keys.filter((item) => !hidden.has(item.key));
 
   const data = useMemo(() => {
     const byTime = new Map<number, Record<string, number>>();
@@ -98,6 +110,16 @@ export default function TimeSeriesChart({
     return <div className="dash-empty">No series in range.</div>;
   }
 
+  const withDate = data.length > 1 && data[data.length - 1].ts - data[0].ts > 12 * 60 * 60 * 1000;
+  const toggleSeries = (key: string) => {
+    setHidden((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   const common = {
     data,
     margin: { top: 8, right: 12, bottom: 4, left: 0 },
@@ -109,7 +131,7 @@ export default function TimeSeriesChart({
         dataKey="ts"
         type="number"
         domain={["dataMin", "dataMax"]}
-        tickFormatter={(value) => formatTime(Number(value))}
+        tickFormatter={(value) => formatAxisTime(Number(value), withDate)}
         minTickGap={28}
         tick={{ fill: "var(--chart-text)", fontSize: 10 }}
         stroke="var(--ui-border)"
@@ -121,8 +143,8 @@ export default function TimeSeriesChart({
         stroke="var(--ui-border)"
       />
       <Tooltip
-        labelFormatter={(label) => formatTime(Number(label))}
-        formatter={(value) => formatChartValue(Number(value))}
+        labelFormatter={(label) => new Date(Number(label)).toLocaleString()}
+        formatter={(value, name) => [formatChartValue(Number(value)), name]}
         contentStyle={{
           background: "var(--ui-elevated)",
           border: "1px solid var(--ui-border-strong)",
@@ -134,14 +156,6 @@ export default function TimeSeriesChart({
         itemStyle={{ color: "var(--ui-text)" }}
         cursor={{ stroke: "var(--ui-border-strong)", strokeDasharray: "3 3" }}
       />
-      {showLegend && (
-        <Legend
-          verticalAlign="bottom"
-          height={28}
-          iconType={displayMode === "bars" ? "square" : "line"}
-          wrapperStyle={{ color: "var(--ui-muted)", fontSize: 10 }}
-        />
-      )}
     </>
   );
 
@@ -150,7 +164,7 @@ export default function TimeSeriesChart({
     chart = (
       <BarChart {...common}>
         {axes}
-        {keys.map((item) => (
+        {renderedKeys.map((item) => (
           <Bar
             key={item.key}
             dataKey={item.key}
@@ -167,7 +181,7 @@ export default function TimeSeriesChart({
     chart = (
       <AreaChart {...common}>
         {axes}
-        {keys.map((item) => (
+        {renderedKeys.map((item) => (
           <Area
             key={item.key}
             dataKey={item.key}
@@ -186,10 +200,10 @@ export default function TimeSeriesChart({
     chart = (
       <LineChart {...common}>
         {axes}
-        {keys.map((item) => (
+        {renderedKeys.map((item) => (
           <Line
             key={item.key}
-            type="monotone"
+            type="linear"
             dataKey={item.key}
             name={item.label}
             stroke={item.color}
@@ -223,9 +237,56 @@ export default function TimeSeriesChart({
           : undefined
       }
     >
-      <ResponsiveContainer width="100%" height="100%">
-        {chart}
-      </ResponsiveContainer>
+      {unit && <span className="timeseries-chart__unit">{unit}</span>}
+      {onExpand && (
+        <button
+          type="button"
+          className="timeseries-chart__expand"
+          title="Expand chart"
+          aria-label="Expand chart"
+          onClick={(event) => {
+            event.stopPropagation();
+            onExpand();
+          }}
+        >
+          <Maximize2 size={12} />
+          Expand
+        </button>
+      )}
+      <div className="timeseries-chart__plot">
+        {renderedKeys.length === 0 ? (
+          <div className="dash-empty">All series are hidden. Click a legend item to show it again.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            {chart}
+          </ResponsiveContainer>
+        )}
+      </div>
+      {showLegend && (
+        <div className="timeseries-chart__legend">
+          {keys.map((item) => (
+            <button
+              type="button"
+              key={item.key}
+              className={"timeseries-chart__legend-item" + (hidden.has(item.key) ? " is-hidden" : "")}
+              title={hidden.has(item.key) ? `Show ${item.label}` : `Hide ${item.label}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleSeries(item.key);
+              }}
+            >
+              <span
+                className="timeseries-chart__swatch"
+                style={{
+                  backgroundColor: item.color,
+                  borderRadius: displayMode === "bars" ? 2 : 999,
+                }}
+              />
+              <span className="timeseries-chart__legend-label">{item.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
