@@ -77,8 +77,8 @@ func parseLokiPlan(raw string) (lokiPlan, error) {
 		if err != nil {
 			return lokiPlan{}, err
 		}
-		if trailing := strings.TrimSpace(rest); strings.Trim(trailing, ")") != "" {
-			return lokiPlan{}, fmt.Errorf("unsupported trailing query fragment %q", trailing)
+		if err := finishLokiMetric(&metric, rest); err != nil {
+			return lokiPlan{}, err
 		}
 		streamExpr, duration, err := splitLokiRange(inner)
 		if err != nil {
@@ -97,6 +97,63 @@ func parseLokiPlan(raw string) (lokiPlan, error) {
 	return plan, nil
 }
 
+// finishLokiMetric consumes the closing parenthesis of the optional `sum(...)`
+// wrapper plus an optional postfix grouping clause. Grafana emits both LogQL
+// forms and PromQL-style postfix grouping, for example:
+//
+//	sum by (release) (count_over_time({service="guardian"}[1h]))
+//	sum(count_over_time({service="guardian"}[1h])) by (release)
+func finishLokiMetric(metric *lokiMetricPlan, rest string) error {
+	rest = strings.TrimSpace(rest)
+	// extractBalanced already consumed count_over_time's closing parenthesis;
+	// a wrapping sum(...) leaves exactly one closing parenthesis here.
+	if strings.HasPrefix(rest, ")") {
+		rest = strings.TrimSpace(rest[1:])
+	}
+	if rest == "" {
+		return nil
+	}
+
+	keyword, after := readLokiIdentifier(rest)
+	switch keyword {
+	case "by":
+		labels, remaining, err := parseLokiGroupLabels(after)
+		if err != nil {
+			return err
+		}
+		metric.groupBy = labels
+		rest = remaining
+	case "without":
+		return fmt.Errorf("unsupported LogQL grouping \"without\" (use \"by (...)\")")
+	default:
+		return fmt.Errorf("unsupported trailing query fragment %q", rest)
+	}
+
+	if trailing := strings.TrimSpace(rest); trailing != "" {
+		return fmt.Errorf("unsupported trailing query fragment %q", trailing)
+	}
+	return nil
+}
+
+// parseLokiGroupLabels parses the parenthesised label list of a by (...) clause.
+func parseLokiGroupLabels(input string) ([]string, string, error) {
+	rest := strings.TrimSpace(input)
+	if !strings.HasPrefix(rest, "(") {
+		return nil, "", fmt.Errorf("invalid by clause: expected '('")
+	}
+	raw, remaining, err := extractBalanced(rest, 1)
+	if err != nil {
+		return nil, "", err
+	}
+	labels := make([]string, 0, 4)
+	for _, label := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(label); trimmed != "" {
+			labels = append(labels, trimmed)
+		}
+	}
+	return labels, remaining, nil
+}
+
 func parseLokiMetricPrefix(prefix string) (lokiMetricPlan, error) {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
@@ -108,19 +165,11 @@ func parseLokiMetricPrefix(prefix string) (lokiMetricPlan, error) {
 	rest := strings.TrimSpace(prefix[len("sum"):])
 	metric := lokiMetricPlan{aggregate: "sum"}
 	if strings.HasPrefix(rest, "by") {
-		rest = strings.TrimSpace(rest[len("by"):])
-		if !strings.HasPrefix(rest, "(") {
-			return lokiMetricPlan{}, fmt.Errorf("invalid sum by clause")
-		}
-		labels, after, err := extractBalanced(rest, 1)
+		labels, after, err := parseLokiGroupLabels(rest[len("by"):])
 		if err != nil {
-			return lokiMetricPlan{}, err
+			return lokiMetricPlan{}, fmt.Errorf("invalid sum by clause: %w", err)
 		}
-		for _, label := range strings.Split(labels, ",") {
-			if trimmed := strings.TrimSpace(label); trimmed != "" {
-				metric.groupBy = append(metric.groupBy, trimmed)
-			}
-		}
+		metric.groupBy = labels
 		rest = strings.TrimSpace(after)
 	}
 	rest = strings.TrimSpace(strings.TrimPrefix(rest, "("))

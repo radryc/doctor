@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -211,5 +212,92 @@ func TestLokiGrafanaTraceToLogsPipelineParses(t *testing.T) {
 	}
 	if len(plan.labelFilters) != 2 {
 		t.Fatalf("label filters = %d, want 2 (%+v)", len(plan.labelFilters), plan.labelFilters)
+	}
+}
+
+// Grafana's AWS CloudWatch Log Volume panel emits a postfix grouping clause:
+// sum(count_over_time(...)) by (aws_log_group). Both the prefix and postfix
+// forms are valid and must resolve to the same group-by labels.
+func TestLokiCountOverTimePostfixByParses(t *testing.T) {
+	cases := []struct {
+		query   string
+		groupBy []string
+	}{
+		{
+			query:   `sum(count_over_time({source="aws",aws_region=~"us-east-1"}[5m])) by (aws_log_group)`,
+			groupBy: []string{"aws_log_group"},
+		},
+		{
+			query:   `sum(count_over_time({source="aws"}[5m])) by (aws_log_group, aws_region)`,
+			groupBy: []string{"aws_log_group", "aws_region"},
+		},
+		{
+			query:   `count_over_time({source="aws"}[5m]) by (aws_log_group)`,
+			groupBy: []string{"aws_log_group"},
+		},
+	}
+	for _, tc := range cases {
+		plan, err := parseLokiPlan(tc.query)
+		if err != nil {
+			t.Fatalf("parseLokiPlan(%q) returned error: %v", tc.query, err)
+		}
+		if plan.metric == nil {
+			t.Fatalf("parseLokiPlan(%q): metric plan is nil", tc.query)
+		}
+		if !reflect.DeepEqual(plan.metric.groupBy, tc.groupBy) {
+			t.Fatalf("parseLokiPlan(%q) groupBy = %#v, want %#v", tc.query, plan.metric.groupBy, tc.groupBy)
+		}
+	}
+}
+
+func TestLokiCountOverTimePostfixByGroupsSeries(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	backend := &fakeLogEngineBackend{logs: []segment.LogRecord{
+		{Service: "aws", Timestamp: base.Add(-2 * time.Minute), Body: "orders", Attributes: map[string]string{"aws_log_group": "/ecs/orders", "aws_region": "us-east-1"}},
+		{Service: "aws", Timestamp: base.Add(-2 * time.Minute), Body: "billing", Attributes: map[string]string{"aws_log_group": "/ecs/billing", "aws_region": "us-east-1"}},
+		{Service: "aws", Timestamp: base.Add(-3 * time.Minute), Body: "orders-2", Attributes: map[string]string{"aws_log_group": "/ecs/orders", "aws_region": "us-east-1"}},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	query := `sum(count_over_time({source="aws"}[1h])) by (aws_log_group)`
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/loki/api/v1/query_range?query="+url.QueryEscape(query)+
+			"&start="+strconv.FormatInt(base.Add(-time.Hour).UnixNano(), 10)+
+			"&end="+strconv.FormatInt(base.UnixNano(), 10)+
+			"&step=5m",
+		nil,
+	)
+	rec := httptest.NewRecorder()
+	svc.handleLokiQueryRange(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data.Result) != 2 {
+		t.Fatalf("series = %d, want 2 (body=%s)", len(resp.Data.Result), rec.Body.String())
+	}
+	groups := map[string]bool{}
+	for _, series := range resp.Data.Result {
+		groups[series.Metric["aws_log_group"]] = true
+	}
+	if !groups["/ecs/orders"] || !groups["/ecs/billing"] {
+		t.Fatalf("aws_log_group series = %#v", groups)
+	}
+}
+
+func TestLokiCountOverTimeRejectsTrailingGarbage(t *testing.T) {
+	if _, err := parseLokiPlan(`sum(count_over_time({source="aws"}[5m])) bogus`); err == nil {
+		t.Fatal("expected an error for a trailing fragment after the aggregation")
 	}
 }
