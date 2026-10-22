@@ -190,7 +190,7 @@ export default function ProbesPage() {
                     </button>
                     <button
                       className="xp-live-btn"
-                      onClick={() => navigate(`/logs?q=${encodeURIComponent(probe.service)}`)}
+                      onClick={() => navigate(`/logs?service=${encodeURIComponent(probe.service)}`)}
                     >
                       Logs
                     </button>
