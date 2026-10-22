@@ -97,7 +97,7 @@ func TestServiceREDPresetActiveSeriesMatchesCanonicalServices(t *testing.T) {
 		if len(widget.Queries) == 0 {
 			t.Fatal("red-active-series has no queries")
 		}
-		if expr := widget.Queries[0].Expr; !strings.Contains(expr, `$service(\..*)?`) {
+		if expr := widget.Queries[0].Expr; !strings.Contains(expr, `$service(\\..*)?`) {
 			t.Fatalf("active-series query %q must include canonical service variants", expr)
 		}
 		return

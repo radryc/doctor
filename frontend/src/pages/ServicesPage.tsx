@@ -8,18 +8,19 @@ import { useTimeRange } from "../context/TimeRangeContext";
 import type { DiscoveredService, LogRecord } from "../types/api";
 
 // Services are emitted with both short names ("doctor") and canonical names
-// ("doctor.query.query"). Prometheus anchors regex matchers, so match the exact
-// service or any dot-prefixed child. TraceQL regexes are not anchored.
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// ("doctor.query.query"). PromQL anchors regex matchers, so match the exact
+// service or any dot-prefixed child. Backslashes are doubled because PromQL and
+// TraceQL string literals consume one escape level.
+function escapeServiceRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\\\$&");
 }
 
 function promServiceMatcher(name: string): string {
-  return `${escapeRegex(name)}(\\..*)?`;
+  return `${escapeServiceRegex(name)}(\\\\..*)?`;
 }
 
 function traceServiceMatcher(name: string): string {
-  return `^${escapeRegex(name)}($|\\.)`;
+  return `^${escapeServiceRegex(name)}($|\\\\.)`;
 }
 
 // ── APM Service Catalog (/services) ──────────────────────────────────────────
