@@ -17,6 +17,7 @@ import (
 	"github.com/rydzu/ainfra/doctor/internal/auth"
 	"github.com/rydzu/ainfra/doctor/internal/config"
 	"github.com/rydzu/ainfra/doctor/internal/dashboards"
+	"github.com/rydzu/ainfra/doctor/internal/federation"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/query"
 	"github.com/rydzu/ainfra/doctor/internal/ruler"
@@ -128,11 +129,25 @@ func main() {
 			cfg.AccessPolicyURL, cfg.AccessPolicyFile, policyGate.Enforced())
 	}
 
-	var awsClient *awsstore.Client
-	if cfg.AWSEnabled && cfg.AWSBackendURL != "" {
-		awsClient = awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
-		svc.SetAWSBackend(awsClient)
-		log.Printf("aws federation enabled via %s", cfg.AWSBackendURL)
+	var awsClient proxy.AWSClient
+	switch {
+	case cfg.FederationEnabled && cfg.FederationCatalogFile != "":
+		catalog, catalogErr := federation.LoadCatalogFile(cfg.FederationCatalogFile)
+		if catalogErr != nil {
+			log.Fatalf("load aws federation catalog: %v", catalogErr)
+		}
+		manager := federation.NewManager(catalog, federation.Options{
+			MaxFanout: cfg.FederationMaxFanout,
+			Timeout:   cfg.FederationTimeout,
+		})
+		awsClient = manager
+		svc.SetAWSBackend(manager)
+		log.Printf("multi-account aws federation enabled with %d target(s) from %s", catalog.Len(), cfg.FederationCatalogFile)
+	case cfg.AWSEnabled && cfg.AWSBackendURL != "":
+		legacy := awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
+		awsClient = legacy
+		svc.SetAWSBackend(legacy)
+		log.Printf("aws federation enabled via %s (legacy single backend)", cfg.AWSBackendURL)
 	}
 
 	gate, authMiddleware, webAuth, cleanup, err := setupSecurity(ctx, cfg)
@@ -144,6 +159,9 @@ func main() {
 	}
 	if cfg.ProxyEnabled {
 		setupProxyRouter(ctx, cfg, svc, awsClient, gate)
+		if awsClient != nil {
+			svc.SetAWSViaRouter(true)
+		}
 	}
 
 	handler := svc.Handler()
@@ -309,7 +327,7 @@ func loadTeamMapping(raw string) (authz.TeamMapping, error) {
 // storage is always the "doctor" backend, AWS is registered with the legacy
 // fallback policy, and additional backends come from the static file and
 // Guardian discovery.
-func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient *awsstore.Client, gate *access.Gate) {
+func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient proxy.AWSClient, gate *access.Gate) {
 	registries := make([]proxy.Registry, 0, 2)
 	if cfg.ProxyBackendsFile != "" {
 		static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
@@ -362,13 +380,20 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 		log.Fatalf("register local proxy backend: %v", err)
 	}
 	if awsClient != nil {
+		federated := false
+		origin := "config"
+		if _, ok := awsClient.(*federation.Manager); ok {
+			federated = true
+			origin = "aws-federated"
+		}
 		awsBackend := proxy.Backend{
 			Name:       "aws",
 			Kind:       proxy.KindAWS,
 			Signals:    []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs, proxy.SignalTraces},
 			Policy:     proxy.PolicyFallback,
 			OwnersPath: "/doctor/v1/endpoints/aws",
-			Origin:     "config",
+			Origin:     origin,
+			Federated:  federated,
 		}
 		awsUpstream := svc.AWSUpstream()
 		if err := router.Register(awsBackend, proxy.Upstreams{

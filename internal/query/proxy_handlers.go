@@ -17,9 +17,12 @@ import (
 func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.Request, query string, at time.Time) {
 	data, warnings, err := s.proxyRouter.MetricsInstant(r.Context(), s.tenantFromRequest(r), query, at)
 	if err != nil {
-		if proxy.IsParseError(err) {
+		switch {
+		case errors.Is(err, proxy.ErrScopeRequired), errors.Is(err, proxy.ErrTooBroad):
+			writePrometheusError(w, http.StatusUnprocessableEntity, "bad_data", err.Error())
+		case proxy.IsParseError(err):
 			writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
-		} else {
+		default:
 			writePrometheusExecutionError(w, err)
 		}
 		return
@@ -33,9 +36,12 @@ func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.
 func (s *Service) handlePrometheusQueryRangeViaRouter(w http.ResponseWriter, r *http.Request, query string, start, end time.Time, step time.Duration) {
 	data, warnings, err := s.proxyRouter.MetricsRange(r.Context(), s.tenantFromRequest(r), query, start, end, step)
 	if err != nil {
-		if proxy.IsParseError(err) {
+		switch {
+		case errors.Is(err, proxy.ErrScopeRequired), errors.Is(err, proxy.ErrTooBroad):
+			writePrometheusError(w, http.StatusUnprocessableEntity, "bad_data", err.Error())
+		case proxy.IsParseError(err):
 			writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
-		} else {
+		default:
 			writePrometheusExecutionError(w, err)
 		}
 		return

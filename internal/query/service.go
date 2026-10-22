@@ -45,6 +45,7 @@ type Service struct {
 	defaultPartition string
 	logEngine        LogEngineBackend
 	aws              proxy.AWSClient
+	awsViaRouter     bool
 	proxyRouter      *proxy.Router
 	guardianClient   *http.Client
 	rulesProxy       *httputil.ReverseProxy
@@ -63,13 +64,33 @@ func (s *Service) SetPolicyGate(gate *access.PolicyGate) {
 }
 
 // SetAWSBackend configures the optional AWS (CloudWatch/X-Ray) federation
-// backend served by guardian-pusher-aws.
-func (s *Service) SetAWSBackend(client *awsstore.Client) {
+// backend served by guardian-pusher-aws. The client may be a legacy single
+// pusher or a multi-account federation manager.
+func (s *Service) SetAWSBackend(client proxy.AWSClient) {
 	if client == nil {
 		s.aws = nil
 		return
 	}
 	s.aws = client
+}
+
+// SetAWSViaRouter records that proxyRouter already owns the AWS backend. It
+// prevents native handlers from querying AWS twice (once through the router
+// and once through the direct Service.aws fallback).
+func (s *Service) SetAWSViaRouter(viaRouter bool) {
+	s.awsViaRouter = viaRouter
+}
+
+type federationStatusProvider interface {
+	Status() map[string]any
+}
+
+func (s *Service) handleFederationStatus(w http.ResponseWriter, _ *http.Request) {
+	if provider, ok := s.aws.(federationStatusProvider); ok {
+		writeJSON(w, http.StatusOK, provider.Status())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
 }
 
 // SetTenantHeader sets the HTTP header used to route queries to a tenant when
@@ -502,6 +523,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/traces/", s.handleTraceByID)
 	mux.HandleFunc("/v1/logs/services", s.handleLogServices)
 	mux.HandleFunc("/v1/logs/search", s.handleLogSearch)
+	mux.HandleFunc("/v1/federation/status", s.handleFederationStatus)
 	mux.HandleFunc("/v1/metrics/range", s.handleMetricRange)
 	mux.HandleFunc("/v1/rules", s.handleRulesProxy)
 	mux.HandleFunc("/v1/rules/", s.handleRulesProxy)
@@ -744,6 +766,20 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 		to = time.Now().UTC()
 	}
 
+	// Reject broad live-AWS searches before any fan-out. Native/local queries
+	// are unaffected; this only applies when the query or log-group picker
+	// targets AWS.
+	if _, awsMode := proxy.AWSQueryMode(query); awsMode != proxy.AWSQueryNone || logGroup != "" {
+		groups := []string(nil)
+		if logGroup != "" {
+			groups = []string{logGroup}
+		}
+		if err := s.checkAWSLogScope(r.Context(), query, groups); err != nil {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+	}
+
 	var results []segment.LogRecord
 	if s.proxyRouter != nil {
 		records, warnings, err := s.proxyRouter.Logs(r.Context(), tenant, logSearchPushdown(service, query, logGroup), from, to, limit)
@@ -755,11 +791,24 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// The proxy router serves native storage. When the search explicitly
-		// selects the AWS source, also query CloudWatch and merge the records.
-		if plan, parseErr := parseLokiPlan(query); parseErr == nil {
-			if awsLogs := s.queryAWSLogsForLoki(r.Context(), tenant, plan, from, to, limit); len(awsLogs) > 0 {
-				records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
+		// The proxy router serves native storage and, when configured, the
+		// single logical AWS federated backend. Only use the direct AWS
+		// fallback when the router does not own AWS; otherwise the same query
+		// would be sent to AWS twice.
+		if !s.awsViaRouter {
+			// When the search explicitly selects the AWS source, also query
+			// CloudWatch and merge the records. The CloudWatch log-group picker
+			// is an AWS selector too, so it must not depend on the free-text
+			// query containing source="aws".
+			if logGroup != "" {
+				plan := lokiPlan{selector: fmt.Sprintf(`{source="aws", aws_log_group=%q}`, logGroup)}
+				if awsLogs := s.queryAWSLogsForLoki(r.Context(), tenant, plan, from, to, limit); len(awsLogs) > 0 {
+					records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
+				}
+			} else if plan, parseErr := parseLokiPlan(query); parseErr == nil {
+				if awsLogs := s.queryAWSLogsForLoki(r.Context(), tenant, plan, from, to, limit); len(awsLogs) > 0 {
+					records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
+				}
 			}
 		}
 		writeProxyWarnings(w, warnings)

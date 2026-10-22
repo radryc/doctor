@@ -776,6 +776,11 @@ func (r *Router) metricsQuery(
 		for _, res := range results {
 			if res.err != nil {
 				r.noteBackendFailure(res.target.backend, res.err)
+				// A pure AWS query has no local fallback. Propagate the scope
+				// error so handlers can return 422 instead of an empty 200.
+				if mode == AWSQueryOnly && len(primary) == 1 {
+					return nil, warnings, res.err
+				}
 				warnings = append(warnings, Warning{Backend: res.target.backend.Name, Signal: SignalMetrics, Message: res.err.Error()})
 				continue
 			}
@@ -958,7 +963,9 @@ func parseGuardianLogGroupScope(logGroup string) (account, region, partition str
 }
 
 func backendMatchesCriteria(backend Backend, c selectorCriteria) bool {
-	if c.isEmpty() || isLocalBackend(backend) {
+	if c.isEmpty() || isLocalBackend(backend) || backend.Federated {
+		// Federated backends own target selection internally; pruning them by
+		// static account/region fields would defeat their planner.
 		return true
 	}
 	if !backendMatchesField(backend, "backend", c.backend) {
