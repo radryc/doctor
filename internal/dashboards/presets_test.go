@@ -3,6 +3,8 @@ package dashboards
 import (
 	"strings"
 	"testing"
+
+	promparser "github.com/prometheus/prometheus/promql/parser"
 )
 
 // The AWS federation dashboard advertises source=aws scoping. The X-Ray panel
@@ -97,8 +99,13 @@ func TestServiceREDPresetActiveSeriesMatchesCanonicalServices(t *testing.T) {
 		if len(widget.Queries) == 0 {
 			t.Fatal("red-active-series has no queries")
 		}
-		if expr := widget.Queries[0].Expr; !strings.Contains(expr, `$service(\\..*)?`) {
+		expr := widget.Queries[0].Expr
+		if !strings.Contains(expr, `$service(\\..*)?`) {
 			t.Fatalf("active-series query %q must include canonical service variants", expr)
+		}
+		resolved := strings.ReplaceAll(expr, "$service", ".*")
+		if _, err := promparser.NewParser(promparser.Options{}).ParseExpr(resolved); err != nil {
+			t.Fatalf("active-series query %q is not valid PromQL: %v", resolved, err)
 		}
 		return
 	}
