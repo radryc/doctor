@@ -125,7 +125,7 @@ func presetServiceRED() DashboardDocument {
 				ID: "red-active-series", Title: "Active Series", Kind: WidgetStat,
 				GridPos: GridPos{X: 9, Y: 0, W: 3, H: 3},
 				Queries: []WidgetQuery{{RefID: "A", Datasource: DatasourcePrometheus,
-					Expr: `count({__name__=~".+",service=~"$service"})`,
+					Expr: `count({__name__=~".+",service=~"$service(\..*)?")}`,
 				}},
 				Visualization: &WidgetVisualization{Unit: "short"},
 			},
