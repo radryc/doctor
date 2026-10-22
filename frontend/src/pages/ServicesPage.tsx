@@ -3,8 +3,24 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ChevronLeft, BarChart3, FileText, GitBranch } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { useInspector } from "../context/InspectorContext";
 import { useTimeRange } from "../context/TimeRangeContext";
-import type { DiscoveredService } from "../types/api";
+import type { DiscoveredService, LogRecord } from "../types/api";
+
+// Services are emitted with both short names ("doctor") and canonical names
+// ("doctor.query.query"). Prometheus anchors regex matchers, so match the exact
+// service or any dot-prefixed child. TraceQL regexes are not anchored.
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function promServiceMatcher(name: string): string {
+  return `${escapeRegex(name)}(\\..*)?`;
+}
+
+function traceServiceMatcher(name: string): string {
+  return `^${escapeRegex(name)}($|\\.)`;
+}
 
 // ── APM Service Catalog (/services) ──────────────────────────────────────────
 
@@ -169,6 +185,8 @@ function ServiceCatalog() {
 function ServiceDetail({ name }: { name: string }) {
   const navigate = useNavigate();
   const { config } = useConfig();
+  const promSvc = promServiceMatcher(name);
+  const traceSvc = traceServiceMatcher(name);
 
   return (
     <div className="tab-panel">
@@ -182,7 +200,7 @@ function ServiceDetail({ name }: { name: string }) {
         <div className="xp-toolbar">
           <button
             className="xp-live-btn"
-            onClick={() => navigate(`/logs?q=${encodeURIComponent(name)}`)}
+            onClick={() => navigate(`/logs?service=${encodeURIComponent(name)}`)}
           >
             <FileText size={12} /> Logs
           </button>
@@ -194,7 +212,7 @@ function ServiceDetail({ name }: { name: string }) {
           </button>
           <button
             className="xp-live-btn"
-            onClick={() => navigate(`/metrics?q=${encodeURIComponent(`{service="${name}"}`)}`)}
+            onClick={() => navigate(`/metrics?q=${encodeURIComponent(`{service=~"${promSvc}"}`)}`)}
           >
             <BarChart3 size={12} /> Metrics
           </button>
@@ -205,25 +223,25 @@ function ServiceDetail({ name }: { name: string }) {
         <div className="service-detail__red">
           <REDCard
             label="Request Rate"
-            expr={`sum(rate(http_server_request_duration_count{service="${name}"}[$__rate_interval])) or sum(rate(http_requests_total{service="${name}"}[$__rate_interval]))`}
-            traceqlExpr={`{resource.service.name=~"${name}"} | rate()`}
+            expr={`sum(rate(http_server_request_duration_count{service=~"${promSvc}"}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}"}[$__rate_interval]))`}
+            traceqlExpr={`{resource.service.name=~"${traceSvc}"} | rate()`}
             traceqlAgg="sum"
             unit="reqps"
             tenant={config.default_tenant}
           />
           <REDCard
             label="Error Rate"
-            expr={`(sum(rate(http_server_request_duration_count{service="${name}",http_response_status_code=~"5.."}[$__rate_interval])) or sum(rate(http_requests_total{service="${name}",status_code=~"5.."}[$__rate_interval]))) / (sum(rate(http_server_request_duration_count{service="${name}"}[$__rate_interval])) or sum(rate(http_requests_total{service="${name}"}[$__rate_interval]))) * 100`}
-            traceqlExpr={`{resource.service.name=~"${name}" && status = error} | rate()`}
-            traceqlDenominator={`{resource.service.name=~"${name}"} | rate()`}
+            expr={`(sum(rate(http_server_request_duration_count{service=~"${promSvc}",http_response_status_code=~"5.."}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}",status_code=~"5.."}[$__rate_interval]))) / (sum(rate(http_server_request_duration_count{service=~"${promSvc}"}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}"}[$__rate_interval]))) * 100`}
+            traceqlExpr={`{resource.service.name=~"${traceSvc}" && status = error} | rate()`}
+            traceqlDenominator={`{resource.service.name=~"${traceSvc}"} | rate()`}
             traceqlAgg="ratio"
             unit="%"
             tenant={config.default_tenant}
           />
           <REDCard
             label="P95 Latency"
-            expr={`histogram_quantile(0.95, sum(rate(http_server_request_duration_bucket{service="${name}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service="${name}"}[$__rate_interval])) by (le)) * 1000`}
-            traceqlExpr={`{resource.service.name=~"${name}"} | quantile_over_time(duration, 0.95)`}
+            expr={`histogram_quantile(0.95, sum(rate(http_server_request_duration_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000`}
+            traceqlExpr={`{resource.service.name=~"${traceSvc}"} | quantile_over_time(duration, 0.95)`}
             traceqlAgg="max"
             traceqlScale={1e-6}
             unit="ms"
@@ -231,17 +249,23 @@ function ServiceDetail({ name }: { name: string }) {
           />
           <REDCard
             label="P99 Latency"
-            expr={`histogram_quantile(0.99, sum(rate(http_server_request_duration_bucket{service="${name}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service="${name}"}[$__rate_interval])) by (le)) * 1000`}
-            traceqlExpr={`{resource.service.name=~"${name}"} | quantile_over_time(duration, 0.99)`}
+            expr={`histogram_quantile(0.99, sum(rate(http_server_request_duration_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000`}
+            traceqlExpr={`{resource.service.name=~"${traceSvc}"} | quantile_over_time(duration, 0.99)`}
             traceqlAgg="max"
             traceqlScale={1e-6}
             unit="ms"
             tenant={config.default_tenant}
           />
         </div>
-        <div style={{ marginTop: "1rem" }}>
-          <h3 style={{ fontSize: "0.85rem", opacity: 0.7, marginBottom: "0.5rem" }}>Recent Traces</h3>
-          <RecentTraces service={name} tenant={config.default_tenant} />
+        <div className="service-detail__recent">
+          <div>
+            <h3 style={{ fontSize: "0.85rem", opacity: 0.7, marginBottom: "0.5rem" }}>Recent Traces</h3>
+            <RecentTraces service={name} tenant={config.default_tenant} />
+          </div>
+          <div>
+            <h3 style={{ fontSize: "0.85rem", opacity: 0.7, marginBottom: "0.5rem" }}>Recent Logs</h3>
+            <RecentLogs service={name} tenant={config.default_tenant} />
+          </div>
         </div>
       </div>
     </div>
@@ -355,17 +379,31 @@ function REDCard({
 function RecentTraces({ service, tenant }: { service: string; tenant: string }) {
   const tr = useTimeRange();
   const { from, to } = tr.resolve();
-  const [traces, setTraces] = useState<Array<{ trace_id: string; span_count: number; min_time: string }>>([]);
+  const [traces, setTraces] = useState<Array<{ trace_id: string; span_count: number; min_time: string; duration_ms?: number }>>([]);
 
   useEffect(() => {
     const params = new URLSearchParams({
-      tenant,
-      service,
-      from: from.toISOString(),
-      to: to.toISOString(),
+      q: `{ resource.service.name =~ "${traceServiceMatcher(service)}" }`,
+      start: (from.getTime() / 1000).toFixed(0),
+      end: (to.getTime() / 1000).toFixed(0),
       limit: "20",
+      tenant,
     });
-    api.getRecentTraces(params).then((r) => setTraces(r.traces ?? [])).catch(() => {});
+    api
+      .searchTraces(params)
+      .then((r) =>
+        setTraces(
+          (r.traces ?? []).map((t) => ({
+            trace_id: t.traceID,
+            span_count: 0,
+            duration_ms: t.durationMs,
+            min_time: t.startTimeUnixNano
+              ? new Date(Number(BigInt(t.startTimeUnixNano) / 1_000_000n)).toISOString()
+              : "",
+          }))
+        )
+      )
+      .catch(() => setTraces([]));
   }, [service, tenant, from, to, tr.refreshTick]);
 
   if (traces.length === 0) return <div className="xp-empty">No recent traces.</div>;
@@ -375,8 +413,70 @@ function RecentTraces({ service, tenant }: { service: string; tenant: string }) 
       {traces.map((t) => (
         <div key={t.trace_id} className="trace-row">
           <code className="trace-row__id">{t.trace_id.slice(0, 16)}…</code>
-          <span>{t.span_count} spans</span>
+          <span>{t.duration_ms != null ? `${t.duration_ms}ms` : `${t.span_count} spans`}</span>
           <span>{new Date(t.min_time).toLocaleTimeString()}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RecentLogs({ service, tenant }: { service: string; tenant: string }) {
+  const tr = useTimeRange();
+  const { from, to } = tr.resolve();
+  const { open } = useInspector();
+  const [logs, setLogs] = useState<LogRecord[]>([]);
+
+  useEffect(() => {
+    const params = new URLSearchParams({
+      tenant,
+      service,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      limit: "50",
+    });
+    api
+      .searchLogs(params)
+      .then((r) => setLogs(r.results ?? []))
+      .catch(() => setLogs([]));
+  }, [service, tenant, from, to, tr.refreshTick]);
+
+  if (logs.length === 0) return <div className="xp-empty">No recent logs.</div>;
+
+  return (
+    <div className="dash-logs">
+      {logs.slice(0, 50).map((log, i) => (
+        <div
+          key={i}
+          className="dash-log-row dash-log-row--clickable"
+          role="button"
+          tabIndex={0}
+          title="Open full log details"
+          onClick={() =>
+            open({
+              kind: "log",
+              id: log.trace_id || `${log.service || "log"}@${log.timestamp}`,
+              tenant,
+              log,
+            })
+          }
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              open({
+                kind: "log",
+                id: log.trace_id || `${log.service || "log"}@${log.timestamp}`,
+                tenant,
+                log,
+              });
+            }
+          }}
+        >
+          <span className="dash-log-ts">{new Date(log.timestamp).toLocaleTimeString()}</span>
+          <span className={`dash-log-sev dash-log-sev--${(log.severity_text ?? "INFO").toLowerCase()}`}>
+            {(log.severity_text ?? "INFO").slice(0, 4)}
+          </span>
+          <span className="dash-log-body">{log.body}</span>
         </div>
       ))}
     </div>

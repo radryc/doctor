@@ -163,7 +163,7 @@ export default function LogsPage() {
   const tr = useTimeRange();
   const [searchParams] = useSearchParams();
 
-  const [componentFilter, setComponentFilter] = useState("");
+  const [componentFilter, setComponentFilter] = useState(searchParams.get("service") ?? "");
   const [partitionFilter, setPartitionFilter] = useState(searchParams.get("partition") ?? "");
   const [logGroup, setLogGroup] = useState(searchParams.get("logGroup") ?? "");
   const [sevActive, setSevActive] = useState<Record<SevKey, boolean>>(() =>
