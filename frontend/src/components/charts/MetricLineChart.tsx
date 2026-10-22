@@ -9,14 +9,23 @@ interface MetricLineChartProps {
 export default function MetricLineChart({ series, metricName }: MetricLineChartProps) {
   if (series.length === 0) return null;
 
-  const values = series
-    .flatMap((item) => item.points.map((point) => Number(point.value)))
-    .filter((value) => Number.isFinite(value));
-  if (values.length === 0) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  let sum = 0;
+  let count = 0;
+  for (const item of series) {
+    for (const point of item.points) {
+      const value = Number(point.value);
+      if (!Number.isFinite(value)) continue;
+      if (value < min) min = value;
+      if (value > max) max = value;
+      sum += value;
+      count += 1;
+    }
+  }
+  if (count === 0) return null;
 
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const avg = sum / count;
   const maxSeries = 30;
 
   return (
