@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { CHART_PALETTE, formatChartValue } from "./TimeSeriesChart";
+import { CHART_PALETTE, formatChartValue, formatDateTimeFull } from "./TimeSeriesChart";
 import type { MetricSeries } from "../../types/api";
 
 interface SeriesDetailsProps {
@@ -86,7 +86,7 @@ export default function SeriesDetails({ series, maxSeries = 50, showPoints = tru
               />
               <code>{item.label}</code>
             </span>
-            <span title={stats.latestAt ? new Date(stats.latestAt).toLocaleString() : undefined}>
+            <span title={stats.latestAt ? formatDateTimeFull(stats.latestAt) : undefined}>
               {stats.latest == null ? "—" : formatChartValue(stats.latest)}
             </span>
             <span>{stats.min == null ? "—" : formatChartValue(stats.min)}</span>

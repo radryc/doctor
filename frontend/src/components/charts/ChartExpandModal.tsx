@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
-import TimeSeriesChart, { type ChartDisplayMode } from "./TimeSeriesChart";
+import TimeSeriesChart, { formatDateTimeFull, type ChartDisplayMode } from "./TimeSeriesChart";
 import SeriesDetails from "./SeriesDetails";
 import type { MetricSeries } from "../../types/api";
 
@@ -84,9 +84,9 @@ export default function ChartExpandModal({
           )}
         </div>
         <div className="modal__footer chart-modal__range">
-          <span>{from.toLocaleString()}</span>
+          <span>{formatDateTimeFull(from)}</span>
           <span>→</span>
-          <span>{to.toLocaleString()}</span>
+          <span>{formatDateTimeFull(to)}</span>
         </div>
       </div>
     </div>
