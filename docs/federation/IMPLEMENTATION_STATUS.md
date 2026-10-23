@@ -441,6 +441,18 @@ Files:
   preserving per-user visibility.
 - [x] Live check: `/api/search/tag/service.name/values` went from **1.0s** on
   the cold request to **<1ms** on cached requests.
+
+### MonoFS trace-discovery index
+
+- [x] Trace chunk manifests now carry bounded, deduplicated
+  `trace_tag_keys` and `trace_tag_values` metadata at ingest.
+- [x] A new trace-discovery mode on the existing QueryTraces RPC returns
+  services, tag names, or tag values without opening span Parquet data.
+- [x] Doctor uses the index through `QueryTraceDiscovery`; during a rolling
+  MonoFS upgrade it falls back to the legacy scan if the server is older.
+- [x] Old chunks without index metadata fall back to a one-time scan; newly
+  ingested chunks use the manifest index.
+- [ ] MonoFS server/router images still need to be rolled for live use.
 - [ ] A cold first page load can still pay the local trace scan cost; a
   background/indexed discovery path is the next optimization.
 

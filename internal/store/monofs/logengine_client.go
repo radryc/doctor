@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -321,6 +322,49 @@ func protoMetricMatcherType(matchType segment.MetricMatchType) pb.MetricLabelMat
 	default:
 		return pb.MetricLabelMatcherType_METRIC_LABEL_MATCHER_TYPE_EQUAL
 	}
+}
+
+// QueryTraceDiscovery returns bounded trace discovery metadata (services,
+// tag names, or values for one tag) from MonoFS chunk manifests.
+func (c *LogEngineClient) QueryTraceDiscovery(ctx context.Context, tenant, discovery, tag string, from, to time.Time) ([]string, error) {
+	_ = tenant
+	stream, err := c.router.StreamQueryTraces(ctx, &pb.QueryTracesRequest{
+		FromUnixNano: timeToNano(from),
+		ToUnixNano:   timeToNano(to),
+		Discovery:    discovery,
+		DiscoveryTag: tag,
+	})
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	for {
+		item, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			return nil, recvErr
+		}
+		if item == nil {
+			continue
+		}
+		for _, raw := range queryResultRecords(item) {
+			var value string
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return nil, fmt.Errorf("decode trace discovery value: %w", err)
+			}
+			if value != "" {
+				seen[value] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // QueryTraces returns trace spans matching traceID and/or service in the time range.
