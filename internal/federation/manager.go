@@ -76,6 +76,11 @@ func (m *Manager) Planner() *Planner {
 	return m.planner
 }
 
+// statusMaxPartitionEntries bounds the partition map in the status response.
+// The aggregate count remains complete; the map exists for the small demo and
+// operator convenience, not for serializing 150k rows.
+const statusMaxPartitionEntries = 512
+
 // Status summarizes the federation catalog for the admin/status endpoint.
 func (m *Manager) Status() map[string]any {
 	if m == nil || m.catalog == nil {
@@ -83,20 +88,28 @@ func (m *Manager) Status() map[string]any {
 	}
 	targets := m.catalog.Targets()
 	regions := make(map[string]int)
-	partitions := make(map[string]int)
+	partitions := make(map[string]int, statusMaxPartitionEntries)
+	allPartitions := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
 		regions[target.Region]++
 		for _, partition := range target.Partitions {
-			partitions[partition]++
+			allPartitions[partition] = struct{}{}
+			if _, included := partitions[partition]; included {
+				partitions[partition]++
+			} else if len(partitions) < statusMaxPartitionEntries {
+				partitions[partition] = 1
+			}
 		}
 	}
 	return map[string]any{
-		"enabled":    m.Enabled(),
-		"targets":    len(targets),
-		"max_fanout": m.planner.MaxFanout(),
-		"version":    m.catalog.Version(),
-		"regions":    regions,
-		"partitions": partitions,
+		"enabled":              m.Enabled(),
+		"targets":              len(targets),
+		"max_fanout":           m.planner.MaxFanout(),
+		"version":              m.catalog.Version(),
+		"regions":              regions,
+		"partitions":           partitions,
+		"partition_count":      len(allPartitions),
+		"partitions_truncated": len(allPartitions) > len(partitions),
 	}
 }
 

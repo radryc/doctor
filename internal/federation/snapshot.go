@@ -135,6 +135,7 @@ type MonoFSSnapshotStore struct {
 	Root         string
 	Tenant       string
 	ShardTargets int
+	ShardWorkers int
 	Principal    string
 }
 
@@ -152,6 +153,7 @@ func NewMonoFSSnapshotStore(files CatalogFileStore, token, root, tenant string) 
 		Root:         "/" + strings.Trim(strings.TrimSpace(root), "/"),
 		Tenant:       tenant,
 		ShardTargets: 500,
+		ShardWorkers: 16,
 		Principal:    "doctor-federation",
 	}
 }
@@ -164,41 +166,107 @@ func (s *MonoFSSnapshotStore) manifestPath() string {
 	return path.Join(s.tenantRoot(), "manifest.json")
 }
 
+func (s *MonoFSSnapshotStore) workerCount(count int) int {
+	workers := s.ShardWorkers
+	if workers <= 0 {
+		workers = 16
+	}
+	if workers > count {
+		workers = count
+	}
+	if workers < 1 {
+		return 1
+	}
+	return workers
+}
+
+func (s *MonoFSSnapshotStore) readManifest(ctx context.Context) (Manifest, error) {
+	data, err := s.Files.ReadFile(ctx, s.manifestPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Manifest{}, ErrSnapshotNotFound
+		}
+		return Manifest{}, fmt.Errorf("read federation manifest: %w", err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return Manifest{}, fmt.Errorf("parse federation manifest: %w", err)
+	}
+	return manifest, nil
+}
+
+func (s *MonoFSSnapshotStore) loadShard(ctx context.Context, shard ShardRef) ([]Target, error) {
+	raw, err := s.Files.ReadFile(ctx, shard.Path)
+	if err != nil {
+		return nil, fmt.Errorf("read federation shard %s: %w", shard.ID, err)
+	}
+	if shard.SHA256 != "" {
+		sum := sha256.Sum256(raw)
+		if got := hex.EncodeToString(sum[:]); got != shard.SHA256 {
+			return nil, fmt.Errorf("federation shard %s checksum mismatch: got %s want %s", shard.ID, got, shard.SHA256)
+		}
+	}
+	var shardSnapshot Snapshot
+	if err := json.Unmarshal(raw, &shardSnapshot); err != nil {
+		return nil, fmt.Errorf("parse federation shard %s: %w", shard.ID, err)
+	}
+	if shard.Targets > 0 && len(shardSnapshot.Targets) != shard.Targets {
+		return nil, fmt.Errorf("federation shard %s target count mismatch: got %d want %d", shard.ID, len(shardSnapshot.Targets), shard.Targets)
+	}
+	return shardSnapshot.Targets, nil
+}
+
 func (s *MonoFSSnapshotStore) Load(ctx context.Context) (Snapshot, error) {
 	if s == nil || s.Files == nil {
 		return Snapshot{}, errors.New("federation snapshot file store is required")
 	}
-	data, err := s.Files.ReadFile(ctx, s.manifestPath())
+	manifest, err := s.readManifest(ctx)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return Snapshot{}, ErrSnapshotNotFound
-		}
-		return Snapshot{}, fmt.Errorf("read federation manifest: %w", err)
-	}
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Snapshot{}, fmt.Errorf("parse federation manifest: %w", err)
+		return Snapshot{}, err
 	}
 	if len(manifest.Shards) == 0 {
 		return Snapshot{Version: manifest.Version, GeneratedAt: manifest.GeneratedAt}, nil
 	}
-	targets := make([]Target, 0)
-	for _, shard := range manifest.Shards {
-		raw, err := s.Files.ReadFile(ctx, shard.Path)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("read federation shard %s: %w", shard.ID, err)
-		}
-		if shard.SHA256 != "" {
-			sum := sha256.Sum256(raw)
-			if got := hex.EncodeToString(sum[:]); got != shard.SHA256 {
-				return Snapshot{}, fmt.Errorf("federation shard %s checksum mismatch: got %s want %s", shard.ID, got, shard.SHA256)
+
+	// Shards are immutable and independent; load them with a bounded worker
+	// pool instead of one round trip per shard. Results are kept in manifest
+	// order so the assembled snapshot is deterministic.
+	parts := make([][]Target, len(manifest.Shards))
+	errs := make([]error, len(manifest.Shards))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < s.workerCount(len(manifest.Shards)); worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				targets, loadErr := s.loadShard(ctx, manifest.Shards[index])
+				if loadErr != nil {
+					errs[index] = loadErr
+					continue
+				}
+				parts[index] = targets
 			}
+		}()
+	}
+	for index := range manifest.Shards {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+	for index, loadErr := range errs {
+		if loadErr != nil {
+			return Snapshot{}, fmt.Errorf("load shard %d: %w", index, loadErr)
 		}
-		var shardSnapshot Snapshot
-		if err := json.Unmarshal(raw, &shardSnapshot); err != nil {
-			return Snapshot{}, fmt.Errorf("parse federation shard %s: %w", shard.ID, err)
-		}
-		targets = append(targets, shardSnapshot.Targets...)
+	}
+
+	total := 0
+	for _, targets := range parts {
+		total += len(targets)
+	}
+	targets := make([]Target, 0, total)
+	for _, part := range parts {
+		targets = append(targets, part...)
 	}
 	return Snapshot{Version: manifest.Version, GeneratedAt: manifest.GeneratedAt, Targets: targets}, nil
 }
@@ -224,7 +292,9 @@ func (s *MonoFSSnapshotStore) Save(ctx context.Context, snapshot Snapshot, expec
 	if shardSize <= 0 {
 		shardSize = 500
 	}
-	shards := make([]ShardRef, 0, (len(snapshot.Targets)+shardSize-1)/shardSize)
+	shardCount := (len(snapshot.Targets) + shardSize - 1) / shardSize
+	shards := make([]ShardRef, 0, shardCount)
+	rawShards := make([][]byte, 0, shardCount)
 	for index, start := 0, 0; start < len(snapshot.Targets); index, start = index+1, start+shardSize {
 		end := start + shardSize
 		if end > len(snapshot.Targets) {
@@ -241,45 +311,92 @@ func (s *MonoFSSnapshotStore) Save(ctx context.Context, snapshot Snapshot, expec
 		}
 		sum := sha256.Sum256(raw)
 		shardPath := path.Join(s.tenantRoot(), "shards", publishID, fmt.Sprintf("%04d.json", index))
-		if _, err := s.Files.UpsertPaths(ctx, s.Token, []store.PathWrite{{
-			LogicalPath:       shardPath,
-			Content:           raw,
-			ExpectedVersionID: "absent",
-		}}, store.MutationContext{PrincipalID: s.Principal, Reason: "federation catalog shard publish"}); err != nil {
-			return "", fmt.Errorf("write federation shard %s: %w", shardPath, err)
-		}
 		shards = append(shards, ShardRef{
 			ID:      fmt.Sprintf("%04d", index),
 			Path:    shardPath,
 			Targets: end - start,
 			SHA256:  hex.EncodeToString(sum[:]),
 		})
+		rawShards = append(rawShards, raw)
+	}
+
+	// Shards are independent immutable writes; the manifest is the only
+	// commit point and is written after every shard succeeds.
+	errs := make([]error, len(shards))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < s.workerCount(len(shards)); worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				_, writeErr := s.Files.UpsertPaths(ctx, s.Token, []store.PathWrite{{
+					LogicalPath:       shards[index].Path,
+					Content:           rawShards[index],
+					ExpectedVersionID: "absent",
+				}}, store.MutationContext{PrincipalID: s.Principal, Reason: "federation catalog shard publish"})
+				if writeErr != nil {
+					errs[index] = fmt.Errorf("write federation shard %s: %w", shards[index].Path, writeErr)
+				}
+			}
+		}()
+	}
+	for index := range shards {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+	for index, writeErr := range errs {
+		if writeErr != nil {
+			return "", fmt.Errorf("shard %d: %w", index, writeErr)
+		}
 	}
 
 	manifest := Manifest{
 		Version:     version,
-		GeneratedAt: time.Now().UTC(),
+		GeneratedAt: snapshot.GeneratedAt,
 		Shards:      shards,
+	}
+	if manifest.GeneratedAt.IsZero() {
+		manifest.GeneratedAt = time.Now().UTC()
 	}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return "", err
 	}
+
 	expected := strings.TrimSpace(expectedVersion)
-	if expected != "" && expected != "absent" {
-		current, loadErr := s.Load(ctx)
-		if loadErr != nil && !errors.Is(loadErr, ErrSnapshotNotFound) {
+	if expected != "" {
+		current, loadErr := s.readManifest(ctx)
+		switch {
+		case errors.Is(loadErr, ErrSnapshotNotFound):
+			if expected != "absent" {
+				return "", fmt.Errorf("federation snapshot version conflict: current=absent expected=%s", expected)
+			}
+		case loadErr != nil:
 			return "", loadErr
+		case expected == "absent" || current.Version != expected:
+			return "", fmt.Errorf("federation snapshot version conflict: current=%s expected=%s", current.Version, expected)
 		}
-		if loadErr == nil && current.Version != expected {
+		// Re-read after shard writes to narrow the lost-update window before
+		// the file-version CAS on the manifest.
+		if current, loadErr := s.readManifest(ctx); loadErr == nil && current.Version != expected {
 			return "", fmt.Errorf("federation snapshot version conflict: current=%s expected=%s", current.Version, expected)
 		}
 	}
-	expected = s.latestVersion(ctx)
+	expectedFileVersion := s.latestVersion(ctx)
+	if expected != "" {
+		// If a concurrent publisher changed the manifest after the first
+		// checks, fail before the CAS. If it changes after this read, the
+		// file-version CAS below rejects the write.
+		if current, loadErr := s.readManifest(ctx); loadErr == nil && current.Version != expected {
+			return "", fmt.Errorf("federation snapshot version conflict: current=%s expected=%s", current.Version, expected)
+		}
+	}
 	if _, err := s.Files.UpsertPaths(ctx, s.Token, []store.PathWrite{{
 		LogicalPath:       s.manifestPath(),
 		Content:           raw,
-		ExpectedVersionID: expected,
+		ExpectedVersionID: expectedFileVersion,
 	}}, store.MutationContext{PrincipalID: s.Principal, Reason: "federation catalog manifest publish"}); err != nil {
 		return "", fmt.Errorf("write federation manifest: %w", err)
 	}
