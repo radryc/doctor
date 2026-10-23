@@ -268,6 +268,38 @@ Files:
 
 - `demo-divisions/lib/step3_onboard.sh`
 
+## PR4 — Catalog lifecycle controller
+
+- [x] Guardian paginated machine feed:
+  `GET /api/m2m/federation/partitions?limit=&cursor=`.
+  Returns partition name, account, region, provider, labels, and target pusher.
+- [x] Guardian feed derives AWS placement from intent `spec.target`, so the
+  controller does not need 50,000 partition-detail calls.
+- [x] `cmd/doctor-federation-controller`:
+  - paginated Guardian pusher and partition ingestion,
+  - `/v1/aws/meta` refresh with bounded workers, timeout, and retries,
+  - durable last-known metadata cache,
+  - catalog build and sharded MonoFS publish with CAS,
+  - sharded token-bundle fallback writer,
+  - MonoFS CAS leader lease,
+  - `--once` and `--dry-run`.
+- [x] Tests cover controller publish, metadata last-known-good behavior, leader
+  election/expiry, token-shard rotation, and Guardian feed pagination.
+- [x] `doctor` partition intent and ImageBuild entry for the controller.
+- [ ] Live controller deployment and controller-driven catalog refresh in the
+  demo cluster (code path verified by unit tests; deploy after the Guardian
+  image is rolled).
+
+Files:
+
+- `doctor/internal/federation/controller.go`
+- `doctor/internal/federation/controller_metadata.go`
+- `doctor/internal/federation/guardian_feed.go`
+- `doctor/internal/federation/leader.go`
+- `doctor/internal/federation/token_bundle.go`
+- `doctor/cmd/doctor-federation-controller/main.go`
+- `guardian/internal/ui/federation_feed.go`
+
 ## Live verification
 
 Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.

@@ -353,7 +353,9 @@ func (r *BundleTokenResolver) Resolve(ctx context.Context, target Target) (strin
 		if err != nil {
 			return "", fmt.Errorf("parse token_ref %q: %w", ref, err)
 		}
-		if parsed.Scheme != "" && !strings.EqualFold(parsed.Scheme, "monofs-token") {
+		if parsed.Scheme != "" &&
+			!strings.EqualFold(parsed.Scheme, "monofs-token") &&
+			!strings.EqualFold(parsed.Scheme, "guardian-pusher") {
 			return "", ErrTokenRefUnsupported
 		}
 	}
