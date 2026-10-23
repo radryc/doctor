@@ -318,6 +318,29 @@ func TestRemoteParseErrorsDoNotOpenBreaker(t *testing.T) {
 	}
 }
 
+func TestRemoteScopeErrorsDoNotOpenBreaker(t *testing.T) {
+	remote := &fakeMetricsUpstream{name: "aws", err: ErrScopeRequired}
+	router := newTestRouter(t,
+		map[string]Backend{
+			"aws": {Name: "aws", Kind: KindAWS, Signals: []Signal{SignalMetrics}, Policy: PolicyAlways},
+		},
+		map[string]Upstreams{"aws": {Metrics: remote}},
+	)
+
+	for i := 0; i < breakerThreshold+2; i++ {
+		if _, _, err := router.MetricsInstant(context.Background(), "default", `sum(up{source="aws"})`, time.Now()); !errors.Is(err, ErrScopeRequired) {
+			t.Fatalf("MetricsInstant error = %v, want ErrScopeRequired", err)
+		}
+	}
+	if got := remote.callCount(); got != breakerThreshold+2 {
+		t.Fatalf("remote calls = %d, want %d (scope errors must not open the breaker)", got, breakerThreshold+2)
+	}
+	summary := router.SummarizeEndpoints()
+	if summary.Healthy != 1 || summary.Unhealthy != 0 {
+		t.Fatalf("summary = %#v, want AWS backend healthy", summary)
+	}
+}
+
 func TestRouterLogsMergesLocalFirst(t *testing.T) {
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	local := &fakeLogsUpstream{name: "doctor", records: []segment.LogRecord{{

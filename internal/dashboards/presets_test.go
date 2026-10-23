@@ -42,6 +42,35 @@ func TestAWSFederationPresetScopesXRayTraces(t *testing.T) {
 	t.Fatal("aws-xray-traces widget not found")
 }
 
+func TestAWSFederationPresetDefaultsStayScoped(t *testing.T) {
+	var preset DashboardDocument
+	for _, candidate := range builtInPresets() {
+		if candidate.ID == "preset-aws-federation" {
+			preset = candidate
+			break
+		}
+	}
+	if preset.ID == "" {
+		t.Fatal("preset-aws-federation not found")
+	}
+	for _, widget := range preset.Layout {
+		if len(widget.Queries) == 0 {
+			continue
+		}
+		query := widget.Queries[0]
+		switch query.Datasource {
+		case DatasourcePrometheus:
+			if !strings.Contains(query.Expr, `@aws.account"=~"[0-9]+"`) {
+				t.Fatalf("%s PromQL %q must carry a bounded account scope", widget.ID, query.Expr)
+			}
+		case DatasourceLoki:
+			if !strings.Contains(query.Expr, `aws_log_group=~"guardian/`) {
+				t.Fatalf("%s LogQL %q must carry a log-group scope", widget.ID, query.Expr)
+			}
+		}
+	}
+}
+
 func TestDoctorSelfPresetHasFederationCatalogPanels(t *testing.T) {
 	var preset DashboardDocument
 	for _, candidate := range builtInPresets() {

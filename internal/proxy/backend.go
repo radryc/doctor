@@ -21,6 +21,7 @@ import (
 var (
 	ErrScopeRequired = errors.New("scope required for live AWS federation")
 	ErrTooBroad      = errors.New("query matches too many AWS federation targets")
+	ErrNoTargets     = errors.New("no matching AWS federation targets")
 )
 
 // Signal identifies one telemetry signal.

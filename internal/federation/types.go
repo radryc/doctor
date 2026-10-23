@@ -5,7 +5,6 @@ package federation
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -136,7 +135,7 @@ var ErrScopeRequired = proxy.ErrScopeRequired
 var ErrTooBroad = proxy.ErrTooBroad
 
 // ErrNoTargets is returned when no catalog target matches a scoped query.
-var ErrNoTargets = errors.New("no matching AWS federation targets")
+var ErrNoTargets = proxy.ErrNoTargets
 
 // ScopeError carries a structured reason for HTTP handlers.
 type ScopeError struct {
