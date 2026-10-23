@@ -93,10 +93,10 @@ func NewController(cfg ControllerConfig, files CatalogFileStore) (*Controller, e
 		cfg.TokenShardCount = 256
 	}
 	if cfg.LeaseTTL <= 0 {
-		cfg.LeaseTTL = cfg.Interval * 2
-	}
-	if cfg.LeaseTTL < 90*time.Second {
 		cfg.LeaseTTL = 90 * time.Second
+	}
+	if cfg.LeaseTTL < 30*time.Second {
+		cfg.LeaseTTL = 30 * time.Second
 	}
 	if strings.TrimSpace(cfg.Holder) == "" {
 		cfg.Holder = "doctor-federation-controller"
@@ -149,18 +149,59 @@ func (c *Controller) Run(ctx context.Context, once bool) error {
 			c.Config.Logger.Printf("federation controller: leader lease failed: %v", err)
 		} else if !acquired {
 			c.Config.Logger.Printf("federation controller: another replica holds the leader lease")
-		} else if err := c.Sync(ctx); err != nil {
-			c.Config.Logger.Printf("federation controller: sync failed: %v", err)
-		}
-		wait := c.Config.Interval
-		if jitterRange := wait / 10; jitterRange > 0 {
-			wait += time.Duration(rand.Int63n(int64(jitterRange)))
+		} else {
+			// Keep the lease alive while metadata refresh and publishing run,
+			// and while waiting for the next interval. This lets a restarted
+			// replica take over within the lease TTL instead of waiting for a
+			// full rebuild interval.
+			leaseCtx, cancelLease := context.WithCancel(ctx)
+			go c.renewLease(leaseCtx)
+			if err := c.Sync(ctx); err != nil {
+				c.Config.Logger.Printf("federation controller: sync failed: %v", err)
+			}
+			wait := c.Config.Interval
+			if jitterRange := wait / 10; jitterRange > 0 {
+				wait += time.Duration(rand.Int63n(int64(jitterRange)))
+			}
+			select {
+			case <-ctx.Done():
+				cancelLease()
+				_ = c.Lease.Release(context.Background())
+				return nil
+			case <-time.After(wait):
+			}
+			cancelLease()
+			continue
 		}
 		select {
 		case <-ctx.Done():
 			_ = c.Lease.Release(context.Background())
 			return nil
-		case <-time.After(wait):
+		case <-time.After(15 * time.Second):
+		}
+	}
+}
+
+func (c *Controller) renewLease(ctx context.Context) {
+	interval := c.Config.LeaseTTL / 3
+	if interval < 10*time.Second {
+		interval = 10 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ok, err := c.Lease.Renew(ctx)
+			if err != nil {
+				c.Config.Logger.Printf("federation controller: leader lease renew failed: %v", err)
+			}
+			if !ok {
+				c.Config.Logger.Printf("federation controller: leader lease lost")
+				return
+			}
 		}
 	}
 }
