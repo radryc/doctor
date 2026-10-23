@@ -114,6 +114,18 @@ func TestControllerSyncPublishesCatalogTokensAndMetadata(t *testing.T) {
 	if raw, err := files.ReadFile(context.Background(), cachePath); err != nil || len(raw) == 0 {
 		t.Fatalf("metadata cache %s not saved: %v", cachePath, err)
 	}
+
+	firstVersion := snapshot.Version
+	if err := controller.Sync(context.Background()); err != nil {
+		t.Fatalf("unchanged Sync: %v", err)
+	}
+	unchanged, err := controller.Store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load unchanged snapshot: %v", err)
+	}
+	if unchanged.Version != firstVersion {
+		t.Fatalf("unchanged catalog was republished: %s -> %s", firstVersion, unchanged.Version)
+	}
 }
 
 func TestControllerSyncKeepsLastKnownMetadataOnFailure(t *testing.T) {
