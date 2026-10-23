@@ -3,9 +3,11 @@ package federation
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/ruler"
 )
@@ -76,6 +78,37 @@ func TestMonoFSSnapshotStoreManyShardsRoundTrip(t *testing.T) {
 		if target.ID != targets[index].ID {
 			t.Fatalf("target[%d] = %q, want %q", index, target.ID, targets[index].ID)
 		}
+	}
+}
+
+// TestMonoFSSnapshotStore300ShardsBudget is opt-in because it writes the
+// equivalent of a 150k-target catalog (300 shards at 500 targets each).
+func TestMonoFSSnapshotStore300ShardsBudget(t *testing.T) {
+	if os.Getenv("DOCTOR_LOADTEST") != "1" {
+		t.Skip("set DOCTOR_LOADTEST=1 to run the 300-shard snapshot budget test")
+	}
+	files := ruler.NewMemoryStore()
+	store := NewMonoFSSnapshotStore(files, "", "/doctor/v1/federation", "default")
+	store.ShardTargets = 500
+	store.ShardWorkers = 16
+
+	start := time.Now()
+	if _, err := store.Save(context.Background(), Snapshot{Version: "v1", Targets: scaleTargets(150000)}, ""); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	saveElapsed := time.Since(start)
+	start = time.Now()
+	loaded, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	loadElapsed := time.Since(start)
+	t.Logf("300-shard save = %s, load = %s", saveElapsed, loadElapsed)
+	if len(loaded.Targets) != 150000 {
+		t.Fatalf("loaded %d targets, want 150000", len(loaded.Targets))
+	}
+	if loadElapsed > 10*time.Second {
+		t.Fatalf("300-shard load took %s, budget is 10s", loadElapsed)
 	}
 }
 
