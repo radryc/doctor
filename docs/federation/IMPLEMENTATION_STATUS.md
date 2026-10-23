@@ -167,6 +167,9 @@ Files:
 - [x] Doctor Self-Observability preset updated with catalog target/partition
   counts, stale/age, per-region targets, reload rate, reload p95, reload logs,
   and a catalog status table.
+- [x] Live dashboard API returns the new catalog panels; live Prometheus
+  queries return catalog targets=3, partitions=3, stale=0, and per-region
+  `us-east-1`=3. Reload counters are populated after a publish.
 - [x] Tests: `internal/federation/reload_test.go`,
   `internal/dashboards/presets_test.go`.
 
