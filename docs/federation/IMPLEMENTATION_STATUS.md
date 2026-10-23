@@ -60,11 +60,16 @@ Open decisions for tomorrow:
 - [x] Indexes: account, region, partition, log group, service, metric, trace.
 - [x] Target validation and duplicate-ID detection.
 - [x] Tests: `internal/federation/catalog_test.go`.
+- [x] O(n) index construction (PR1): no per-append uniqueness scan; measured
+  `NewCatalog` 50k = 186ms, 150k = ~1.0s.
+- [x] Cached, sorted `Targets()` list; no per-call catalog sort.
+- [x] Tests/benchmarks: `internal/federation/catalog_scale_test.go`.
 
 Files:
 
 - `doctor/internal/federation/types.go`
 - `doctor/internal/federation/catalog.go`
+- `doctor/internal/federation/catalog_scale_test.go`
 
 ### E2 — Query planner
 
@@ -109,6 +114,8 @@ Files:
 - [x] Broad live-AWS log queries return HTTP 422.
 - [x] Legacy `DOCTOR_AWS_BACKEND_URL` single-backend mode preserved.
 - [x] `/v1/federation/status` endpoint.
+- [x] Status partition map capped at 512 entries; full `partition_count` and
+  `partitions_truncated` fields added for 150k-scale responses.
 - [x] Tests: full `go test ./...` passes.
 
 Files:
@@ -131,7 +138,9 @@ Files:
 - [x] SHA-256 validation on load.
 - [x] CAS manifest version precondition.
 - [x] `doctor-federation-publish` CLI to seed/publish a static catalog to MonoFS.
-- [x] Tests: `internal/federation/snapshot_test.go`.
+- [x] Bounded parallel shard load/save (16 workers by default); manifest last.
+- [x] Tests: `internal/federation/snapshot_test.go`,
+  `internal/federation/snapshot_scale_test.go` (1000 targets / 100 shards).
 - [x] In-cluster publish/load verification — published 3 targets (version
   `1792743800844127340`, shard size 500) and verified the snapshot from an
   in-cluster pod. Host-side `--verify` still hits per-node MonoFS DNS
@@ -208,7 +217,8 @@ Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.
 - [ ] Pusher OTLP relay (`:4317/:4318` receiver + WAL + gateway).
 - [ ] Central rollups / trace index for broad queries.
 - [ ] Grafana `$account` variable and federation status UI.
-- [ ] 50k simulated-target load/chaos harness.
+- [ ] 50k simulated-target load/chaos harness (the 150k catalog construction
+  budget test exists; query/fanout/reload chaos is still pending).
 
 ## Verification commands
 

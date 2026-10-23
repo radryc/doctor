@@ -16,8 +16,9 @@ import (
 type Catalog struct {
 	mu sync.RWMutex
 
-	version string
-	targets map[string]Target
+	version    string
+	targets    map[string]Target
+	targetList []Target
 
 	byAccount   map[string][]string
 	byRegion    map[string][]string
@@ -105,22 +106,61 @@ func NewCatalog(targets []Target, version string) (*Catalog, error) {
 		}
 		c.targets[t.ID] = t
 
-		c.byAccount[t.Account] = appendUnique(c.byAccount[t.Account], t.ID)
-		c.byRegion[t.Region] = appendUnique(c.byRegion[t.Region], t.ID)
+		// Target fields are already deduplicated by normalizeTarget, so a
+		// plain append is sufficient. Using an append-and-scan-until-unique
+		// helper here is O(n^2) for hot keys such as one region or one metric
+		// shared by every target.
+		c.byAccount[t.Account] = append(c.byAccount[t.Account], t.ID)
+		c.byRegion[t.Region] = append(c.byRegion[t.Region], t.ID)
 		for _, partition := range t.Partitions {
-			c.byPartition[partition] = appendUnique(c.byPartition[partition], t.ID)
+			c.byPartition[partition] = append(c.byPartition[partition], t.ID)
 		}
 		for _, group := range t.LogGroups {
-			c.byLogGroup[group] = appendUnique(c.byLogGroup[group], t.ID)
+			c.byLogGroup[group] = append(c.byLogGroup[group], t.ID)
 		}
 		for _, service := range t.XrayServices {
-			c.byService[service] = appendUnique(c.byService[service], t.ID)
+			c.byService[service] = append(c.byService[service], t.ID)
 		}
 		for _, metric := range t.MetricNames {
-			c.byMetric[metric] = appendUnique(c.byMetric[metric], t.ID)
+			c.byMetric[metric] = append(c.byMetric[metric], t.ID)
 		}
 	}
+
+	normalizeIndex(c.byAccount)
+	normalizeIndex(c.byRegion)
+	normalizeIndex(c.byPartition)
+	normalizeIndex(c.byLogGroup)
+	normalizeIndex(c.byService)
+	normalizeIndex(c.byMetric)
+
+	c.targetList = make([]Target, 0, len(c.targets))
+	for _, target := range c.targets {
+		c.targetList = append(c.targetList, target)
+	}
+	// Preserve the historical Targets() ordering (ID ascending). Planner
+	// results are re-sorted by priority separately.
+	sort.Slice(c.targetList, func(i, j int) bool { return c.targetList[i].ID < c.targetList[j].ID })
 	return c, nil
+}
+
+// normalizeIndex sorts each posting list and removes duplicate target IDs.
+// Posting lists are built once per catalog, so this stays O(n log n) overall
+// instead of the previous O(n^2) uniqueness scan on every append.
+func normalizeIndex(index map[string][]string) {
+	for key, values := range index {
+		if len(values) == 0 {
+			delete(index, key)
+			continue
+		}
+		sort.Strings(values)
+		out := values[:0]
+		for _, value := range values {
+			if len(out) == 0 || out[len(out)-1] != value {
+				out = append(out, value)
+			}
+		}
+		index[key] = out
+	}
 }
 
 func normalizeTarget(t Target) Target {
@@ -198,12 +238,9 @@ func (c *Catalog) Targets() []Target {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	out := make([]Target, 0, len(c.targets))
-	for _, t := range c.targets {
-		out = append(out, t)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	// targetList is sorted once at construction time. Return a shallow copy so
+	// callers cannot reorder or replace the catalog's slice.
+	return append([]Target(nil), c.targetList...)
 }
 
 // ByAccounts resolves account IDs.
@@ -362,15 +399,6 @@ func sortTargets(targets []Target) {
 		}
 		return targets[i].ID < targets[j].ID
 	})
-}
-
-func appendUnique(values []string, value string) []string {
-	for _, existing := range values {
-		if existing == value {
-			return values
-		}
-	}
-	return append(values, value)
 }
 
 func dedupeStrings(values []string) []string {
