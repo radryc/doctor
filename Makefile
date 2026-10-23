@@ -2,7 +2,7 @@ MONOFS_DIR ?= ../monofs
 SERVICE ?= doctor-ingest
 SERVICES ?= doctor-ingest doctor-query doctor-rules
 
-.PHONY: test build vet docker-build image image-all frontend frontend-dev verify-correlation verify-aws
+.PHONY: test build vet docker-build image image-all frontend frontend-dev verify-correlation verify-aws loadtest-federation loadtest-federation-race
 
 test:
 	go test ./...
@@ -37,3 +37,11 @@ verify-correlation:
 
 verify-aws:
 	./scripts/verify-aws-federation.sh
+
+# Opt-in federation 50k/150k load and chaos suite.
+loadtest-federation:
+	DOCTOR_LOADTEST=1 go test ./internal/loadtest -run 'TestFederation' -v -count=1
+	DOCTOR_LOADTEST=1 go test ./internal/federation -run 'Budget|Scale' -v -count=1
+
+loadtest-federation-race:
+	DOCTOR_LOADTEST=1 go test -race ./internal/loadtest -run 'TestFederationFanoutChaos|TestFederationReloadUnderLoad' -v -count=1
