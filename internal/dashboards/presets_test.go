@@ -42,6 +42,48 @@ func TestAWSFederationPresetScopesXRayTraces(t *testing.T) {
 	t.Fatal("aws-xray-traces widget not found")
 }
 
+func TestDoctorSelfPresetHasFederationCatalogPanels(t *testing.T) {
+	var preset DashboardDocument
+	for _, candidate := range builtInPresets() {
+		if candidate.ID == "preset-doctor-self" {
+			preset = candidate
+			break
+		}
+	}
+	if preset.ID == "" {
+		t.Fatal("preset-doctor-self not found")
+	}
+	want := map[string]bool{
+		"doctor-catalog-targets":        false,
+		"doctor-catalog-partitions":     false,
+		"doctor-catalog-stale":          false,
+		"doctor-catalog-age":            false,
+		"doctor-catalog-targets-region": false,
+		"doctor-catalog-reloads":        false,
+		"doctor-catalog-reload-latency": false,
+	}
+	for _, widget := range preset.Layout {
+		if _, ok := want[widget.ID]; !ok {
+			continue
+		}
+		want[widget.ID] = true
+		for _, query := range widget.Queries {
+			if query.Datasource != DatasourcePrometheus {
+				continue
+			}
+			resolved := strings.ReplaceAll(query.Expr, "$__rate_interval", "5m")
+			if _, err := promparser.NewParser(promparser.Options{}).ParseExpr(resolved); err != nil {
+				t.Fatalf("%s query %q is not valid PromQL: %v", widget.ID, resolved, err)
+			}
+		}
+	}
+	for id, found := range want {
+		if !found {
+			t.Fatalf("preset-doctor-self missing %s", id)
+		}
+	}
+}
+
 // The Service RED "Top Failing Operations" panel must use TraceQL metrics
 // syntax; a LogQL-style pipeline filter is rejected by the metrics parser.
 func TestServiceREDPresetTopFailingOperationsIsTraceQL(t *testing.T) {

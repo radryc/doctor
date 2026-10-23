@@ -93,6 +93,8 @@ type QueryConfig struct {
 	FederationTokenCacheTTL        time.Duration
 	FederationTokenBundleRoot      string
 	FederationTokenShardCount      int
+	FederationReloadInterval       time.Duration
+	FederationStaleAfter           time.Duration
 	FederationMaxFanout            int
 	FederationTimeout              time.Duration
 
@@ -269,6 +271,8 @@ func LoadQuery(service string) QueryConfig {
 		FederationTokenCacheTTL:        envDuration("DOCTOR_FEDERATION_TOKEN_CACHE_TTL", 5*time.Minute),
 		FederationTokenBundleRoot:      envString("DOCTOR_FEDERATION_TOKEN_BUNDLE_ROOT", "/doctor/v1/federation/tokens"),
 		FederationTokenShardCount:      int(envInt64("DOCTOR_FEDERATION_TOKEN_SHARD_COUNT", 256)),
+		FederationReloadInterval:       envDuration("DOCTOR_FEDERATION_RELOAD_INTERVAL", 30*time.Second),
+		FederationStaleAfter:           envDuration("DOCTOR_FEDERATION_STALE_AFTER", 0),
 		FederationMaxFanout:            int(envInt64("DOCTOR_FEDERATION_MAX_FANOUT", 32)),
 		FederationTimeout:              envDuration("DOCTOR_FEDERATION_TIMEOUT", 5*time.Second),
 
