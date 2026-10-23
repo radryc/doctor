@@ -377,6 +377,34 @@ Files:
 - [x] Partial-failure test still returns 2 of 3 series with
   `X-Doctor-Partial` and increments `doctor_federation_partial`.
 
+## PR7 — 50k/150k load and chaos
+
+- [x] Opt-in suite gated by `DOCTOR_LOADTEST=1`:
+  - 150k catalog build and planner p99
+  - 100 concurrent chaos queries across 32 targets with 30% failures, 10%
+    slow targets, and 5% HTTP 429
+  - catalog reloads while 2,000 queries run
+  - 50k-token / 256-shard bundle write and resolve
+  - existing 300-shard snapshot load/save budget
+- [x] Recorded budgets:
+  - 150k `NewCatalog`: **0.96–1.10s** (budget 5s)
+  - planner p99: **5–16µs** (budget 5ms)
+  - 150k heap: **516–641MB** (budget 2GB)
+  - chaos: 100 queries × 32 targets in **3.99s**, max active **63**
+    (global limit 64)
+  - 50k tokens / 256 shards: **25–31ms**
+  - 300-shard save/load: **1.21s / 136ms** (load budget 10s)
+- [x] No query plans more than 32 targets; unscoped and hot-region queries are
+  rejected.
+- [x] `make loadtest-federation` and `make loadtest-federation-race`.
+
+Files:
+
+- `doctor/internal/loadtest/federation_test.go`
+- `doctor/internal/federation/catalog_scale_test.go`
+- `doctor/internal/federation/snapshot_scale_test.go`
+- `doctor/Makefile`
+
 ## Live verification
 
 Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.
