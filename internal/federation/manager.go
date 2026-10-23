@@ -22,6 +22,7 @@ type Options struct {
 	MaxFanout     int
 	Timeout       time.Duration
 	StaleAfter    time.Duration
+	Source        string
 	ClientFactory ClientFactory
 	TokenResolver TokenResolver
 	Logger        *log.Logger
@@ -91,6 +92,7 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 	manager.state.Store(&managerState{
 		catalog:  catalog,
 		planner:  NewPlanner(catalog, opts.MaxFanout),
+		source:   strings.TrimSpace(opts.Source),
 		loadedAt: time.Now().UTC(),
 	})
 	return manager

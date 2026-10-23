@@ -156,6 +156,7 @@ func main() {
 			MaxFanout:     cfg.FederationMaxFanout,
 			Timeout:       cfg.FederationTimeout,
 			StaleAfter:    cfg.FederationStaleAfter,
+			Source:        source,
 			TokenResolver: federationTokens,
 		})
 		awsClient = manager
