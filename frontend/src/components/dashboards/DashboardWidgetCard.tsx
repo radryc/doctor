@@ -613,6 +613,27 @@ function TracesWidget({ widget, tenant, variableValues, macros, from, to, refres
 
 // ── Table ───────────────────────────────────────────────────────────────────
 
+function nativeTableRows(payload: unknown): Array<{ label: string; value: string }> {
+  if (payload == null) return [];
+  if (Array.isArray(payload)) {
+    return payload.map((item, index) => ({ label: `[${index}]`, value: formatNativeValue(item) }));
+  }
+  if (typeof payload !== "object") {
+    return [{ label: "value", value: formatNativeValue(payload) }];
+  }
+  return Object.entries(payload as Record<string, unknown>).map(([label, value]) => ({
+    label,
+    value: formatNativeValue(value),
+  }));
+}
+
+function formatNativeValue(value: unknown): string {
+  if (value == null) return "—";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
 function TableWidget({ widget, tenant, variableValues, macros, to, refreshTick }: ContentProps) {
   const [rows, setRows] = useState<Array<{ label: string; value: string }>>([]);
   const [endpoints, setEndpoints] = useState<ProxyEndpointInfo[]>([]);
@@ -633,11 +654,19 @@ function TableWidget({ widget, tenant, variableValues, macros, to, refreshTick }
     const expr = interpolate(query.expr, variableValues, macros);
 
     if (query.datasource === "native_traces" && expr.startsWith("/")) {
-      api
-        .getProxyEndpoints(new URLSearchParams({ limit: "100" }))
-        .then((r) => { if (active) setEndpoints(r.endpoints ?? []); })
-        .catch((err) => { if (active) setError(err instanceof Error ? err.message : "Query failed"); })
-        .finally(() => { if (active) setLoading(false); });
+      if (expr.split("?")[0] === "/v1/proxy/endpoints") {
+        api
+          .getProxyEndpoints(new URLSearchParams({ limit: "100" }))
+          .then((r) => { if (active) setEndpoints(r.endpoints ?? []); })
+          .catch((err) => { if (active) setError(err instanceof Error ? err.message : "Query failed"); })
+          .finally(() => { if (active) setLoading(false); });
+      } else {
+        api
+          .getNativeJSON<unknown>(expr)
+          .then((payload) => { if (active) setRows(nativeTableRows(payload)); })
+          .catch((err) => { if (active) setError(err instanceof Error ? err.message : "Query failed"); })
+          .finally(() => { if (active) setLoading(false); });
+      }
       return () => { active = false; };
     }
 
@@ -693,7 +722,7 @@ function TableWidget({ widget, tenant, variableValues, macros, to, refreshTick }
         <div className="dash-empty">No rows returned.</div>
       ) : (
         <table className="dash-table">
-          <thead><tr><th>Series</th><th>Value</th></tr></thead>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
           <tbody>
             {rows.map((row, i) => (
               <tr key={i}>
