@@ -405,6 +405,37 @@ Files:
 - `doctor/internal/federation/snapshot_scale_test.go`
 - `doctor/Makefile`
 
+## PR8 — X-Ray and access-policy scale
+
+- [x] Fake pusher HTTP fixture covering:
+  - `/v1/aws/xray/services`
+  - `/v1/aws/xray/traces` with service/time/limit query parameters
+  - `/v1/aws/xray/trace/{id}` and the plural alias
+- [x] End-to-end tests cover X-Ray service discovery, time-bounded trace
+  queries, trace hydration, account/region stamping, duplicate trace/span
+  deduplication, and partial target failure warnings.
+- [x] Access-policy AWS bindings now use O(1) indexes:
+  - exact account+region
+  - account-only
+  - region-only
+  - partition-wide fallback
+- [x] Precedence is deterministic: exact → account → region → wildcard.
+- [x] 50k account/region bindings: **132 ns/lookup** over 1M lookups;
+- [x] 50k catalog-derived bindings compile in **64ms**.
+- [x] Catalog labels (`aws.account`, `aws.region`) derive bindings automatically,
+  so a 50k fleet does not need a 50k-entry `aws_bindings` block.
+- [ ] Live X-Ray E2E remains blocked: the demo Lambdas have
+  `TracingConfig=Active`, have `xray:PutTraceSegments`, and receive
+  invocations, but `GetTraceSummaries` still returns zero traces. This points
+  at account-level X-Ray ingestion/visibility, not the Doctor routing layer.
+  The fake-pusher E2E and merge/dedupe paths are verified.
+
+Files:
+
+- `doctor/internal/federation/xray_test.go`
+- `monofs/pkg/authz/policy/policy.go`
+- `monofs/pkg/authz/policy/aws_index_test.go`
+
 ## Live verification
 
 Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.
