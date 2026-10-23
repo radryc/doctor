@@ -1,6 +1,8 @@
 package federation
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -33,12 +35,48 @@ type PusherInfo struct {
 	Health   Health `json:"health,omitempty" yaml:"health,omitempty"`
 }
 
+// StringList accepts either a JSON array of strings or the legacy object form
+// ({"name": "..."}) used by newer Guardian pushers for service discovery.
+type StringList []string
+
+func (s *StringList) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		*s = nil
+		return nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return err
+	}
+	out := make(StringList, 0, len(entries))
+	for _, entry := range entries {
+		var name string
+		if err := json.Unmarshal(entry, &name); err == nil {
+			if name != "" {
+				out = append(out, name)
+			}
+			continue
+		}
+		var object struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(entry, &object); err != nil {
+			return err
+		}
+		if object.Name != "" {
+			out = append(out, object.Name)
+		}
+	}
+	*s = out
+	return nil
+}
+
 // TargetMeta is the discovery payload fetched from a pusher's /v1/aws/meta.
 type TargetMeta struct {
-	MetricNames  []string  `json:"metricNames" yaml:"metricNames"`
-	LogGroups    []string  `json:"logGroups" yaml:"logGroups"`
-	XrayServices []string  `json:"xrayServices" yaml:"xrayServices"`
-	FetchedAt    time.Time `json:"fetchedAt,omitempty" yaml:"fetchedAt,omitempty"`
+	MetricNames  []string   `json:"metricNames" yaml:"metricNames"`
+	LogGroups    []string   `json:"logGroups" yaml:"logGroups"`
+	XrayServices StringList `json:"xrayServices" yaml:"xrayServices"`
+	FetchedAt    time.Time  `json:"fetchedAt,omitempty" yaml:"fetchedAt,omitempty"`
 }
 
 // BuildInput is the normalized input for a catalog build.

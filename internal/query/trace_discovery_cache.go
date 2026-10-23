@@ -38,6 +38,22 @@ func (s *Service) SetTraceDiscoveryCacheTTL(ttl time.Duration) {
 	}
 }
 
+// SetTraceDiscoveryWindow bounds the span/manifest discovery scan used when
+// MonoFS cannot answer from its trace-discovery index. Non-positive values
+// leave the default in place.
+func (s *Service) SetTraceDiscoveryWindow(window time.Duration) {
+	if s != nil && window > 0 {
+		s.traceDiscoveryWindow = window
+	}
+}
+
+func (s *Service) traceWindow() time.Duration {
+	if s == nil || s.traceDiscoveryWindow <= 0 {
+		return time.Hour
+	}
+	return s.traceDiscoveryWindow
+}
+
 func (s *Service) traceDiscoveryTTL() time.Duration {
 	if s == nil || s.traceDiscoveryCacheTTL <= 0 {
 		return defaultTraceDiscoveryCacheTTL

@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -88,4 +89,21 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestTargetMetaAcceptsServiceObjects(t *testing.T) {
+	var meta TargetMeta
+	payload := []byte(`{"metricNames":["Invocations"],"xrayServices":[{"name":"api","region":"us-east-1","account":"111"},{"name":"worker"},"legacy"]}`)
+	if err := json.Unmarshal(payload, &meta); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	want := []string{"api", "worker", "legacy"}
+	if len(meta.XrayServices) != len(want) {
+		t.Fatalf("XrayServices = %#v, want %#v", meta.XrayServices, want)
+	}
+	for i := range want {
+		if meta.XrayServices[i] != want[i] {
+			t.Fatalf("XrayServices = %#v, want %#v", meta.XrayServices, want)
+		}
+	}
 }

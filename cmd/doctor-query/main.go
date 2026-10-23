@@ -77,6 +77,7 @@ func main() {
 
 	svc := query.NewServiceLogEngine(leClient, cfg.DefaultTenant)
 	svc.SetTraceDiscoveryCacheTTL(cfg.TraceDiscoveryCacheTTL)
+	svc.SetTraceDiscoveryWindow(cfg.TraceDiscoveryWindow)
 	svc.SetTenantHeader(cfg.TenantHeader)
 	svc.SetGuardianURL(cfg.GuardianURL)
 	svc.SetGuardianAPIURL(cfg.GuardianAPIURL)
