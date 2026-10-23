@@ -286,9 +286,14 @@ Files:
 - [x] Tests cover controller publish, metadata last-known-good behavior, leader
   election/expiry, token-shard rotation, and Guardian feed pagination.
 - [x] `doctor` partition intent and ImageBuild entry for the controller.
-- [ ] Live controller deployment and controller-driven catalog refresh in the
-  demo cluster (code path verified by unit tests; deploy after the Guardian
-  image is rolled).
+- [x] Live controller deployment in the `doctor` partition. The controller
+  published `controller-1792753491043568240` with 3 targets from 13 partitions
+  and 3 token shards in 2.7s.
+- [x] Doctor query reloaded from `reload-1792750787-c` to the controller
+  version without a restart; `source=monofs:controller-...`, targets=3,
+  partitions=3, stale=false.
+- [x] Scoped AWS metrics still return 3 series after the controller publish and
+  the `aws` proxy endpoint remains healthy.
 
 Files:
 
