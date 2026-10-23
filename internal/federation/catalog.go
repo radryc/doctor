@@ -231,6 +231,43 @@ func (c *Catalog) Version() string {
 	return c.version
 }
 
+// CatalogStats is a cheap snapshot for dashboards and metrics. It does not
+// copy target records.
+type CatalogStats struct {
+	Targets    int
+	Partitions int
+	Regions    map[string]int
+}
+
+// Stats returns target, partition, and per-region counts.
+func (c *Catalog) Stats() CatalogStats {
+	if c == nil {
+		return CatalogStats{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	stats := CatalogStats{
+		Targets:    len(c.targets),
+		Partitions: len(c.byPartition),
+		Regions:    make(map[string]int, len(c.byRegion)),
+	}
+	for region, ids := range c.byRegion {
+		stats.Regions[region] = len(ids)
+	}
+	return stats
+}
+
+// ByID resolves one target by ID.
+func (c *Catalog) ByID(id string) (Target, bool) {
+	if c == nil {
+		return Target{}, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	target, ok := c.targets[strings.TrimSpace(id)]
+	return target, ok
+}
+
 // Targets returns all targets sorted by ID.
 func (c *Catalog) Targets() []Target {
 	if c == nil {

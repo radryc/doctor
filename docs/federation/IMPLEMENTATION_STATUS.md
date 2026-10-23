@@ -143,6 +143,33 @@ Files:
 - `doctor/internal/store/aws/client.go`
 - `doctor/cmd/doctor-query/main.go`
 
+### Catalog hot reload and self-observability (P0/PR3)
+
+- [x] Manager catalog/planner state is atomically swapped; queries take one
+  consistent state snapshot.
+- [x] `CatalogReloader` checks the snapshot version, loads shards only when the
+  version changes, and keeps the old catalog on failure.
+- [x] Fast `SnapshotVersioner` path for MonoFS, file, and memory stores.
+- [x] `DOCTOR_FEDERATION_RELOAD_INTERVAL` (default 30s) and
+  `DOCTOR_FEDERATION_STALE_AFTER`.
+- [x] Status now includes `source`, `loaded_at`, `stale`, and capped counts.
+- [x] Live hot reload verified without a pod restart:
+  `reload-1792750451 -> reload-1792750497-b`, same pod.
+- [x] Catalog metrics:
+  `doctor_federation_catalog_targets`,
+  `doctor_federation_catalog_partitions`,
+  `doctor_federation_catalog_targets_by_region`,
+  `doctor_federation_catalog_stale`,
+  `doctor_federation_catalog_loaded_timestamp_seconds`,
+  `doctor_federation_catalog_info`,
+  `doctor_federation_catalog_reloads`,
+  `doctor_federation_catalog_reload_duration_seconds`.
+- [x] Doctor Self-Observability preset updated with catalog target/partition
+  counts, stale/age, per-region targets, reload rate, reload p95, reload logs,
+  and a catalog status table.
+- [x] Tests: `internal/federation/reload_test.go`,
+  `internal/dashboards/presets_test.go`.
+
 ### E4 — Query integration
 
 - [x] `Service.aws` accepts the `proxy.AWSClient` interface.

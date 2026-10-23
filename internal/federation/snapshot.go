@@ -26,6 +26,12 @@ type SnapshotStore interface {
 	Save(ctx context.Context, snapshot Snapshot, expectedVersion string) (string, error)
 }
 
+// SnapshotVersioner is an optional fast path for reload loops. It lets a
+// process check the current snapshot version without reading every shard.
+type SnapshotVersioner interface {
+	Version(ctx context.Context) (string, error)
+}
+
 // ShardRef points at one immutable shard in a MonoFS catalog snapshot.
 type ShardRef struct {
 	ID      string `json:"id"`
@@ -69,6 +75,14 @@ func (s *FileSnapshotStore) Load(context.Context) (Snapshot, error) {
 	return snapshot, nil
 }
 
+func (s *FileSnapshotStore) Version(ctx context.Context) (string, error) {
+	snapshot, err := s.Load(ctx)
+	if err != nil {
+		return "", err
+	}
+	return snapshot.Version, nil
+}
+
 func (s *FileSnapshotStore) Save(_ context.Context, snapshot Snapshot, expectedVersion string) (string, error) {
 	if s == nil || strings.TrimSpace(s.Path) == "" {
 		return "", errors.New("federation snapshot path is required")
@@ -110,6 +124,15 @@ func (s *MemorySnapshotStore) Load(context.Context) (Snapshot, error) {
 		return Snapshot{}, ErrSnapshotNotFound
 	}
 	return cloneSnapshot(s.snapshot), nil
+}
+
+func (s *MemorySnapshotStore) Version(context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.exists {
+		return "", ErrSnapshotNotFound
+	}
+	return s.snapshot.Version, nil
 }
 
 func (s *MemorySnapshotStore) Save(_ context.Context, snapshot Snapshot, expectedVersion string) (string, error) {
@@ -193,6 +216,18 @@ func (s *MonoFSSnapshotStore) readManifest(ctx context.Context) (Manifest, error
 		return Manifest{}, fmt.Errorf("parse federation manifest: %w", err)
 	}
 	return manifest, nil
+}
+
+// Version returns the current manifest version without loading shards.
+func (s *MonoFSSnapshotStore) Version(ctx context.Context) (string, error) {
+	if s == nil || s.Files == nil {
+		return "", errors.New("federation snapshot file store is required")
+	}
+	manifest, err := s.readManifest(ctx)
+	if err != nil {
+		return "", err
+	}
+	return manifest.Version, nil
 }
 
 func (s *MonoFSSnapshotStore) loadShard(ctx context.Context, shard ShardRef) ([]Target, error) {

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
@@ -20,23 +21,33 @@ import (
 type Options struct {
 	MaxFanout     int
 	Timeout       time.Duration
+	StaleAfter    time.Duration
 	ClientFactory ClientFactory
 	TokenResolver TokenResolver
 	Logger        *log.Logger
 }
 
+type managerState struct {
+	catalog  *Catalog
+	planner  *Planner
+	source   string
+	loadedAt time.Time
+}
+
 // Manager implements proxy.AWSClient by resolving a query to a bounded set of
 // catalog targets, fanning out, and merging the results.
 type Manager struct {
-	catalog       *Catalog
-	planner       *Planner
+	state         atomic.Pointer[managerState]
 	factory       ClientFactory
 	tokenResolver TokenResolver
 	timeout       time.Duration
+	staleAfter    time.Duration
+	maxFanout     int
 	logger        *log.Logger
 
-	mu      sync.Mutex
-	clients map[string]proxy.AWSClient
+	mu            sync.Mutex
+	clients       map[string]proxy.AWSClient
+	clientTargets map[string]Target
 }
 
 // NewManager builds a federation manager.
@@ -64,28 +75,104 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 	if opts.Logger == nil {
 		opts.Logger = log.Default()
 	}
-	return &Manager{
-		catalog:       catalog,
-		planner:       NewPlanner(catalog, opts.MaxFanout),
+	if opts.StaleAfter < 0 {
+		opts.StaleAfter = 0
+	}
+	manager := &Manager{
 		factory:       opts.ClientFactory,
 		tokenResolver: opts.TokenResolver,
 		timeout:       opts.Timeout,
+		staleAfter:    opts.StaleAfter,
+		maxFanout:     opts.MaxFanout,
 		logger:        opts.Logger,
 		clients:       make(map[string]proxy.AWSClient),
+		clientTargets: make(map[string]Target),
 	}
+	manager.state.Store(&managerState{
+		catalog:  catalog,
+		planner:  NewPlanner(catalog, opts.MaxFanout),
+		loadedAt: time.Now().UTC(),
+	})
+	return manager
+}
+
+func (m *Manager) current() *managerState {
+	if m == nil {
+		return nil
+	}
+	return m.state.Load()
+}
+
+// Reload atomically swaps the catalog and planner. Existing target clients are
+// retained unless their endpoint or token reference changed.
+func (m *Manager) Reload(catalog *Catalog, source string) error {
+	if m == nil {
+		return errors.New("federation manager is nil")
+	}
+	if catalog == nil {
+		return errors.New("federation catalog is nil")
+	}
+	next := &managerState{
+		catalog:  catalog,
+		planner:  NewPlanner(catalog, m.maxFanout),
+		source:   strings.TrimSpace(source),
+		loadedAt: time.Now().UTC(),
+	}
+	previous := m.state.Swap(next)
+	m.pruneClients(catalog)
+	if previous != nil && previous.catalog != nil {
+		m.logger.Printf("federation catalog reloaded: %s -> %s (%d targets)",
+			previous.catalog.Version(), catalog.Version(), catalog.Len())
+	} else {
+		m.logger.Printf("federation catalog loaded: %s (%d targets)", catalog.Version(), catalog.Len())
+	}
+	return nil
+}
+
+func (m *Manager) pruneClients(catalog *Catalog) {
+	if catalog == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id := range m.clients {
+		next, ok := catalog.ByID(id)
+		if !ok || !sameClientTarget(next, m.clientTargets[id]) {
+			delete(m.clients, id)
+			delete(m.clientTargets, id)
+		}
+	}
+}
+
+func sameClientTarget(left, right Target) bool {
+	return left.Endpoint == right.Endpoint &&
+		left.TokenRef == right.TokenRef &&
+		left.TokenEnv == right.TokenEnv &&
+		left.Token == right.Token
 }
 
 // Enabled reports whether federation is configured.
 func (m *Manager) Enabled() bool {
-	return m != nil && m.catalog != nil && m.catalog.Len() > 0
+	state := m.current()
+	return state != nil && state.catalog != nil && state.catalog.Len() > 0
+}
+
+// Version returns the current catalog version.
+func (m *Manager) Version() string {
+	state := m.current()
+	if state == nil || state.catalog == nil {
+		return ""
+	}
+	return state.catalog.Version()
 }
 
 // Planner exposes the underlying planner for admin/debug endpoints.
 func (m *Manager) Planner() *Planner {
-	if m == nil {
+	state := m.current()
+	if state == nil {
 		return nil
 	}
-	return m.planner
+	return state.planner
 }
 
 // statusMaxPartitionEntries bounds the partition map in the status response.
@@ -95,10 +182,11 @@ const statusMaxPartitionEntries = 512
 
 // Status summarizes the federation catalog for the admin/status endpoint.
 func (m *Manager) Status() map[string]any {
-	if m == nil || m.catalog == nil {
+	state := m.current()
+	if state == nil || state.catalog == nil {
 		return map[string]any{"enabled": false}
 	}
-	targets := m.catalog.Targets()
+	targets := state.catalog.Targets()
 	regions := make(map[string]int)
 	partitions := make(map[string]int, statusMaxPartitionEntries)
 	allPartitions := make(map[string]struct{}, len(targets))
@@ -113,11 +201,15 @@ func (m *Manager) Status() map[string]any {
 			}
 		}
 	}
+	stale := m.staleAfter > 0 && !state.loadedAt.IsZero() && time.Since(state.loadedAt) > m.staleAfter
 	return map[string]any{
 		"enabled":              m.Enabled(),
 		"targets":              len(targets),
-		"max_fanout":           m.planner.MaxFanout(),
-		"version":              m.catalog.Version(),
+		"max_fanout":           state.planner.MaxFanout(),
+		"version":              state.catalog.Version(),
+		"source":               state.source,
+		"loaded_at":            state.loadedAt,
+		"stale":                stale,
 		"regions":              regions,
 		"partitions":           partitions,
 		"partition_count":      len(allPartitions),
@@ -127,10 +219,11 @@ func (m *Manager) Status() map[string]any {
 
 // CheckScope implements ScopeChecker.
 func (m *Manager) CheckScope(ctx context.Context, q Query) error {
-	if m == nil || m.planner == nil {
+	state := m.current()
+	if state == nil || state.planner == nil {
 		return errors.New("federation manager is not configured")
 	}
-	return m.planner.CheckScope(ctx, q)
+	return state.planner.CheckScope(ctx, q)
 }
 
 func (m *Manager) clientFor(target Target) (proxy.AWSClient, error) {
@@ -151,20 +244,25 @@ func (m *Manager) clientFor(target Target) (proxy.AWSClient, error) {
 		return existing, nil
 	}
 	m.clients[target.ID] = client
+	m.clientTargets[target.ID] = target
 	m.mu.Unlock()
 	return client, nil
 }
 
 func (m *Manager) plan(ctx context.Context, q Query) ([]Target, error) {
-	if m == nil || m.planner == nil {
+	return m.planWith(m.current(), ctx, q)
+}
+
+func (m *Manager) planWith(state *managerState, ctx context.Context, q Query) ([]Target, error) {
+	if state == nil || state.planner == nil {
 		return nil, errors.New("federation manager is not configured")
 	}
-	plan, err := m.planner.Plan(ctx, q)
+	plan, err := state.planner.Plan(ctx, q)
 	if err != nil {
 		return nil, err
 	}
 	if plan.Mode != PlanPull {
-		return nil, &ScopeError{Err: scopeError(plan.Reason), Matched: plan.Matched, MaxFanout: m.planner.MaxFanout()}
+		return nil, &ScopeError{Err: scopeError(plan.Reason), Matched: plan.Matched, MaxFanout: state.planner.MaxFanout()}
 	}
 	return plan.Targets, nil
 }
@@ -173,10 +271,11 @@ func (m *Manager) plan(ctx context.Context, q Query) ([]Target, error) {
 // without cached names falls back to live discovery; fleet-scale catalogs must
 // be populated by the catalog builder.
 func (m *Manager) ListMetrics(ctx context.Context, namespace, metric string) ([]awsstore.MetricDescriptor, error) {
-	if !m.Enabled() {
+	state := m.current()
+	if state == nil || state.catalog == nil || state.catalog.Len() == 0 {
 		return nil, errors.New("aws federation is disabled")
 	}
-	targets := m.catalog.Targets()
+	targets := state.catalog.Targets()
 	if len(targets) == 0 {
 		return nil, nil
 	}
@@ -193,7 +292,7 @@ func (m *Manager) ListMetrics(ctx context.Context, namespace, metric string) ([]
 	if len(cached) > 0 {
 		return dedupeMetricDescriptors(cached), nil
 	}
-	if len(targets) > m.planner.MaxFanout() {
+	if len(targets) > state.planner.MaxFanout() {
 		return nil, nil
 	}
 
@@ -221,10 +320,11 @@ func (m *Manager) ListMetrics(ctx context.Context, namespace, metric string) ([]
 
 // ListServices returns the union of cached X-Ray services.
 func (m *Manager) ListServices(ctx context.Context) ([]awsstore.ServiceInfo, error) {
-	if !m.Enabled() {
+	state := m.current()
+	if state == nil || state.catalog == nil || state.catalog.Len() == 0 {
 		return nil, errors.New("aws federation is disabled")
 	}
-	targets := m.catalog.Targets()
+	targets := state.catalog.Targets()
 	cached := make([]awsstore.ServiceInfo, 0)
 	for _, target := range targets {
 		for _, name := range target.XrayServices {
@@ -234,7 +334,7 @@ func (m *Manager) ListServices(ctx context.Context) ([]awsstore.ServiceInfo, err
 	if len(cached) > 0 {
 		return dedupeServices(cached), nil
 	}
-	if len(targets) > m.planner.MaxFanout() {
+	if len(targets) > state.planner.MaxFanout() {
 		return nil, nil
 	}
 
@@ -262,10 +362,11 @@ func (m *Manager) ListServices(ctx context.Context) ([]awsstore.ServiceInfo, err
 
 // ListLogGroups returns the union of cached log groups.
 func (m *Manager) ListLogGroups(ctx context.Context) ([]string, error) {
-	if !m.Enabled() {
+	state := m.current()
+	if state == nil || state.catalog == nil || state.catalog.Len() == 0 {
 		return nil, errors.New("aws federation is disabled")
 	}
-	targets := m.catalog.Targets()
+	targets := state.catalog.Targets()
 	cached := make([]string, 0)
 	for _, target := range targets {
 		cached = append(cached, target.LogGroups...)
@@ -273,7 +374,7 @@ func (m *Manager) ListLogGroups(ctx context.Context) ([]string, error) {
 	if len(cached) > 0 {
 		return dedupeStrings(cached), nil
 	}
-	if len(targets) > m.planner.MaxFanout() {
+	if len(targets) > state.planner.MaxFanout() {
 		return nil, nil
 	}
 
@@ -302,13 +403,14 @@ func (m *Manager) ListLogGroups(ctx context.Context) ([]string, error) {
 // ResolveLogGroups resolves a concrete regex pattern to log groups known to
 // the catalog. It lets proxy.AWSLogsForLoki avoid listing millions of groups.
 func (m *Manager) ResolveLogGroups(ctx context.Context, pattern string) ([]string, error) {
-	if !m.Enabled() {
+	state := m.current()
+	if state == nil || state.catalog == nil || state.catalog.Len() == 0 {
 		return nil, errors.New("aws federation is disabled")
 	}
 	if strings.TrimSpace(pattern) == "" {
 		return nil, nil
 	}
-	if groups := m.catalog.LogGroupsMatching(pattern); len(groups) > 0 {
+	if groups := state.catalog.LogGroupsMatching(pattern); len(groups) > 0 {
 		return groups, nil
 	}
 	groups, err := m.ListLogGroups(ctx)
@@ -331,7 +433,8 @@ func (m *Manager) ResolveLogGroups(ctx context.Context, pattern string) ([]strin
 // QueryLogs fans a CloudWatch Logs Insights query out to the targets that own
 // the requested log groups.
 func (m *Manager) QueryLogs(ctx context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error) {
-	targets, err := m.plan(ctx, Query{
+	state := m.current()
+	targets, err := m.planWith(state, ctx, Query{
 		Signal: SignalLogs, LogGroups: q.LogGroups, Expr: q.Query,
 		From: q.From, To: q.To, Limit: q.Limit,
 	})
@@ -368,7 +471,11 @@ func (m *Manager) QueryLogs(ctx context.Context, q awsstore.LogQuery) ([]awsstor
 				results[i] = result{target: target, err: clientErr}
 				return
 			}
-			groups := logGroupsForTarget(target, q.LogGroups, m.catalog)
+			var catalog *Catalog
+			if state != nil {
+				catalog = state.catalog
+			}
+			groups := logGroupsForTarget(target, q.LogGroups, catalog)
 			if len(groups) == 0 {
 				results[i] = result{target: target}
 				return

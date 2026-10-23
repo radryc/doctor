@@ -140,7 +140,7 @@ func main() {
 	var awsClient proxy.AWSClient
 	switch {
 	case cfg.FederationEnabled:
-		catalog, source, catalogErr := loadFederationCatalog(ctx, cfg, sharedFS)
+		catalog, source, catalogStore, catalogErr := loadFederationCatalog(ctx, cfg, sharedFS)
 		if catalogErr != nil {
 			if errors.Is(catalogErr, federation.ErrSnapshotNotFound) && cfg.AWSEnabled && cfg.AWSBackendURL != "" {
 				log.Printf("aws federation catalog not found (%v); falling back to legacy single backend %s", catalogErr, cfg.AWSBackendURL)
@@ -155,10 +155,29 @@ func main() {
 		manager := federation.NewManager(catalog, federation.Options{
 			MaxFanout:     cfg.FederationMaxFanout,
 			Timeout:       cfg.FederationTimeout,
+			StaleAfter:    cfg.FederationStaleAfter,
 			TokenResolver: federationTokens,
 		})
 		awsClient = manager
 		svc.SetAWSBackend(manager)
+		catalogMetrics, metricsErr := federation.RegisterCatalogMetrics(manager)
+		if metricsErr != nil {
+			log.Printf("federation catalog metrics disabled: %v", metricsErr)
+		} else {
+			defer func() { _ = catalogMetrics.Unregister() }()
+		}
+		if catalogStore != nil && cfg.FederationReloadInterval > 0 {
+			reloader := federation.NewCatalogReloader(
+				catalogStore,
+				manager,
+				federationReloadSource(cfg, source),
+				cfg.FederationReloadInterval,
+				log.Default(),
+			)
+			reloader.Metrics = catalogMetrics
+			go reloader.Run(ctx)
+			log.Printf("federation catalog reload enabled every %s", cfg.FederationReloadInterval)
+		}
 		log.Printf("multi-account aws federation enabled with %d target(s) from %s", catalog.Len(), source)
 	case cfg.AWSEnabled && cfg.AWSBackendURL != "":
 		legacy := awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
@@ -509,14 +528,14 @@ func buildFederationTokenResolver(cfg config.QueryConfig, files ruler.FileStore)
 // loadFederationCatalog loads the catalog from the configured snapshot store.
 // MonoFS is preferred when configured; a static file remains the bootstrap and
 // local-development fallback.
-func loadFederationCatalog(ctx context.Context, cfg config.QueryConfig, files ruler.FileStore) (*federation.Catalog, string, error) {
+func loadFederationCatalog(ctx context.Context, cfg config.QueryConfig, files ruler.FileStore) (*federation.Catalog, string, federation.SnapshotStore, error) {
 	storeName := strings.ToLower(strings.TrimSpace(cfg.FederationSnapshotStore))
 	switch storeName {
 	case "", "file":
 		// Use the static file below.
 	case "monofs":
 		if files == nil || strings.TrimSpace(cfg.MonoFSFileToken) == "" {
-			return nil, "", fmt.Errorf("monofs federation snapshot store requires DOCTOR_MONOFS_TOKEN")
+			return nil, "", nil, fmt.Errorf("monofs federation snapshot store requires DOCTOR_MONOFS_TOKEN")
 		}
 		snapshotStore := federation.NewMonoFSSnapshotStore(
 			files,
@@ -528,26 +547,37 @@ func loadFederationCatalog(ctx context.Context, cfg config.QueryConfig, files ru
 		snapshot, err := snapshotStore.Load(ctx)
 		if err == nil {
 			catalog, catalogErr := federation.NewCatalog(snapshot.Targets, snapshot.Version)
-			return catalog, "monofs:" + snapshot.Version, catalogErr
+			return catalog, "monofs:" + snapshot.Version, snapshotStore, catalogErr
 		}
 		if !errors.Is(err, federation.ErrSnapshotNotFound) {
-			return nil, "", err
+			return nil, "", nil, err
 		}
 		// No snapshot yet: fall through to the static bootstrap file.
 	default:
-		return nil, "", fmt.Errorf("unknown DOCTOR_FEDERATION_SNAPSHOT_STORE %q", storeName)
+		return nil, "", nil, fmt.Errorf("unknown DOCTOR_FEDERATION_SNAPSHOT_STORE %q", storeName)
 	}
 
 	if strings.TrimSpace(cfg.FederationCatalogFile) == "" {
-		return nil, "", federation.ErrSnapshotNotFound
+		return nil, "", nil, federation.ErrSnapshotNotFound
 	}
-	snapshot, err := federation.LoadSnapshotFile(cfg.FederationCatalogFile)
+	snapshotStore := &federation.FileSnapshotStore{Path: cfg.FederationCatalogFile}
+	snapshot, err := snapshotStore.Load(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	catalog, err := federation.NewCatalog(snapshot.Targets, snapshot.Version)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	return catalog, cfg.FederationCatalogFile, nil
+	return catalog, cfg.FederationCatalogFile, snapshotStore, nil
+}
+
+func federationReloadSource(cfg config.QueryConfig, source string) string {
+	if strings.HasPrefix(source, "monofs:") {
+		return "monofs"
+	}
+	if strings.TrimSpace(cfg.FederationCatalogFile) != "" {
+		return "file"
+	}
+	return "catalog"
 }
