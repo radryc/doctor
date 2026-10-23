@@ -61,6 +61,11 @@ Open decisions for tomorrow:
 - [x] Target validation and duplicate-ID detection.
 - [x] Tests: `internal/federation/catalog_test.go`.
 
+Known gap (measured 2026-10-23): `NewCatalog` uses O(n²) `appendUnique`
+index construction — 50k targets = 7.3s, 150k targets = 70.4s. This must be
+fixed before any 50k claim; see
+[50k production readiness](./50k-production-readiness.md).
+
 Files:
 
 - `doctor/internal/federation/types.go`
@@ -205,6 +210,9 @@ Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.
 
 ## Not started
 
+- [ ] [50k production readiness gap closure](./50k-production-readiness.md):
+  catalog O(n) indexes, token resolver, hot reload, catalog controller,
+  fan-out limits/circuit breaker, observability, 50k/150k load/chaos.
 - [ ] Pusher OTLP relay (`:4317/:4318` receiver + WAL + gateway).
 - [ ] Central rollups / trace index for broad queries.
 - [ ] Grafana `$account` variable and federation status UI.
