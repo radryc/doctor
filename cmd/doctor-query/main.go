@@ -76,6 +76,7 @@ func main() {
 	log.Printf("using monofs logengine backend at %s", cfg.MonoFSLogEngineAddr)
 
 	svc := query.NewServiceLogEngine(leClient, cfg.DefaultTenant)
+	svc.SetTraceDiscoveryCacheTTL(cfg.TraceDiscoveryCacheTTL)
 	svc.SetTenantHeader(cfg.TenantHeader)
 	svc.SetGuardianURL(cfg.GuardianURL)
 	svc.SetGuardianAPIURL(cfg.GuardianAPIURL)
