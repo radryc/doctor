@@ -103,6 +103,7 @@ type QueryConfig struct {
 	FederationClientIdleTTL        time.Duration
 	FederationBreakerThreshold     int
 	FederationBreakerCooldown      time.Duration
+	FederationMetadataTTL          time.Duration
 	FederationTimeout              time.Duration
 
 	ProxyEnabled              bool
@@ -288,6 +289,7 @@ func LoadQuery(service string) QueryConfig {
 		FederationClientIdleTTL:        envDuration("DOCTOR_FEDERATION_CLIENT_IDLE_TTL", 15*time.Minute),
 		FederationBreakerThreshold:     int(envInt64("DOCTOR_FEDERATION_BREAKER_THRESHOLD", 5)),
 		FederationBreakerCooldown:      envDuration("DOCTOR_FEDERATION_BREAKER_COOLDOWN", 30*time.Second),
+		FederationMetadataTTL:          envDuration("DOCTOR_FEDERATION_METADATA_TTL", time.Hour),
 		FederationTimeout:              envDuration("DOCTOR_FEDERATION_TIMEOUT", 5*time.Second),
 
 		ProxyEnabled:              envBool("DOCTOR_PROXY_ENABLED", true),

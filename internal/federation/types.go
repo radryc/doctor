@@ -48,6 +48,11 @@ type Target struct {
 	Version      string            `json:"version,omitempty" yaml:"version,omitempty"`
 	Priority     int               `json:"priority,omitempty" yaml:"priority,omitempty"`
 
+	// MetadataFetchedAt records when /v1/aws/meta was last refreshed. A fresh
+	// timestamp lets query replicas use cached empty discovery results instead
+	// of re-querying every pusher on each request.
+	MetadataFetchedAt time.Time `json:"metadata_fetched_at,omitempty" yaml:"metadata_fetched_at,omitempty"`
+
 	// Cached discovery metadata. These are derived from /v1/aws/meta and are
 	// optional in a static catalog.
 	MetricNames  []string `json:"metric_names,omitempty" yaml:"metric_names,omitempty"`

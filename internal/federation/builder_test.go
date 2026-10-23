@@ -2,6 +2,7 @@ package federation
 
 import (
 	"testing"
+	"time"
 )
 
 func TestBuildCatalogJoinsPartitionsPushersAndMeta(t *testing.T) {
@@ -18,7 +19,7 @@ func TestBuildCatalogJoinsPartitionsPushersAndMeta(t *testing.T) {
 			{Name: "aws-222", Account: "222", Region: "us-east-1", Endpoint: "http://b", TokenRef: "secret/b", Health: Health{State: "healthy"}},
 		},
 		Meta: map[string]TargetMeta{
-			"111/us-east-1": {MetricNames: []string{"Invocations"}, XrayServices: []string{"svc-a"}},
+			"111/us-east-1": {MetricNames: []string{"Invocations"}, XrayServices: []string{"svc-a"}, FetchedAt: time.Unix(100, 0).UTC()},
 			"aws-222":       {MetricNames: []string{"Errors"}, LogGroups: []string{"custom/b"}},
 		},
 	})
@@ -41,6 +42,9 @@ func TestBuildCatalogJoinsPartitionsPushersAndMeta(t *testing.T) {
 	}
 	if targetA.MetricNames[0] != "Invocations" || targetA.XrayServices[0] != "svc-a" {
 		t.Fatalf("meta = %#v", targetA)
+	}
+	if !targetA.MetadataFetchedAt.Equal(time.Unix(100, 0).UTC()) {
+		t.Fatalf("metadata fetched at = %s", targetA.MetadataFetchedAt)
 	}
 	if !contains(targetA.LogGroups, "custom/a") || !contains(targetA.LogGroups, "guardian/111/us-east-1/div-a-billing/app") {
 		t.Fatalf("log groups = %#v", targetA.LogGroups)

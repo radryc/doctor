@@ -35,9 +35,10 @@ type PusherInfo struct {
 
 // TargetMeta is the discovery payload fetched from a pusher's /v1/aws/meta.
 type TargetMeta struct {
-	MetricNames  []string `json:"metricNames" yaml:"metricNames"`
-	LogGroups    []string `json:"logGroups" yaml:"logGroups"`
-	XrayServices []string `json:"xrayServices" yaml:"xrayServices"`
+	MetricNames  []string  `json:"metricNames" yaml:"metricNames"`
+	LogGroups    []string  `json:"logGroups" yaml:"logGroups"`
+	XrayServices []string  `json:"xrayServices" yaml:"xrayServices"`
+	FetchedAt    time.Time `json:"fetchedAt,omitempty" yaml:"fetchedAt,omitempty"`
 }
 
 // BuildInput is the normalized input for a catalog build.
@@ -163,6 +164,7 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 		target.MetricNames = append(target.MetricNames, meta.MetricNames...)
 		target.LogGroups = append(target.LogGroups, meta.LogGroups...)
 		target.XrayServices = append(target.XrayServices, meta.XrayServices...)
+		target.MetadataFetchedAt = meta.FetchedAt
 
 		target.Partitions = dedupeStrings(target.Partitions)
 		target.MetricNames = dedupeStrings(target.MetricNames)

@@ -23,6 +23,7 @@ type fakeAWSClient struct {
 	err        error
 	calls      []string
 	logGroups  []string
+	services   []awsstore.ServiceInfo
 }
 
 func (f *fakeAWSClient) Enabled() bool { return true }
@@ -51,6 +52,9 @@ func (f *fakeAWSClient) ListServices(context.Context) ([]awsstore.ServiceInfo, e
 	f.record("ListServices")
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.services != nil {
+		return f.services, nil
 	}
 	return []awsstore.ServiceInfo{{Name: "svc", Region: "us-east-1", Account: "111111111111"}}, nil
 }

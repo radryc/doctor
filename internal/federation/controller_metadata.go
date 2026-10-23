@@ -250,9 +250,11 @@ func (c *Controller) refreshMetadata(ctx context.Context, pushers []PusherInfo, 
 					mu.Unlock()
 					continue
 				}
+				fetchedAt := c.now()
+				meta.FetchedAt = fetchedAt
 				cache.Put(item.pusher.Name, MetadataCacheEntry{
 					Meta:          meta,
-					FetchedAt:     c.now(),
+					FetchedAt:     fetchedAt,
 					PusherVersion: item.pusher.Version,
 				})
 				mu.Unlock()
@@ -275,7 +277,9 @@ func (c *Controller) refreshMetadata(ctx context.Context, pushers []PusherInfo, 
 	out := make(map[string]TargetMeta, len(pushers))
 	for _, pusher := range pushers {
 		if entry, ok := cache.Get(pusher.Name); ok {
-			out[pusher.Name] = entry.Meta
+			meta := entry.Meta
+			meta.FetchedAt = entry.FetchedAt
+			out[pusher.Name] = meta
 		}
 	}
 	return out, warnings

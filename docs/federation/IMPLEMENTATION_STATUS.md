@@ -424,6 +424,22 @@ Files:
 - [x] 50k catalog-derived bindings compile in **64ms**.
 - [x] Catalog labels (`aws.account`, `aws.region`) derive bindings automatically,
   so a 50k fleet does not need a 50k-entry `aws_bindings` block.
+### X-Ray discovery caching
+
+- [x] Catalog targets carry `metadata_fetched_at` from the controller's
+  `/v1/aws/meta` cache.
+- [x] Query replicas use fresh catalog metadata even when `xrayServices` is
+  empty; they no longer fan out to every pusher on each page load.
+- [x] Fallback discovery results, including **empty** results, are cached for
+  `DOCTOR_FEDERATION_METADATA_TTL` (default 1h).
+- [x] Catalog reloads invalidate the discovery cache immediately.
+- [x] With all three pushers stopped, `/v1/logs/services?include=aws` continued
+  returning cached log groups instead of failing on X-Ray discovery.
+- [ ] Local log/trace service discovery itself still has a slow path
+  (`include=traces` can exceed the UI timeout on a cold local trace scan);
+  this is separate from X-Ray service discovery and needs its own cache/query
+  optimization.
+
 - [ ] Live X-Ray E2E remains blocked: the demo Lambdas have
   `TracingConfig=Active`, have `xray:PutTraceSegments`, and receive
   invocations, but `GetTraceSummaries` still returns zero traces. This points
