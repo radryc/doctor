@@ -54,10 +54,7 @@ func TestManagerReloadSwapsStateAndPrunesChangedClients(t *testing.T) {
 	if err := manager.Reload(catalogV3, "monofs:v3"); err != nil {
 		t.Fatalf("Reload(v3) error = %v", err)
 	}
-	manager.mu.Lock()
-	_, stillCached := manager.clients[targetsV3[0].ID]
-	manager.mu.Unlock()
-	if stillCached {
+	if _, stillCached := manager.pool.get(targetsV3[0]); stillCached {
 		t.Fatal("changed target kept its old client")
 	}
 }

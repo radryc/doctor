@@ -19,13 +19,20 @@ import (
 
 // Options configures the federation manager.
 type Options struct {
-	MaxFanout     int
-	Timeout       time.Duration
-	StaleAfter    time.Duration
-	Source        string
-	ClientFactory ClientFactory
-	TokenResolver TokenResolver
-	Logger        *log.Logger
+	MaxFanout            int
+	MaxInflight          int
+	MaxConcurrentTargets int
+	MaxAttempts          int
+	ClientPoolMax        int
+	ClientIdleTTL        time.Duration
+	BreakerThreshold     int
+	BreakerCooldown      time.Duration
+	Timeout              time.Duration
+	StaleAfter           time.Duration
+	Source               string
+	ClientFactory        ClientFactory
+	TokenResolver        TokenResolver
+	Logger               *log.Logger
 }
 
 type managerState struct {
@@ -38,23 +45,50 @@ type managerState struct {
 // Manager implements proxy.AWSClient by resolving a query to a bounded set of
 // catalog targets, fanning out, and merging the results.
 type Manager struct {
-	state         atomic.Pointer[managerState]
-	factory       ClientFactory
-	tokenResolver TokenResolver
-	timeout       time.Duration
-	staleAfter    time.Duration
-	maxFanout     int
-	logger        *log.Logger
+	state                atomic.Pointer[managerState]
+	factory              ClientFactory
+	tokenResolver        TokenResolver
+	timeout              time.Duration
+	staleAfter           time.Duration
+	maxFanout            int
+	maxConcurrentTargets int
+	maxAttempts          int
+	breakerThreshold     int
+	breakerCooldown      time.Duration
+	logger               *log.Logger
 
-	mu            sync.Mutex
-	clients       map[string]proxy.AWSClient
-	clientTargets map[string]Target
+	inflight chan struct{}
+	pool     *clientPool
+
+	breakerMu sync.Mutex
+	breakers  map[string]*targetBreaker
 }
 
 // NewManager builds a federation manager.
 func NewManager(catalog *Catalog, opts Options) *Manager {
 	if opts.MaxFanout <= 0 {
 		opts.MaxFanout = 32
+	}
+	if opts.MaxInflight <= 0 {
+		opts.MaxInflight = 64
+	}
+	if opts.MaxConcurrentTargets <= 0 {
+		opts.MaxConcurrentTargets = 8
+	}
+	if opts.MaxAttempts <= 0 {
+		opts.MaxAttempts = 2
+	}
+	if opts.ClientPoolMax <= 0 {
+		opts.ClientPoolMax = 10000
+	}
+	if opts.ClientIdleTTL <= 0 {
+		opts.ClientIdleTTL = 15 * time.Minute
+	}
+	if opts.BreakerThreshold <= 0 {
+		opts.BreakerThreshold = 5
+	}
+	if opts.BreakerCooldown <= 0 {
+		opts.BreakerCooldown = 30 * time.Second
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 5 * time.Second
@@ -80,14 +114,19 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 		opts.StaleAfter = 0
 	}
 	manager := &Manager{
-		factory:       opts.ClientFactory,
-		tokenResolver: opts.TokenResolver,
-		timeout:       opts.Timeout,
-		staleAfter:    opts.StaleAfter,
-		maxFanout:     opts.MaxFanout,
-		logger:        opts.Logger,
-		clients:       make(map[string]proxy.AWSClient),
-		clientTargets: make(map[string]Target),
+		factory:              opts.ClientFactory,
+		tokenResolver:        opts.TokenResolver,
+		timeout:              opts.Timeout,
+		staleAfter:           opts.StaleAfter,
+		maxFanout:            opts.MaxFanout,
+		maxConcurrentTargets: opts.MaxConcurrentTargets,
+		maxAttempts:          opts.MaxAttempts,
+		breakerThreshold:     opts.BreakerThreshold,
+		breakerCooldown:      opts.BreakerCooldown,
+		logger:               opts.Logger,
+		inflight:             make(chan struct{}, opts.MaxInflight),
+		pool:                 newClientPool(opts.ClientPoolMax, opts.ClientIdleTTL),
+		breakers:             make(map[string]*targetBreaker),
 	}
 	manager.state.Store(&managerState{
 		catalog:  catalog,
@@ -96,6 +135,30 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 		loadedAt: time.Now().UTC(),
 	})
 	return manager
+}
+
+// Run expires idle clients and keeps the pool bounded until the context ends.
+func (m *Manager) Run(ctx context.Context) {
+	if m == nil || m.pool == nil {
+		return
+	}
+	interval := m.pool.idleTTL / 2
+	if interval <= 0 || interval > time.Minute {
+		interval = time.Minute
+	}
+	if interval < 10*time.Second {
+		interval = 10 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.pool.prune(func(Target) bool { return true })
+		}
+	}
 }
 
 func (m *Manager) current() *managerState {
@@ -132,18 +195,13 @@ func (m *Manager) Reload(catalog *Catalog, source string) error {
 }
 
 func (m *Manager) pruneClients(catalog *Catalog) {
-	if catalog == nil {
+	if catalog == nil || m.pool == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id := range m.clients {
-		next, ok := catalog.ByID(id)
-		if !ok || !sameClientTarget(next, m.clientTargets[id]) {
-			delete(m.clients, id)
-			delete(m.clientTargets, id)
-		}
-	}
+	m.pool.prune(func(target Target) bool {
+		next, ok := catalog.ByID(target.ID)
+		return ok && sameClientTarget(next, target)
+	})
 }
 
 func sameClientTarget(left, right Target) bool {
@@ -204,6 +262,16 @@ func (m *Manager) Status() map[string]any {
 		}
 	}
 	stale := m.staleAfter > 0 && !state.loadedAt.IsZero() && time.Since(state.loadedAt) > m.staleAfter
+	openCircuits, circuits := m.circuitStatus()
+	recentErrors := make([]string, 0, len(circuits))
+	for _, circuit := range circuits {
+		if circuit.LastError != "" {
+			recentErrors = append(recentErrors, circuit.Target+": "+circuit.LastError)
+		}
+		if len(recentErrors) >= 16 {
+			break
+		}
+	}
 	return map[string]any{
 		"enabled":              m.Enabled(),
 		"targets":              len(targets),
@@ -216,6 +284,10 @@ func (m *Manager) Status() map[string]any {
 		"partitions":           partitions,
 		"partition_count":      len(allPartitions),
 		"partitions_truncated": len(allPartitions) > len(partitions),
+		"open_circuits":        openCircuits,
+		"circuits":             circuits,
+		"recent_errors":        recentErrors,
+		"client_pool_size":     m.pool.len(),
 	}
 }
 
@@ -229,25 +301,18 @@ func (m *Manager) CheckScope(ctx context.Context, q Query) error {
 }
 
 func (m *Manager) clientFor(target Target) (proxy.AWSClient, error) {
-	m.mu.Lock()
-	if client, ok := m.clients[target.ID]; ok {
-		m.mu.Unlock()
-		return client, nil
+	if m.pool != nil {
+		if client, ok := m.pool.get(target); ok {
+			return client, nil
+		}
 	}
-	m.mu.Unlock()
-
 	client, err := m.factory(target)
 	if err != nil {
 		return nil, err
 	}
-	m.mu.Lock()
-	if existing, ok := m.clients[target.ID]; ok {
-		m.mu.Unlock()
-		return existing, nil
+	if m.pool != nil {
+		return m.pool.put(target, client), nil
 	}
-	m.clients[target.ID] = client
-	m.clientTargets[target.ID] = target
-	m.mu.Unlock()
 	return client, nil
 }
 
@@ -298,21 +363,22 @@ func (m *Manager) ListMetrics(ctx context.Context, namespace, metric string) ([]
 		return nil, nil
 	}
 
-	var out []awsstore.MetricDescriptor
-	var failures int
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) ([]awsstore.MetricDescriptor, error) {
 		client, err := m.clientFor(target)
 		if err != nil {
+			return nil, err
+		}
+		return client.ListMetrics(callCtx, namespace, metric)
+	})
+	out := make([]awsstore.MetricDescriptor, 0)
+	failures := 0
+	for _, result := range results {
+		if result.err != nil {
 			failures++
+			m.logger.Printf("federation: ListMetrics target=%s: %v", result.target.ID, result.err)
 			continue
 		}
-		descriptors, err := client.ListMetrics(ctx, namespace, metric)
-		if err != nil {
-			failures++
-			m.logger.Printf("federation: ListMetrics target=%s: %v", target.ID, err)
-			continue
-		}
-		out = append(out, descriptors...)
+		out = append(out, result.value...)
 	}
 	if len(out) == 0 && failures == len(targets) {
 		return nil, fmt.Errorf("aws federation: all %d targets failed ListMetrics", failures)
@@ -340,21 +406,22 @@ func (m *Manager) ListServices(ctx context.Context) ([]awsstore.ServiceInfo, err
 		return nil, nil
 	}
 
-	var out []awsstore.ServiceInfo
-	var failures int
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalTraces, func(callCtx context.Context, target Target) ([]awsstore.ServiceInfo, error) {
 		client, err := m.clientFor(target)
 		if err != nil {
+			return nil, err
+		}
+		return client.ListServices(callCtx)
+	})
+	out := make([]awsstore.ServiceInfo, 0)
+	failures := 0
+	for _, result := range results {
+		if result.err != nil {
 			failures++
+			m.logger.Printf("federation: ListServices target=%s: %v", result.target.ID, result.err)
 			continue
 		}
-		services, err := client.ListServices(ctx)
-		if err != nil {
-			failures++
-			m.logger.Printf("federation: ListServices target=%s: %v", target.ID, err)
-			continue
-		}
-		out = append(out, services...)
+		out = append(out, result.value...)
 	}
 	if len(out) == 0 && failures == len(targets) {
 		return nil, fmt.Errorf("aws federation: all %d targets failed ListServices", failures)
@@ -380,21 +447,22 @@ func (m *Manager) ListLogGroups(ctx context.Context) ([]string, error) {
 		return nil, nil
 	}
 
-	var out []string
-	var failures int
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalLogs, func(callCtx context.Context, target Target) ([]string, error) {
 		client, err := m.clientFor(target)
 		if err != nil {
+			return nil, err
+		}
+		return client.ListLogGroups(callCtx)
+	})
+	out := make([]string, 0)
+	failures := 0
+	for _, result := range results {
+		if result.err != nil {
 			failures++
+			m.logger.Printf("federation: ListLogGroups target=%s: %v", result.target.ID, result.err)
 			continue
 		}
-		groups, err := client.ListLogGroups(ctx)
-		if err != nil {
-			failures++
-			m.logger.Printf("federation: ListLogGroups target=%s: %v", target.ID, err)
-			continue
-		}
-		out = append(out, groups...)
+		out = append(out, result.value...)
 	}
 	if len(out) == 0 && failures == len(targets) {
 		return nil, fmt.Errorf("aws federation: all %d targets failed ListLogGroups", failures)
@@ -453,48 +521,27 @@ func (m *Manager) QueryLogs(ctx context.Context, q awsstore.LogQuery) ([]awsstor
 		perTarget = 1
 	}
 
-	type result struct {
-		target  Target
-		records []awsstore.LogRecord
-		err     error
-	}
-	results := make([]result, len(targets))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 8)
-	for i, target := range targets {
-		wg.Add(1)
-		go func(i int, target Target) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			client, clientErr := m.clientFor(target)
-			if clientErr != nil {
-				results[i] = result{target: target, err: clientErr}
-				return
-			}
-			var catalog *Catalog
-			if state != nil {
-				catalog = state.catalog
-			}
-			groups := logGroupsForTarget(target, q.LogGroups, catalog)
-			if len(groups) == 0 {
-				results[i] = result{target: target}
-				return
-			}
-			callCtx, cancel := context.WithTimeout(ctx, m.timeout)
-			defer cancel()
-			records, callErr := client.QueryLogs(callCtx, awsstore.LogQuery{
-				LogGroups: groups,
-				Query:     q.Query,
-				From:      q.From,
-				To:        q.To,
-				Limit:     perTarget,
-			})
-			results[i] = result{target: target, records: records, err: callErr}
-		}(i, target)
-	}
-	wg.Wait()
+	results := fanoutTargets(m, ctx, targets, SignalLogs, func(callCtx context.Context, target Target) ([]awsstore.LogRecord, error) {
+		client, clientErr := m.clientFor(target)
+		if clientErr != nil {
+			return nil, clientErr
+		}
+		var catalog *Catalog
+		if state != nil {
+			catalog = state.catalog
+		}
+		groups := logGroupsForTarget(target, q.LogGroups, catalog)
+		if len(groups) == 0 {
+			return nil, nil
+		}
+		return client.QueryLogs(callCtx, awsstore.LogQuery{
+			LogGroups: groups,
+			Query:     q.Query,
+			From:      q.From,
+			To:        q.To,
+			Limit:     perTarget,
+		})
+	})
 
 	remotes := make([]proxy.LogRemote, 0, len(results))
 	var firstErr error
@@ -506,7 +553,7 @@ func (m *Manager) QueryLogs(ctx context.Context, q awsstore.LogQuery) ([]awsstor
 			}
 			continue
 		}
-		records := m.convertLogRecords(res.records, res.target)
+		records := m.convertLogRecords(res.value, res.target)
 		if len(records) > 0 {
 			remotes = append(remotes, proxy.LogRemote{Source: proxy.SourceAWS, Backend: res.target.ID, Records: records})
 		}
@@ -532,33 +579,13 @@ func (m *Manager) QueryTraces(ctx context.Context, q awsstore.TraceQuery) ([]aws
 		return nil, err
 	}
 
-	type result struct {
-		target Target
-		items  []awsstore.TraceSummary
-		err    error
-	}
-	results := make([]result, len(targets))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 8)
-	for i, target := range targets {
-		wg.Add(1)
-		go func(i int, target Target) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			client, clientErr := m.clientFor(target)
-			if clientErr != nil {
-				results[i] = result{target: target, err: clientErr}
-				return
-			}
-			callCtx, cancel := context.WithTimeout(ctx, m.timeout)
-			defer cancel()
-			items, callErr := client.QueryTraces(callCtx, q)
-			results[i] = result{target: target, items: items, err: callErr}
-		}(i, target)
-	}
-	wg.Wait()
+	results := fanoutTargets(m, ctx, targets, SignalTraces, func(callCtx context.Context, target Target) ([]awsstore.TraceSummary, error) {
+		client, clientErr := m.clientFor(target)
+		if clientErr != nil {
+			return nil, clientErr
+		}
+		return client.QueryTraces(callCtx, q)
+	})
 
 	byTrace := make(map[string]awsstore.TraceSummary)
 	var firstErr error
@@ -570,7 +597,7 @@ func (m *Manager) QueryTraces(ctx context.Context, q awsstore.TraceQuery) ([]aws
 			}
 			continue
 		}
-		for _, item := range res.items {
+		for _, item := range res.value {
 			if item.TraceID == "" {
 				continue
 			}
@@ -619,32 +646,36 @@ func (m *Manager) GetTrace(ctx context.Context, traceID string) ([]awsstore.Span
 	if err != nil {
 		return nil, err
 	}
-	var out []awsstore.Span
-	var firstErr error
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalTraces, func(callCtx context.Context, target Target) ([]awsstore.Span, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
-			firstErr = clientErr
+			return nil, clientErr
+		}
+		return client.GetTrace(callCtx, traceID)
+	})
+	out := make([]awsstore.Span, 0)
+	seen := make(map[string]struct{})
+	var firstErr error
+	for _, result := range results {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
 			continue
 		}
-		callCtx, cancel := context.WithTimeout(ctx, m.timeout)
-		spans, callErr := client.GetTrace(callCtx, traceID)
-		cancel()
-		if callErr != nil {
-			firstErr = callErr
-			continue
-		}
-		for i := range spans {
-			if spans[i].Account == "" {
-				spans[i].Account = target.Account
+		for _, span := range result.value {
+			if span.Account == "" {
+				span.Account = result.target.Account
 			}
-			if spans[i].Region == "" {
-				spans[i].Region = target.Region
+			if span.Region == "" {
+				span.Region = result.target.Region
 			}
-		}
-		out = append(out, spans...)
-		if len(out) > 0 {
-			return out, nil
+			key := span.TraceID + "\x00" + span.SpanID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, span)
 		}
 	}
 	if len(out) > 0 {
@@ -667,25 +698,28 @@ func (m *Manager) PrometheusQuery(ctx context.Context, query string, at time.Tim
 	if strings.TrimSpace(forwarded) == "" {
 		return emptyPrometheusResponse("vector"), nil
 	}
-	remotes := make([]proxy.PromRemote, 0, len(targets))
-	var firstErr error
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) (map[string]any, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
-			firstErr = clientErr
-			continue
+			return nil, clientErr
 		}
-		callCtx, cancel := context.WithTimeout(ctx, m.timeout)
 		resp, callErr := client.PrometheusQuery(callCtx, forwarded, at)
-		cancel()
 		if callErr != nil {
-			m.logger.Printf("federation: PrometheusQuery target=%s: %v", target.ID, callErr)
+			return nil, callErr
+		}
+		return proxy.ExtractPrometheusData(resp), nil
+	})
+	remotes := make([]proxy.PromRemote, 0, len(results))
+	var firstErr error
+	for _, result := range results {
+		if result.err != nil {
+			m.logger.Printf("federation: PrometheusQuery target=%s: %v", result.target.ID, result.err)
 			if firstErr == nil {
-				firstErr = callErr
+				firstErr = result.err
 			}
 			continue
 		}
-		remotes = append(remotes, proxy.PromRemote{Source: proxy.SourceAWS, Backend: target.ID, Data: proxy.ExtractPrometheusData(resp)})
+		remotes = append(remotes, proxy.PromRemote{Source: proxy.SourceAWS, Backend: result.target.ID, Data: result.value})
 	}
 	if len(remotes) == 0 && firstErr != nil {
 		return nil, firstErr
@@ -705,25 +739,28 @@ func (m *Manager) PrometheusQueryRange(ctx context.Context, query string, start,
 	if strings.TrimSpace(forwarded) == "" {
 		return emptyPrometheusResponse("matrix"), nil
 	}
-	remotes := make([]proxy.PromRemote, 0, len(targets))
-	var firstErr error
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) (map[string]any, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
-			firstErr = clientErr
-			continue
+			return nil, clientErr
 		}
-		callCtx, cancel := context.WithTimeout(ctx, m.timeout+5*time.Second)
 		resp, callErr := client.PrometheusQueryRange(callCtx, forwarded, start, end, step)
-		cancel()
 		if callErr != nil {
-			m.logger.Printf("federation: PrometheusQueryRange target=%s: %v", target.ID, callErr)
+			return nil, callErr
+		}
+		return proxy.ExtractPrometheusData(resp), nil
+	})
+	remotes := make([]proxy.PromRemote, 0, len(results))
+	var firstErr error
+	for _, result := range results {
+		if result.err != nil {
+			m.logger.Printf("federation: PrometheusQueryRange target=%s: %v", result.target.ID, result.err)
 			if firstErr == nil {
-				firstErr = callErr
+				firstErr = result.err
 			}
 			continue
 		}
-		remotes = append(remotes, proxy.PromRemote{Source: proxy.SourceAWS, Backend: target.ID, Data: proxy.ExtractPrometheusData(resp)})
+		remotes = append(remotes, proxy.PromRemote{Source: proxy.SourceAWS, Backend: result.target.ID, Data: result.value})
 	}
 	if len(remotes) == 0 && firstErr != nil {
 		return nil, firstErr
@@ -738,25 +775,35 @@ func (m *Manager) PrometheusSeries(ctx context.Context, match []string, start, e
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]map[string]string)
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) ([]map[string]string, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
-			continue
+			return nil, clientErr
 		}
-		callCtx, cancel := context.WithTimeout(ctx, m.timeout)
 		resp, callErr := client.PrometheusSeries(callCtx, match, start, end)
-		cancel()
 		if callErr != nil {
-			m.logger.Printf("federation: PrometheusSeries target=%s: %v", target.ID, callErr)
+			return nil, callErr
+		}
+		return proxy.ExtractPrometheusSeries(resp), nil
+	})
+	seen := make(map[string]map[string]string)
+	var firstErr error
+	for _, result := range results {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
 			continue
 		}
-		for _, series := range proxy.ExtractPrometheusSeries(resp) {
+		for _, series := range result.value {
 			if series["source"] == "" {
 				series["source"] = proxy.SourceAWS
 			}
 			seen[seriesKey(series)] = series
 		}
+	}
+	if len(seen) == 0 && firstErr != nil {
+		return nil, firstErr
 	}
 	data := make([]any, 0, len(seen))
 	for _, series := range seen {
@@ -771,21 +818,32 @@ func (m *Manager) PrometheusLabels(ctx context.Context, match []string, start, e
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{})
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) ([]string, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
-			continue
+			return nil, clientErr
 		}
-		callCtx, cancel := context.WithTimeout(ctx, m.timeout)
 		resp, callErr := client.PrometheusLabels(callCtx, match, start, end)
-		cancel()
 		if callErr != nil {
+			return nil, callErr
+		}
+		return proxy.ExtractPrometheusStringList(resp), nil
+	})
+	seen := make(map[string]struct{})
+	var firstErr error
+	for _, result := range results {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
 			continue
 		}
-		for _, value := range proxy.ExtractPrometheusStringList(resp) {
+		for _, value := range result.value {
 			seen[value] = struct{}{}
 		}
+	}
+	if len(seen) == 0 && firstErr != nil {
+		return nil, firstErr
 	}
 	out := make([]string, 0, len(seen))
 	for value := range seen {
@@ -801,21 +859,32 @@ func (m *Manager) PrometheusLabelValues(ctx context.Context, label string, match
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{})
-	for _, target := range targets {
+	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) ([]string, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
-			continue
+			return nil, clientErr
 		}
-		callCtx, cancel := context.WithTimeout(ctx, m.timeout)
 		resp, callErr := client.PrometheusLabelValues(callCtx, label, match, start, end)
-		cancel()
 		if callErr != nil {
+			return nil, callErr
+		}
+		return proxy.ExtractPrometheusStringList(resp), nil
+	})
+	seen := make(map[string]struct{})
+	var firstErr error
+	for _, result := range results {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
 			continue
 		}
-		for _, value := range proxy.ExtractPrometheusStringList(resp) {
+		for _, value := range result.value {
 			seen[value] = struct{}{}
 		}
+	}
+	if len(seen) == 0 && firstErr != nil {
+		return nil, firstErr
 	}
 	out := make([]string, 0, len(seen))
 	for value := range seen {

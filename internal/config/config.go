@@ -96,6 +96,13 @@ type QueryConfig struct {
 	FederationReloadInterval       time.Duration
 	FederationStaleAfter           time.Duration
 	FederationMaxFanout            int
+	FederationMaxInflight          int
+	FederationMaxConcurrentTargets int
+	FederationMaxAttempts          int
+	FederationClientPoolMax        int
+	FederationClientIdleTTL        time.Duration
+	FederationBreakerThreshold     int
+	FederationBreakerCooldown      time.Duration
 	FederationTimeout              time.Duration
 
 	ProxyEnabled              bool
@@ -274,6 +281,13 @@ func LoadQuery(service string) QueryConfig {
 		FederationReloadInterval:       envDuration("DOCTOR_FEDERATION_RELOAD_INTERVAL", 30*time.Second),
 		FederationStaleAfter:           envDuration("DOCTOR_FEDERATION_STALE_AFTER", 0),
 		FederationMaxFanout:            int(envInt64("DOCTOR_FEDERATION_MAX_FANOUT", 32)),
+		FederationMaxInflight:          int(envInt64("DOCTOR_FEDERATION_MAX_INFLIGHT", 64)),
+		FederationMaxConcurrentTargets: int(envInt64("DOCTOR_FEDERATION_MAX_CONCURRENT_TARGETS", 8)),
+		FederationMaxAttempts:          int(envInt64("DOCTOR_FEDERATION_MAX_ATTEMPTS", 2)),
+		FederationClientPoolMax:        int(envInt64("DOCTOR_FEDERATION_CLIENT_POOL_MAX", 10000)),
+		FederationClientIdleTTL:        envDuration("DOCTOR_FEDERATION_CLIENT_IDLE_TTL", 15*time.Minute),
+		FederationBreakerThreshold:     int(envInt64("DOCTOR_FEDERATION_BREAKER_THRESHOLD", 5)),
+		FederationBreakerCooldown:      envDuration("DOCTOR_FEDERATION_BREAKER_COOLDOWN", 30*time.Second),
 		FederationTimeout:              envDuration("DOCTOR_FEDERATION_TIMEOUT", 5*time.Second),
 
 		ProxyEnabled:              envBool("DOCTOR_PROXY_ENABLED", true),

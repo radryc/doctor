@@ -305,6 +305,34 @@ Files:
 - `doctor/cmd/doctor-federation-controller/main.go`
 - `guardian/internal/ui/federation_feed.go`
 
+## PR5 — Fan-out runtime
+
+- [x] Shared bounded fan-out across metrics, logs, traces, series, labels, and
+  service discovery: global in-flight semaphore and per-query target semaphore.
+- [x] Per-target timeout, 2-attempt retry for 429/5xx/timeouts, and jittered
+  backoff. Client errors and token-refresh 401s are not retried.
+- [x] Per-target circuit breaker: 5 consecutive failures, 30s cooldown, one
+  half-open probe, success closes.
+- [x] Bounded LRU client pool with configurable max and idle TTL, plus a
+  background idle sweeper.
+- [x] Request warning collector and `X-Doctor-Partial` /
+  `X-Doctor-Partial-Count` response headers.
+- [x] `AWSLogsForLoki` and `AWSServices` now return errors; callers preserve
+  local results and surface the failure as a warning.
+- [x] Status includes open circuits, circuit detail, recent errors, and client
+  pool size. `GET /v1/federation/targets` provides paginated target detail.
+- [x] Tests: retry, breaker open/half-open close, LRU eviction, warning headers,
+  target pagination, and API error propagation.
+
+Files:
+
+- `doctor/internal/federation/fanout.go`
+- `doctor/internal/federation/breaker.go`
+- `doctor/internal/federation/client_pool.go`
+- `doctor/internal/federation/targets.go`
+- `doctor/internal/proxy/warnings.go`
+- `doctor/internal/query/warnings_middleware.go`
+
 ## Live verification
 
 Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.

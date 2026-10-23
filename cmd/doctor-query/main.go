@@ -153,11 +153,18 @@ func main() {
 			break
 		}
 		manager := federation.NewManager(catalog, federation.Options{
-			MaxFanout:     cfg.FederationMaxFanout,
-			Timeout:       cfg.FederationTimeout,
-			StaleAfter:    cfg.FederationStaleAfter,
-			Source:        source,
-			TokenResolver: federationTokens,
+			MaxFanout:            cfg.FederationMaxFanout,
+			MaxInflight:          cfg.FederationMaxInflight,
+			MaxConcurrentTargets: cfg.FederationMaxConcurrentTargets,
+			MaxAttempts:          cfg.FederationMaxAttempts,
+			ClientPoolMax:        cfg.FederationClientPoolMax,
+			ClientIdleTTL:        cfg.FederationClientIdleTTL,
+			BreakerThreshold:     cfg.FederationBreakerThreshold,
+			BreakerCooldown:      cfg.FederationBreakerCooldown,
+			Timeout:              cfg.FederationTimeout,
+			StaleAfter:           cfg.FederationStaleAfter,
+			Source:               source,
+			TokenResolver:        federationTokens,
 		})
 		awsClient = manager
 		svc.SetAWSBackend(manager)
@@ -179,6 +186,7 @@ func main() {
 			go reloader.Run(ctx)
 			log.Printf("federation catalog reload enabled every %s", cfg.FederationReloadInterval)
 		}
+		go manager.Run(ctx)
 		log.Printf("multi-account aws federation enabled with %d target(s) from %s", catalog.Len(), source)
 	case cfg.AWSEnabled && cfg.AWSBackendURL != "":
 		legacy := awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)

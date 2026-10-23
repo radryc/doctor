@@ -18,6 +18,7 @@ import (
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/rydzu/ainfra/doctor/internal/access"
+	"github.com/rydzu/ainfra/doctor/internal/federation"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
@@ -85,12 +86,42 @@ type federationStatusProvider interface {
 	Status() map[string]any
 }
 
+type federationTargetProvider interface {
+	TargetsPage(context.Context, string, string, string, string, string, int) federation.TargetPage
+}
+
 func (s *Service) handleFederationStatus(w http.ResponseWriter, _ *http.Request) {
 	if provider, ok := s.aws.(federationStatusProvider); ok {
 		writeJSON(w, http.StatusOK, provider.Status())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+}
+
+// handleFederationTargets returns the paginated target detail view. Tokens are
+// never included; only routing metadata and circuit health are exposed.
+func (s *Service) handleFederationTargets(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.aws.(federationTargetProvider)
+	if !ok {
+		writeJSON(w, http.StatusOK, federation.TargetPage{Targets: []map[string]any{}})
+		return
+	}
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	page := provider.TargetsPage(
+		r.Context(),
+		r.URL.Query().Get("account"),
+		r.URL.Query().Get("region"),
+		r.URL.Query().Get("partition"),
+		r.URL.Query().Get("q"),
+		r.URL.Query().Get("cursor"),
+		limit,
+	)
+	writeJSON(w, http.StatusOK, page)
 }
 
 // SetTenantHeader sets the HTTP header used to route queries to a tenant when
@@ -524,6 +555,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/logs/services", s.handleLogServices)
 	mux.HandleFunc("/v1/logs/search", s.handleLogSearch)
 	mux.HandleFunc("/v1/federation/status", s.handleFederationStatus)
+	mux.HandleFunc("/v1/federation/targets", s.handleFederationTargets)
 	mux.HandleFunc("/v1/metrics/range", s.handleMetricRange)
 	mux.HandleFunc("/v1/rules", s.handleRulesProxy)
 	mux.HandleFunc("/v1/rules/", s.handleRulesProxy)
@@ -540,7 +572,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
 	mux.HandleFunc("/", s.handleUI)
-	return s.guardianTokenMiddleware(mux)
+	return withWarningHeaders(s.guardianTokenMiddleware(mux))
 }
 
 // guardianTokenKey carries the caller's OIDC token to server-side Guardian

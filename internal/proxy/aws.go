@@ -126,12 +126,12 @@ func ApplyAWSPartition(attrs map[string]string, region, account string) {
 // AWSLogsForLoki executes a reduced LogQL pushdown against CloudWatch Logs when
 // it targets the AWS federated source. Errors are swallowed so native logs still
 // return.
-func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdown LogPushdown, from, to time.Time, limit int) []segment.LogRecord {
+func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdown LogPushdown, from, to time.Time, limit int) ([]segment.LogRecord, error) {
 	if client == nil || !client.Enabled() {
-		return nil
+		return nil, nil
 	}
 	if !lokiSourceAWSPattern.MatchString(pushdown.Selector) {
-		return nil
+		return nil, nil
 	}
 
 	var logGroups []string
@@ -147,7 +147,7 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 			}); ok {
 				groups, err := resolver.ResolveLogGroups(ctx, raw)
 				if err != nil {
-					return nil
+					return nil, err
 				}
 				logGroups = append(logGroups, groups...)
 			} else {
@@ -160,11 +160,11 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 					}
 				}
 				if len(patterns) == 0 {
-					return nil
+					return nil, nil
 				}
 				groups, err := client.ListLogGroups(ctx)
 				if err != nil {
-					return nil
+					return nil, err
 				}
 				for _, group := range groups {
 					for _, re := range patterns {
@@ -184,7 +184,7 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 		}
 	}
 	if len(logGroups) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	insights := "fields @timestamp, @message, @logStream, @log"
@@ -214,14 +214,14 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 		Limit:     limit,
 	})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	defaultGroup := ""
 	if len(logGroups) == 1 {
 		defaultGroup = logGroups[0]
 	}
-	return AWSLogRecords(records, tenant, defaultGroup, "", "")
+	return AWSLogRecords(records, tenant, defaultGroup, "", ""), nil
 }
 
 // AWSLogRecords converts awsread log records into the segment shape used by
@@ -347,13 +347,13 @@ func LogGroupPartition(logGroup string) string {
 }
 
 // AWSServices returns X-Ray service names.
-func AWSServices(ctx context.Context, client AWSClient) []string {
+func AWSServices(ctx context.Context, client AWSClient) ([]string, error) {
 	if client == nil || !client.Enabled() {
-		return nil
+		return nil, nil
 	}
 	services, err := client.ListServices(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	seen := make(map[string]struct{}, len(services))
 	for _, service := range services {
@@ -366,7 +366,7 @@ func AWSServices(ctx context.Context, client AWSClient) []string {
 		out = append(out, name)
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // AWSUpstream adapts an AWSClient to the upstream interfaces. The optional
@@ -429,7 +429,10 @@ func (u *AWSUpstream) PromLabelValues(ctx context.Context, _, label string, matc
 
 // QueryLogs implements LogsUpstream.
 func (u *AWSUpstream) QueryLogs(ctx context.Context, tenant string, pushdown LogPushdown, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	records := AWSLogsForLoki(ctx, u.Client, tenant, pushdown, from, to, limit)
+	records, err := AWSLogsForLoki(ctx, u.Client, tenant, pushdown, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
 	if u.FilterLogs != nil {
 		records = u.FilterLogs(ctx, records)
 	}
@@ -438,7 +441,7 @@ func (u *AWSUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 
 // ListServices implements TracesUpstream.
 func (u *AWSUpstream) ListServices(ctx context.Context, _ string) ([]string, error) {
-	return AWSServices(ctx, u.Client), nil
+	return AWSServices(ctx, u.Client)
 }
 
 // TraceTags implements TraceTagSource so federated X-Ray traces contribute tag
