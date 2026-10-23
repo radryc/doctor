@@ -134,25 +134,29 @@ should be the first PR.
   ```
 - Implement:
   - `EnvTokenResolver` (dev; reads `target.TokenEnv`).
-  - `BundleTokenResolver` (MonoFS file store; one token bundle for 50k).
-  - Optional `GuardianTokenResolver` (`GET /api/pushers/{name}` with a
-    service-read token) for installations that do not want a token bundle.
-- Bundle format:
+  - `GuardianTokenResolver` (**primary**): lazy
+    `GET /api/m2m/pushers/{name}` using the internal Guardian token; per-target
+    cache, singleflight, 401 invalidation.
+  - `BundleTokenResolver` (**fallback**): sharded MonoFS bundles, not one
+    monolithic file. Default 256 shards; one file per shard; lazy shard read.
+  - `ChainTokenResolver`: env → Guardian → MonoFS bundle.
+- Sharded bundle format:
   ```json
   {
     "version": "2026-10-23T...",
     "tokens": {"aws-780603797542-us-east-1": "..."}
   }
   ```
-  Stored under `/doctor/v1/federation/tokens/<tenant>.json`; the catalog stores
-  only `token_ref: "bundle://doctor/v1/federation/tokens/default"`.
-- Add to `Manager.Options`:
-  - `TokenResolver`
-  - `TokenCacheTTL` (default 5m)
-  - `TokenRefreshOn401` (default true)
-- Resolve lazily on first client creation; cache token in the client pool.
+  Stored under
+  `/doctor/v1/federation/tokens/<tenant>/<shard>.json`; shard =
+  `fnv1a(target.ID) % shard_count`. A rotation rewrites one shard, not all 50k
+  tokens. The catalog stores only `token_ref` such as
+  `guardian-pusher://<pusher>` or `monofs-token://<tenant>`.
+- Add to `Manager.Options`: `TokenResolver`.
+- Resolve lazily on first request through `awsstore.TokenSource`; cache token
+  and shard with TTL (default 5m).
 - On HTTP 401:
-  - Invalidate the cached token.
+  - Invalidate the cached token/shard.
   - Re-resolve once.
   - Retry the request once.
   - If still 401, mark the target unhealthy; do not log the token.
@@ -165,8 +169,10 @@ should be the first PR.
 
 - 50k-target catalog with only `token_ref`; zero token env vars.
 - Token rotation without restart: old token invalidated, new token used.
+- A token rotation writes only one 20–60 KB shard, not a multi-MB bundle.
 - 401 storm test: one refresh per target, no token leakage in logs.
-- Unit tests for bundle parsing, cache TTL, singleflight, 401 retry.
+- Unit tests for Guardian cache/singleflight, sharded bundle parsing, chain
+  fallback, and 401 retry.
 
 ---
 
@@ -245,7 +251,7 @@ should be the first PR.
     3. Refresh `/v1/aws/meta` for healthy targets whose cache is stale or whose
        pusher version changed.
     4. Build `BuildInput`; call `BuildCatalog`.
-    5. Publish token bundle (if used).
+    5. Publish only changed token shards (if the bundle fallback is used).
     6. Publish catalog snapshot with shards first, manifest last, CAS.
     7. Sleep with jitter; keep last-known-good on failure.
 - Metadata fetch:
@@ -524,9 +530,10 @@ PR4–PR7 are required before a 50k production claim.
 
 ## 8. Open decisions
 
-1. **Token storage:** MonoFS token bundle vs Guardian pusher API resolver vs
-   Vault/Kubernetes Secret. Recommendation: bundle for MVP, interface for
-   Vault; never `token_env` at 50k.
+1. **Token storage:** Guardian pusher API vs sharded MonoFS bundle vs
+   Vault/Kubernetes Secret. Recommendation: Guardian lazy resolver as primary,
+   sharded bundle as fallback/cache, Vault behind the same interface later;
+   never a monolithic bundle or `token_env` at 50k.
 2. **Controller placement:** separate single-replica Deployment vs sidecar with
    leader lease. Recommendation: separate Deployment with a Lease.
 3. **Metadata TTL:** 30m vs 60m; start at 60m with jitter and on-demand refresh.
