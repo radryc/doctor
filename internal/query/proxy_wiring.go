@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	promstorage "github.com/prometheus/prometheus/storage"
@@ -289,6 +290,12 @@ func (l localTracesUpstream) SearchTraces(ctx context.Context, tenant string, se
 }
 
 func (l localTracesUpstream) GetTrace(ctx context.Context, tenant, traceID string) ([]segment.TraceRecord, bool, error) {
+	// X-Ray trace IDs are served by the AWS upstream. Querying every local
+	// chunk for an ID that cannot exist there turns a federated trace detail
+	// request into a full local scan and can exceed the HTTP deadline.
+	if isXRayTraceID(traceID) {
+		return nil, false, nil
+	}
 	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, traceID, "", time.Time{}, time.Time{}, traceGetSpanLimit)
 	if err != nil {
 		return nil, false, err
@@ -297,6 +304,17 @@ func (l localTracesUpstream) GetTrace(ctx context.Context, tenant, traceID strin
 		return nil, false, nil
 	}
 	return canonicalizeTraceRecords(records), true, nil
+}
+
+// isXRayTraceID reports whether id uses the X-Ray 1-<epoch>-<hex> format.
+func isXRayTraceID(id string) bool {
+	parts := strings.Split(strings.TrimSpace(id), "-")
+	if len(parts) != 3 || parts[0] != "1" || len(parts[1]) != 8 || len(parts[2]) < 16 {
+		return false
+	}
+	_, errEpoch := strconv.ParseUint(parts[1], 16, 32)
+	_, errHex := strconv.ParseUint(parts[2][:16], 16, 64)
+	return errEpoch == nil && errHex == nil
 }
 
 // canonicalizeTraceRecords merges the shared canonical label vocabulary into
