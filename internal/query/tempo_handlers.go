@@ -75,14 +75,30 @@ func (s *Service) serveTempoTraceByID(w http.ResponseWriter, r *http.Request, pr
 		warnings []proxy.Warning
 		queryErr error
 	)
-	if s.proxyRouter != nil {
-		records, warnings, queryErr = s.proxyRouter.GetTrace(r.Context(), tenant, traceID)
-		found = len(records) > 0
-	} else {
-		local := localTracesUpstream{svc: s}
-		records, found, queryErr = local.GetTrace(r.Context(), tenant, traceID)
-		if queryErr == nil && !found && s.awsReady() {
-			records, found, queryErr = (s.AWSUpstream()).GetTrace(r.Context(), tenant, traceID)
+	// X-Ray trace IDs are normalized to 32-hex for Tempo, which is
+	// indistinguishable from a native OTel ID. Try the AWS source first so a
+	// federated trace does not trigger an all-time local MonoFS scan.
+	if s.awsReady() {
+		awsRecords, awsFound, awsErr := (s.AWSUpstream()).GetTraceRaw(r.Context(), tenant, traceID)
+		if awsErr == nil && awsFound {
+			if s.policyGate != nil {
+				awsRecords = s.policyGate.FilterSpans(identityFromContext(r.Context()), awsRecords)
+			}
+			if len(awsRecords) == 0 {
+				http.Error(w, "trace not found", http.StatusNotFound)
+				return
+			}
+			records = awsRecords
+			found = true
+		}
+	}
+	if !found {
+		if s.proxyRouter != nil {
+			records, warnings, queryErr = s.proxyRouter.GetTrace(r.Context(), tenant, traceID)
+			found = len(records) > 0
+		} else {
+			local := localTracesUpstream{svc: s}
+			records, found, queryErr = local.GetTrace(r.Context(), tenant, traceID)
 		}
 	}
 	if queryErr != nil {

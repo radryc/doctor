@@ -158,6 +158,7 @@ func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segmen
 		local    []segment.TraceRecord
 		remotes  []TraceRemote
 		warnings = append([]Warning(nil), accessWarnings...)
+		localErr error
 	)
 	found := false
 	for _, res := range results {
@@ -165,7 +166,9 @@ func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segmen
 		if res.err != nil {
 			r.noteBackendFailure(target.backend, res.err)
 			if isLocalBackend(target.backend) {
-				return nil, warnings, res.err
+				localErr = res.err
+				warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: res.err.Error()})
+				continue
 			}
 			warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: res.err.Error()})
 			continue
@@ -186,6 +189,9 @@ func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segmen
 		})
 	}
 	if !found {
+		if localErr != nil {
+			return nil, warnings, localErr
+		}
 		return nil, warnings, nil
 	}
 	return MergeTraceRecords(local, remotes...), warnings, nil

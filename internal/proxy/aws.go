@@ -535,7 +535,25 @@ func awsSummaryTagValue(summary awsstore.TraceSummary, key string) (string, bool
 }
 
 // GetTrace implements TracesUpstream.
-func (u *AWSUpstream) GetTrace(ctx context.Context, _ string, traceID string) ([]segment.TraceRecord, bool, error) {
+func (u *AWSUpstream) GetTrace(ctx context.Context, tenant, traceID string) ([]segment.TraceRecord, bool, error) {
+	records, found, err := u.GetTraceRaw(ctx, tenant, traceID)
+	if err != nil || !found {
+		return records, found, err
+	}
+	if u.FilterSpans != nil {
+		records = u.FilterSpans(ctx, records)
+	}
+	if len(records) == 0 {
+		return nil, false, nil
+	}
+	return records, true, nil
+}
+
+// GetTraceRaw converts an X-Ray trace without applying the caller's partition
+// filter. It lets the HTTP layer distinguish "trace does not exist" from
+// "trace exists but is not visible to this caller" before falling back to a
+// local scan.
+func (u *AWSUpstream) GetTraceRaw(ctx context.Context, _ string, traceID string) ([]segment.TraceRecord, bool, error) {
 	if u.Client == nil || !u.Client.Enabled() {
 		return nil, false, nil
 	}
@@ -568,12 +586,6 @@ func (u *AWSUpstream) GetTrace(ctx context.Context, _ string, traceID string) ([
 			Attributes:   attrs,
 			StatusCode:   span.StatusCode,
 		})
-	}
-	if u.FilterSpans != nil {
-		out = u.FilterSpans(ctx, out)
-	}
-	if len(out) == 0 {
-		return nil, false, nil
 	}
 	return out, true, nil
 }
