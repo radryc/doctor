@@ -184,6 +184,12 @@ Files:
 - [x] `Service.awsViaRouter` prevents double AWS queries.
 - [x] Broad live-AWS metric queries return HTTP 422.
 - [x] Broad live-AWS log queries return HTTP 422.
+- [x] Scope/fan-out rejections are client errors and no longer count as AWS
+  backend failures, so repeated 422s cannot open the router circuit breaker or
+  mark the `aws` endpoint unhealthy.
+- [x] The AWS federation preset keeps its default metric queries scoped by
+  account and its log queries scoped by guardian log group; broad queries are
+  still rejected at fleet scale.
 - [x] Legacy `DOCTOR_AWS_BACKEND_URL` single-backend mode preserved.
 - [x] `/v1/federation/status` endpoint.
 - [x] Status partition map capped at 512 entries; full `partition_count` and
