@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 type fakeAWSClient struct {
 	enabled      bool
+	err          error
 	logs         []awsstore.LogRecord
 	lastLogQuery awsstore.LogQuery
 	metrics      []awsstore.MetricDescriptor
@@ -26,15 +28,24 @@ func (f *fakeAWSClient) ListMetrics(context.Context, string, string) ([]awsstore
 }
 
 func (f *fakeAWSClient) ListServices(context.Context) ([]awsstore.ServiceInfo, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.services, nil
 }
 
 func (f *fakeAWSClient) ListLogGroups(context.Context) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.logGroups, nil
 }
 
 func (f *fakeAWSClient) QueryLogs(_ context.Context, q awsstore.LogQuery) ([]awsstore.LogRecord, error) {
 	f.lastLogQuery = q
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.logs, nil
 }
 
@@ -117,10 +128,13 @@ func TestAWSLogsForLokiConvertsRecords(t *testing.T) {
 		}},
 	}
 
-	records := AWSLogsForLoki(context.Background(), client, "default", LogPushdown{
+	records, err := AWSLogsForLoki(context.Background(), client, "default", LogPushdown{
 		Selector:    `{source="aws",aws_log_group="/ecs/api"}`,
 		LineFilters: []LogLineFilter{{Op: "|=", Value: "boom"}},
 	}, base.Add(-time.Hour), base, 100)
+	if err != nil {
+		t.Fatalf("AWSLogsForLoki: %v", err)
+	}
 
 	if len(records) != 1 {
 		t.Fatalf("records = %d, want 1", len(records))
@@ -151,14 +165,34 @@ func TestAWSLogsForLokiConvertsRecords(t *testing.T) {
 
 func TestAWSLogsForLokiSkipsNonAWSSelector(t *testing.T) {
 	client := &fakeAWSClient{enabled: true}
-	records := AWSLogsForLoki(context.Background(), client, "default", LogPushdown{
+	records, err := AWSLogsForLoki(context.Background(), client, "default", LogPushdown{
 		Selector: `{service="api"}`,
 	}, time.Time{}, time.Now(), 10)
+	if err != nil {
+		t.Fatalf("AWSLogsForLoki: %v", err)
+	}
 	if records != nil {
 		t.Fatalf("records = %#v, want nil", records)
 	}
 	if client.lastLogQuery.LogGroups != nil {
 		t.Fatalf("client was queried for a non-AWS selector")
+	}
+}
+
+func TestAWSLogsForLokiPropagatesErrors(t *testing.T) {
+	client := &fakeAWSClient{enabled: true, err: errors.New("insights unavailable")}
+	_, err := AWSLogsForLoki(context.Background(), client, "default", LogPushdown{
+		Selector: `{source="aws",aws_log_group="/ecs/api"}`,
+	}, time.Now().Add(-time.Hour), time.Now(), 10)
+	if err == nil {
+		t.Fatal("expected AWS logs error")
+	}
+}
+
+func TestAWSServicesPropagatesErrors(t *testing.T) {
+	client := &fakeAWSClient{enabled: true, err: errors.New("xray unavailable")}
+	if _, err := AWSServices(context.Background(), client); err == nil {
+		t.Fatal("expected AWS services error")
 	}
 }
 

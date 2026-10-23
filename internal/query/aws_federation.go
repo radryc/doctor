@@ -35,10 +35,14 @@ func awsPartition(region, account string) string {
 }
 
 // queryAWSLogsForLoki executes a parsed LogQL plan against CloudWatch Logs when
-// it targets the AWS federated source. Errors are swallowed so native logs still
-// return.
+// it targets the AWS federated source. Failures become request warnings so
+// native logs still return with a partial-result header.
 func (s *Service) queryAWSLogsForLoki(ctx context.Context, tenant string, plan lokiPlan, from, to time.Time, limit int) []segment.LogRecord {
-	records := proxy.AWSLogsForLoki(ctx, s.aws, tenant, logPushdown(plan), from, to, limit)
+	records, err := proxy.AWSLogsForLoki(ctx, s.aws, tenant, logPushdown(plan), from, to, limit)
+	if err != nil {
+		proxy.AddWarning(ctx, proxy.Warning{Backend: "aws", Signal: proxy.SignalLogs, Message: err.Error()})
+		return nil
+	}
 	if s.policyGate != nil {
 		records = s.policyGate.FilterLogs(identityFromContext(ctx), records)
 	}
@@ -85,6 +89,7 @@ func (s *Service) awsServiceInfos(ctx context.Context) []awsstore.ServiceInfo {
 	}
 	services, err := s.aws.ListServices(ctx)
 	if err != nil {
+		proxy.AddWarning(ctx, proxy.Warning{Backend: "aws", Signal: proxy.SignalTraces, Message: err.Error()})
 		return nil
 	}
 	return services
@@ -92,5 +97,10 @@ func (s *Service) awsServiceInfos(ctx context.Context) []awsstore.ServiceInfo {
 
 // awsServices returns X-Ray service names.
 func (s *Service) awsServices(ctx context.Context) []string {
-	return proxy.AWSServices(ctx, s.aws)
+	services, err := proxy.AWSServices(ctx, s.aws)
+	if err != nil {
+		proxy.AddWarning(ctx, proxy.Warning{Backend: "aws", Signal: proxy.SignalTraces, Message: err.Error()})
+		return nil
+	}
+	return services
 }
