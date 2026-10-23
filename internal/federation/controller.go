@@ -207,11 +207,18 @@ func (c *Controller) renewLease(ctx context.Context) {
 }
 
 // Sync performs one Guardian -> metadata -> catalog -> publish cycle.
-func (c *Controller) Sync(ctx context.Context) error {
+func (c *Controller) Sync(ctx context.Context) (err error) {
 	if c == nil || c.Guardian == nil {
 		return errors.New("federation controller Guardian feed is required")
 	}
 	start := time.Now()
+	defer func() {
+		result := "success"
+		if err != nil {
+			result = "error"
+		}
+		RecordControllerSync(result, time.Since(start))
+	}()
 	pushers, tokensByPusher, err := c.Guardian.Pushers(ctx)
 	if err != nil {
 		return err
@@ -272,10 +279,13 @@ func (c *Controller) Sync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	publishStarted := time.Now()
 	version, err := c.Store.Save(ctx, result.Snapshot, expected)
 	if err != nil {
+		RecordControllerPublish("error", time.Since(publishStarted))
 		return err
 	}
+	RecordControllerPublish("success", time.Since(publishStarted))
 	if err := c.saveMetadataCache(ctx); err != nil {
 		c.Config.Logger.Printf("federation controller: metadata cache save failed: %v", err)
 	}

@@ -90,6 +90,13 @@ func TestDoctorSelfPresetHasFederationCatalogPanels(t *testing.T) {
 		"doctor-catalog-targets-region": false,
 		"doctor-catalog-reloads":        false,
 		"doctor-catalog-reload-latency": false,
+		"doctor-fanout-requests":        false,
+		"doctor-fanout-p95":             false,
+		"doctor-fanout-partials":        false,
+		"doctor-fanout-circuits":        false,
+		"doctor-plan-rate":              false,
+		"doctor-token-cache":            false,
+		"doctor-controller-publishes":   false,
 	}
 	for _, widget := range preset.Layout {
 		if _, ok := want[widget.ID]; !ok {
@@ -101,6 +108,7 @@ func TestDoctorSelfPresetHasFederationCatalogPanels(t *testing.T) {
 				continue
 			}
 			resolved := strings.ReplaceAll(query.Expr, "$__rate_interval", "5m")
+			resolved = strings.ReplaceAll(resolved, "$__range", "1h")
 			if _, err := promparser.NewParser(promparser.Options{}).ParseExpr(resolved); err != nil {
 				t.Fatalf("%s query %q is not valid PromQL: %v", widget.ID, resolved, err)
 			}

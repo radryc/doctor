@@ -337,6 +337,46 @@ Files:
 - `doctor/internal/proxy/warnings.go`
 - `doctor/internal/query/warnings_middleware.go`
 
+## PR6 — Federation observability
+
+- [x] Planner metrics: `doctor_federation_plan_total`,
+  `doctor_federation_plan_matched`, `doctor_federation_plan_selected`, and
+  `doctor_federation_plan_duration_seconds`.
+- [x] Fan-out metrics: `doctor_federation_fanout_requests`,
+  `doctor_federation_fanout_errors`,
+  `doctor_federation_fanout_duration_seconds`, and
+  `doctor_federation_partial`.
+- [x] Circuit and token gauges:
+  `doctor_federation_circuit_open`,
+  `doctor_federation_token_resolves`,
+  `doctor_federation_token_errors`,
+  `doctor_federation_token_invalidations`,
+  `doctor_federation_token_cache_entries`.
+- [x] Controller metrics:
+  `doctor_federation_controller_syncs`,
+  `doctor_federation_controller_publishes`,
+  `doctor_federation_controller_metadata_fetches`,
+  `doctor_federation_controller_build_duration_seconds`, and
+  `doctor_federation_controller_publish_duration_seconds`.
+- [x] Response headers:
+  `X-Doctor-Federation-Version`, `X-Doctor-Fanout-Matched`,
+  `X-Doctor-Fanout-Selected`, `X-Doctor-Partial`, and
+  `X-Doctor-Partial-Count`.
+- [x] `GET /v1/federation/plan?query=&signal=` planner debug endpoint.
+- [x] Doctor Self dashboard panels for fan-out rate, p95, partials, open
+  circuits, plan rate, token cache, and controller syncs.
+- [x] Tests cover warning/federation headers and dashboard panel PromQL.
+- [x] Live verification: scoped CPU queries carry
+  `X-Doctor-Federation-Version`, `X-Doctor-Fanout-Matched`, and
+  `X-Doctor-Fanout-Selected`; `/v1/federation/plan` returns the expected
+  single target; the dashboard exposes all new panels.
+- [x] Live metrics observed: `doctor_federation_fanout_requests`,
+  `doctor_federation_plan_total`, `doctor_federation_partial`,
+  `doctor_federation_controller_syncs`, and
+  `doctor_federation_controller_publishes`.
+- [x] Partial-failure test still returns 2 of 3 series with
+  `X-Doctor-Partial` and increments `doctor_federation_partial`.
+
 ## Live verification
 
 Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.

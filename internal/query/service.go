@@ -90,6 +90,10 @@ type federationTargetProvider interface {
 	TargetsPage(context.Context, string, string, string, string, string, int) federation.TargetPage
 }
 
+type federationPlanProvider interface {
+	DebugPlan(context.Context, string, federation.Signal, string, string, string) map[string]any
+}
+
 func (s *Service) handleFederationStatus(w http.ResponseWriter, _ *http.Request) {
 	if provider, ok := s.aws.(federationStatusProvider); ok {
 		writeJSON(w, http.StatusOK, provider.Status())
@@ -100,6 +104,25 @@ func (s *Service) handleFederationStatus(w http.ResponseWriter, _ *http.Request)
 
 // handleFederationTargets returns the paginated target detail view. Tokens are
 // never included; only routing metadata and circuit health are exposed.
+// handleFederationPlan exposes the planner decision for admin debugging.
+func (s *Service) handleFederationPlan(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.aws.(federationPlanProvider)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	q := r.URL.Query()
+	signal := federation.Signal(strings.ToLower(strings.TrimSpace(q.Get("signal"))))
+	writeJSON(w, http.StatusOK, provider.DebugPlan(
+		r.Context(),
+		q.Get("query"),
+		signal,
+		q.Get("account"),
+		q.Get("region"),
+		q.Get("partition"),
+	))
+}
+
 func (s *Service) handleFederationTargets(w http.ResponseWriter, r *http.Request) {
 	provider, ok := s.aws.(federationTargetProvider)
 	if !ok {
@@ -556,6 +579,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/logs/search", s.handleLogSearch)
 	mux.HandleFunc("/v1/federation/status", s.handleFederationStatus)
 	mux.HandleFunc("/v1/federation/targets", s.handleFederationTargets)
+	mux.HandleFunc("/v1/federation/plan", s.handleFederationPlan)
 	mux.HandleFunc("/v1/metrics/range", s.handleMetricRange)
 	mux.HandleFunc("/v1/rules", s.handleRulesProxy)
 	mux.HandleFunc("/v1/rules/", s.handleRulesProxy)

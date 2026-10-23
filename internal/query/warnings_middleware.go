@@ -1,10 +1,12 @@
 package query
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/rydzu/ainfra/doctor/internal/federation"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 )
 
@@ -15,8 +17,9 @@ import (
 // federation failures).
 type warningResponseWriter struct {
 	http.ResponseWriter
-	collector *proxy.WarningCollector
-	wrote     bool
+	collector      *proxy.WarningCollector
+	requestContext context.Context
+	wrote          bool
 }
 
 func (w *warningResponseWriter) WriteHeader(statusCode int) {
@@ -42,6 +45,18 @@ func (w *warningResponseWriter) Unwrap() http.ResponseWriter {
 func (w *warningResponseWriter) applyWarnings() {
 	if w.collector == nil {
 		return
+	}
+	if meta := federation.RequestMetaFromContext(w.requestContext); meta != nil {
+		version, matched, selected := meta.HeaderValues()
+		if version != "" {
+			w.Header().Set("X-Doctor-Federation-Version", version)
+		}
+		if matched != "" {
+			w.Header().Set("X-Doctor-Fanout-Matched", matched)
+		}
+		if selected != "" {
+			w.Header().Set("X-Doctor-Fanout-Selected", selected)
+		}
 	}
 	warnings := w.collector.Warnings()
 	if len(warnings) == 0 {
@@ -71,6 +86,7 @@ func (w *warningResponseWriter) applyWarnings() {
 func withWarningHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, collector := proxy.WithWarningCollector(r.Context())
-		next.ServeHTTP(&warningResponseWriter{ResponseWriter: w, collector: collector}, r.WithContext(ctx))
+		ctx, _ = federation.WithRequestMeta(ctx)
+		next.ServeHTTP(&warningResponseWriter{ResponseWriter: w, collector: collector, requestContext: ctx}, r.WithContext(ctx))
 	})
 }

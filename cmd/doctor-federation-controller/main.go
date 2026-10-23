@@ -12,6 +12,7 @@ import (
 
 	"github.com/rydzu/ainfra/doctor/internal/federation"
 	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
+	"github.com/rydzu/ainfra/doctor/internal/telemetry"
 )
 
 func main() {
@@ -42,6 +43,22 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	telemetryCfg, err := telemetry.LoadConfig("doctor-federation-controller")
+	if err != nil {
+		log.Fatalf("load telemetry config: %v", err)
+	}
+	telemetryHandle, err := telemetry.Setup(ctx, telemetryCfg)
+	if err != nil {
+		log.Fatalf("set up telemetry: %v", err)
+	}
+	if telemetryHandle.Enabled() {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = telemetryHandle.Shutdown(shutdownCtx)
+		}()
+	}
 
 	client, err := monofsstore.NewGRPCClient(ctx, monofsstore.ClientConfig{
 		RouterAddr:  *monofsRouter,

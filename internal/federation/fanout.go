@@ -35,6 +35,8 @@ func fanoutTargets[T any](
 		if !m.breakerAllow(target.ID, time.Now().UTC()) {
 			results[index] = fanoutResult[T]{target: target, err: errTargetCircuitOpen}
 			proxy.AddWarning(ctx, fanoutWarning(target, signal, errTargetCircuitOpen))
+			m.metrics.RecordFanout(string(signal), "circuit_open", 0)
+			m.metrics.RecordPartial()
 			continue
 		}
 		wg.Add(1)
@@ -58,16 +60,22 @@ func fanoutTargets[T any](
 			}
 			defer func() { <-m.inflight }()
 
+			started := time.Now()
 			value, err := callTargetWithRetry(m, ctx, target, call)
+			elapsed := time.Since(started)
 			results[index] = fanoutResult[T]{target: target, value: value, err: err}
 			switch {
 			case err == nil:
 				m.noteTargetSuccess(target.ID)
-				m.recordLatency(target, string(signal), 0)
+				m.metrics.RecordFanout(string(signal), "success", elapsed)
+				m.recordLatency(target, string(signal), elapsed)
 			case ctx.Err() != nil:
 				m.noteTargetAbort(target.ID)
+				m.metrics.RecordFanout(string(signal), "canceled", elapsed)
 			default:
 				m.noteTargetFailure(target.ID, err)
+				m.metrics.RecordFanout(string(signal), "error", elapsed)
+				m.metrics.RecordPartial()
 				proxy.AddWarning(ctx, fanoutWarning(target, signal, err))
 			}
 		}(index, target)

@@ -81,10 +81,10 @@ type ThresholdLevel struct {
 
 // WidgetVisualization controls display settings for a widget.
 type WidgetVisualization struct {
-	DisplayMode     string           `json:"displayMode,omitempty" yaml:"displayMode,omitempty"`         // "line", "area", "bars"
+	DisplayMode     string           `json:"displayMode,omitempty" yaml:"displayMode,omitempty"` // "line", "area", "bars"
 	Stacked         bool             `json:"stacked,omitempty" yaml:"stacked,omitempty"`
 	ShowExemplars   bool             `json:"showExemplars,omitempty" yaml:"showExemplars,omitempty"`
-	Unit            string           `json:"unit,omitempty" yaml:"unit,omitempty"`                       // "none", "short", "percent", "seconds", "ms", "bytes", "bps", "reqps"
+	Unit            string           `json:"unit,omitempty" yaml:"unit,omitempty"` // "none", "short", "percent", "seconds", "ms", "bytes", "bps", "reqps"
 	Decimals        int              `json:"decimals,omitempty" yaml:"decimals,omitempty"`
 	Thresholds      []ThresholdLevel `json:"thresholds,omitempty" yaml:"thresholds,omitempty"`
 	MarkdownContent string           `json:"markdownContent,omitempty" yaml:"markdownContent,omitempty"`

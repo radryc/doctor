@@ -41,11 +41,22 @@ type targetTokenSource struct {
 }
 
 func (s targetTokenSource) Token(ctx context.Context) (string, error) {
-	return s.resolver.Resolve(ctx, s.target)
+	token, err := s.resolver.Resolve(ctx, s.target)
+	if metrics := activeMetrics(); metrics != nil {
+		result := "success"
+		if err != nil {
+			result = "error"
+		}
+		metrics.RecordTokenResolve(result)
+	}
+	return token, err
 }
 
 func (s targetTokenSource) Invalidate() {
 	s.resolver.Invalidate(s.target)
+	if metrics := activeMetrics(); metrics != nil {
+		metrics.RecordTokenInvalidate()
+	}
 }
 
 // EnvTokenResolver is the development/demo resolver for token_env. It is not
@@ -106,6 +117,17 @@ func (chain ChainTokenResolver) Invalidate(target Target) {
 			resolver.Invalidate(target)
 		}
 	}
+}
+
+// CacheSize reports the sum of resolver caches that expose a size.
+func (chain ChainTokenResolver) CacheSize() int {
+	total := 0
+	for _, resolver := range chain {
+		if sizer, ok := resolver.(interface{ CacheSize() int }); ok {
+			total += sizer.CacheSize()
+		}
+	}
+	return total
 }
 
 // GuardianTokenResolverOptions configures the lazy Guardian pusher-token
@@ -215,6 +237,16 @@ func (r *GuardianTokenResolver) Invalidate(target Target) {
 	r.mu.Lock()
 	delete(r.cache, name)
 	r.mu.Unlock()
+}
+
+// CacheSize reports the number of cached pusher entries.
+func (r *GuardianTokenResolver) CacheSize() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.cache)
 }
 
 func (r *GuardianTokenResolver) fetch(ctx context.Context, name string) (string, error) {
@@ -409,6 +441,16 @@ func (r *BundleTokenResolver) Invalidate(target Target) {
 	r.mu.Lock()
 	delete(r.shards, shard)
 	r.mu.Unlock()
+}
+
+// CacheSize reports the number of cached shards.
+func (r *BundleTokenResolver) CacheSize() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.shards)
 }
 
 func (r *BundleTokenResolver) shardFor(targetID string) int {

@@ -239,6 +239,11 @@ func (c *Controller) refreshMetadata(ctx context.Context, pushers []PusherInfo, 
 				fetchCtx, cancel := context.WithTimeout(ctx, c.Config.MetadataTimeout)
 				meta, err := c.Metadata.Fetch(fetchCtx, item.pusher.Endpoint, item.token)
 				cancel()
+				if err != nil {
+					RecordMetadataFetch("error")
+				} else {
+					RecordMetadataFetch("success")
+				}
 				mu.Lock()
 				if err != nil {
 					warnings = append(warnings, fmt.Sprintf("metadata %s: %v", item.pusher.Name, err))
