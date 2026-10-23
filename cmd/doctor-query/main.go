@@ -161,6 +161,7 @@ func main() {
 			ClientIdleTTL:        cfg.FederationClientIdleTTL,
 			BreakerThreshold:     cfg.FederationBreakerThreshold,
 			BreakerCooldown:      cfg.FederationBreakerCooldown,
+			MetadataTTL:          cfg.FederationMetadataTTL,
 			Timeout:              cfg.FederationTimeout,
 			StaleAfter:           cfg.FederationStaleAfter,
 			Source:               source,

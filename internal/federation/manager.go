@@ -27,6 +27,7 @@ type Options struct {
 	ClientIdleTTL        time.Duration
 	BreakerThreshold     int
 	BreakerCooldown      time.Duration
+	MetadataTTL          time.Duration
 	Timeout              time.Duration
 	StaleAfter           time.Duration
 	Source               string
@@ -56,10 +57,16 @@ type Manager struct {
 	metrics              *CatalogMetrics
 	breakerThreshold     int
 	breakerCooldown      time.Duration
+	metadataTTL          time.Duration
 	logger               *log.Logger
 
 	inflight chan struct{}
-	pool     *clientPool
+
+	discoveryMu        sync.Mutex
+	servicesCache      []awsstore.ServiceInfo
+	servicesCachedAt   time.Time
+	servicesCacheValid bool
+	pool               *clientPool
 
 	breakerMu sync.Mutex
 	breakers  map[string]*targetBreaker
@@ -90,6 +97,9 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 	}
 	if opts.BreakerCooldown <= 0 {
 		opts.BreakerCooldown = 30 * time.Second
+	}
+	if opts.MetadataTTL <= 0 {
+		opts.MetadataTTL = time.Hour
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 5 * time.Second
@@ -124,6 +134,7 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 		maxAttempts:          opts.MaxAttempts,
 		breakerThreshold:     opts.BreakerThreshold,
 		breakerCooldown:      opts.BreakerCooldown,
+		metadataTTL:          opts.MetadataTTL,
 		logger:               opts.Logger,
 		inflight:             make(chan struct{}, opts.MaxInflight),
 		pool:                 newClientPool(opts.ClientPoolMax, opts.ClientIdleTTL),
@@ -185,6 +196,7 @@ func (m *Manager) Reload(catalog *Catalog, source string) error {
 		loadedAt: time.Now().UTC(),
 	}
 	previous := m.state.Swap(next)
+	m.invalidateDiscoveryCache()
 	m.pruneClients(catalog)
 	if previous != nil && previous.catalog != nil {
 		m.logger.Printf("federation catalog reloaded: %s -> %s (%d targets)",
@@ -193,6 +205,35 @@ func (m *Manager) Reload(catalog *Catalog, source string) error {
 		m.logger.Printf("federation catalog loaded: %s (%d targets)", catalog.Version(), catalog.Len())
 	}
 	return nil
+}
+
+func (m *Manager) invalidateDiscoveryCache() {
+	m.discoveryMu.Lock()
+	m.servicesCache = nil
+	m.servicesCachedAt = time.Time{}
+	m.servicesCacheValid = false
+	m.discoveryMu.Unlock()
+}
+
+func (m *Manager) cachedServices() ([]awsstore.ServiceInfo, bool) {
+	m.discoveryMu.Lock()
+	defer m.discoveryMu.Unlock()
+	if !m.servicesCacheValid {
+		return nil, false
+	}
+	if m.metadataTTL > 0 && time.Since(m.servicesCachedAt) > m.metadataTTL {
+		m.servicesCacheValid = false
+		return nil, false
+	}
+	return append([]awsstore.ServiceInfo(nil), m.servicesCache...), true
+}
+
+func (m *Manager) storeCachedServices(services []awsstore.ServiceInfo) {
+	m.discoveryMu.Lock()
+	m.servicesCache = append([]awsstore.ServiceInfo(nil), services...)
+	m.servicesCachedAt = time.Now().UTC()
+	m.servicesCacheValid = true
+	m.discoveryMu.Unlock()
 }
 
 func (m *Manager) pruneClients(catalog *Catalog) {
@@ -408,28 +449,41 @@ func (m *Manager) ListServices(ctx context.Context) ([]awsstore.ServiceInfo, err
 	if state == nil || state.catalog == nil || state.catalog.Len() == 0 {
 		return nil, errors.New("aws federation is disabled")
 	}
+	if services, ok := m.cachedServices(); ok {
+		return services, nil
+	}
 	targets := state.catalog.Targets()
+	now := time.Now().UTC()
+
 	cached := make([]awsstore.ServiceInfo, 0)
+	stale := make([]Target, 0)
 	for _, target := range targets {
 		for _, name := range target.XrayServices {
 			cached = append(cached, awsstore.ServiceInfo{Name: name, Region: target.Region, Account: target.Account})
 		}
+		if target.MetadataFetchedAt.IsZero() || now.Sub(target.MetadataFetchedAt) > m.metadataTTL {
+			stale = append(stale, target)
+		}
 	}
-	if len(cached) > 0 {
+	if len(stale) == 0 {
+		result := dedupeServices(cached)
+		m.storeCachedServices(result)
+		return result, nil
+	}
+	if len(stale) > state.planner.MaxFanout() {
+		// The controller should populate metadata for fleet-scale catalogs.
+		// Never turn an empty discovery cache into an unbounded request fan-out.
 		return dedupeServices(cached), nil
 	}
-	if len(targets) > state.planner.MaxFanout() {
-		return nil, nil
-	}
 
-	results := fanoutTargets(m, ctx, targets, SignalTraces, func(callCtx context.Context, target Target) ([]awsstore.ServiceInfo, error) {
+	results := fanoutTargets(m, ctx, stale, SignalTraces, func(callCtx context.Context, target Target) ([]awsstore.ServiceInfo, error) {
 		client, err := m.clientFor(target)
 		if err != nil {
 			return nil, err
 		}
 		return client.ListServices(callCtx)
 	})
-	out := make([]awsstore.ServiceInfo, 0)
+	out := append([]awsstore.ServiceInfo(nil), cached...)
 	failures := 0
 	for _, result := range results {
 		if result.err != nil {
@@ -439,10 +493,12 @@ func (m *Manager) ListServices(ctx context.Context) ([]awsstore.ServiceInfo, err
 		}
 		out = append(out, result.value...)
 	}
-	if len(out) == 0 && failures == len(targets) {
+	if len(out) == 0 && failures == len(stale) {
 		return nil, fmt.Errorf("aws federation: all %d targets failed ListServices", failures)
 	}
-	return dedupeServices(out), nil
+	result := dedupeServices(out)
+	m.storeCachedServices(result)
+	return result, nil
 }
 
 // ListLogGroups returns the union of cached log groups.
