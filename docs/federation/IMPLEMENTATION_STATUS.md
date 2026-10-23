@@ -323,6 +323,10 @@ Files:
   pool size. `GET /v1/federation/targets` provides paginated target detail.
 - [x] Tests: retry, breaker open/half-open close, LRU eviction, warning headers,
   target pagination, and API error propagation.
+- [x] Live partial-failure verification: with one of three pushers stopped, the
+  scoped CPU query returned 2 series with `X-Doctor-Partial`; after five
+  failures the target circuit opened, the sixth query skipped it, and a
+  restarted pusher closed the half-open probe with 3 series.
 
 Files:
 
