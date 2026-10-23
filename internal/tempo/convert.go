@@ -232,6 +232,48 @@ func TagScopesFromRecords(records []segment.TraceRecord) []TagScope {
 	return scopes
 }
 
+// TagScopesFromNames classifies discovered tag names into Tempo's intrinsic,
+// resource, and span scopes. MonoFS discovery cannot always preserve the
+// original resource/span split, so known resource prefixes are used.
+func TagScopesFromNames(names []string) []TagScope {
+	intrinsic := map[string]struct{}{"name": {}, "status": {}, "kind": {}, "duration": {}}
+	resource := map[string]struct{}{"service.name": {}}
+	span := map[string]struct{}{}
+	for _, name := range names {
+		if _, ok := intrinsic[name]; ok {
+			continue
+		}
+		switch {
+		case name == "service.name" || strings.HasPrefix(name, "service.") ||
+			strings.HasPrefix(name, "k8s.") || strings.HasPrefix(name, "host.") ||
+			strings.HasPrefix(name, "container.") || strings.HasPrefix(name, "cloud.") ||
+			strings.HasPrefix(name, "guardian.") || strings.HasPrefix(name, "aws."):
+			resource[name] = struct{}{}
+		default:
+			span[name] = struct{}{}
+		}
+	}
+	scopes := make([]TagScope, 0, 3)
+	for _, scope := range []struct {
+		name string
+		tags map[string]struct{}
+	}{
+		{"intrinsic", intrinsic},
+		{"resource", resource},
+		{"span", span},
+	} {
+		tags := make([]string, 0, len(scope.tags))
+		for tag := range scope.tags {
+			tags = append(tags, tag)
+		}
+		sort.Strings(tags)
+		if len(tags) > 0 {
+			scopes = append(scopes, TagScope{Name: scope.name, Tags: tags})
+		}
+	}
+	return scopes
+}
+
 // TagValuesFromRecords collects values for one tag from recent spans.
 func TagValuesFromRecords(records []segment.TraceRecord, tag string) []string {
 	values := map[string]struct{}{}

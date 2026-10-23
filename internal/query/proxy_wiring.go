@@ -185,13 +185,37 @@ const (
 	logQueryRecordLimit     = 5000
 )
 
+type traceDiscoverySource interface {
+	QueryTraceDiscovery(ctx context.Context, tenant, discovery, tag string, from, to time.Time) ([]string, error)
+}
+
 type localTracesUpstream struct {
 	svc *Service
+}
+
+func (l localTracesUpstream) discovery(ctx context.Context, tenant, kind, tag string) ([]string, bool, error) {
+	source, ok := l.svc.logEngine.(traceDiscoverySource)
+	if !ok {
+		return nil, false, nil
+	}
+	end := time.Now().UTC()
+	values, err := source.QueryTraceDiscovery(ctx, tenant, kind, tag, end.Add(-doctorDiscoveryWindow), end)
+	if err != nil {
+		// During a rolling MonoFS upgrade the client may be newer than the
+		// server. Fall back to the legacy span scan rather than breaking the
+		// service/tag picker.
+		proxy.AddWarning(ctx, proxy.Warning{Backend: "monofs", Signal: proxy.SignalTraces, Message: "trace discovery unavailable: " + err.Error()})
+		return nil, false, nil
+	}
+	return values, true, nil
 }
 
 func (l localTracesUpstream) Name() string { return proxy.SourceDoctor }
 
 func (l localTracesUpstream) ListServices(ctx context.Context, tenant string) ([]string, error) {
+	if services, ok, err := l.discovery(ctx, tenant, "services", ""); ok {
+		return services, err
+	}
 	records, err := l.recentRecords(ctx, tenant)
 	if err != nil {
 		return nil, err
@@ -296,6 +320,9 @@ func canonicalizeTraceRecords(records []segment.TraceRecord) []segment.TraceReco
 }
 
 func (l localTracesUpstream) TraceTags(ctx context.Context, tenant string) ([]string, error) {
+	if tags, ok, err := l.discovery(ctx, tenant, "tags", ""); ok {
+		return tags, err
+	}
 	records, err := l.recentRecords(ctx, tenant)
 	if err != nil {
 		return nil, err
@@ -305,6 +332,12 @@ func (l localTracesUpstream) TraceTags(ctx context.Context, tenant string) ([]st
 
 // TraceTagScopes implements proxy.TraceTagScopeSource (Tempo v2 tags).
 func (l localTracesUpstream) TraceTagScopes(ctx context.Context, tenant string) ([]tempo.TagScope, error) {
+	if tags, ok, err := l.discovery(ctx, tenant, "tags", ""); ok {
+		if err != nil {
+			return nil, err
+		}
+		return tempo.TagScopesFromNames(tags), nil
+	}
 	records, err := l.recentRecords(ctx, tenant)
 	if err != nil {
 		return nil, err
@@ -391,6 +424,9 @@ func stringAttributes(attrs map[string]string) []tempo.KeyValue {
 }
 
 func (l localTracesUpstream) TraceTagValues(ctx context.Context, tenant, tag string) ([]string, error) {
+	if values, ok, err := l.discovery(ctx, tenant, "tag_values", tag); ok {
+		return values, err
+	}
 	records, err := l.recentRecords(ctx, tenant)
 	if err != nil {
 		return nil, err
