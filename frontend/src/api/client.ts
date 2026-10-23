@@ -153,6 +153,9 @@ export const api = {
     );
   },
 
+  // Generic native API GET used by dashboard table widgets.
+  getNativeJSON: <T>(path: string) => fetchJSON<T>(path),
+
   // ── Guardian Synthetic Probes ───────────────────────────────────────────────
   getProbes: (params?: URLSearchParams) => {
     const query = params?.toString();
