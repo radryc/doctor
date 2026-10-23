@@ -132,10 +132,10 @@ Files:
   DivisionB only; admin sees all. `demo.sh verify` passes.
 - [x] PR1 budget tests pass: 150k catalog ~0.8s; 300-shard save/load
   ~0.75s/0.12s.
-- [ ] X-Ray end-to-end still has no trace data: Lambda is deployed with
-  `TracingConfig=Active` and X-Ray IAM permissions, but
-  `GetTraceSummaries` returns 0. This is an AWS-demo/account issue, not the
-  resolver path.
+- [x] X-Ray end-to-end live: after fixing the account trace-segment
+  destination, `GetTraceSummaries`, `BatchGetTraces`, Doctor search, tag
+  values, and trace detail all return sampled Lambda traces for all three
+  accounts. See "X-Ray live E2E unblock" below.
 
 Files:
 
@@ -452,16 +452,41 @@ Files:
   MonoFS upgrade it falls back to the legacy scan if the server is older.
 - [x] Old chunks without index metadata fall back to a one-time scan; newly
   ingested chunks use the manifest index.
-- [ ] MonoFS server/router images still need to be rolled for live use.
-- [ ] A cold first page load can still pay the local trace scan cost; a
-  background/indexed discovery path is the next optimization.
+- [x] MonoFS server images rolled live (`monofs-server:trace-prune3`).
+- [x] Native `chunk-<minNano>-<maxNano>` IDs are time-pruned. Previously only
+  `ts_` IDs were parsed, so every trace query scanned all chunk manifests
+  (34k+ on the demo node). Local trace search dropped from a 15s timeout to
+  **~0.44s**.
+- [x] Manifest prefetch runs with bounded concurrency (64) and is reused by
+  trace discovery; `service.name` values read the manifest service field
+  directly.
+- [x] Doctor bounds local discovery to `DOCTOR_TRACE_DISCOVERY_WINDOW`
+  (default 1h) instead of the 24h generic query window.
+- [x] Old chunks without tag metadata still use a compatibility scan; newly
+  ingested chunks use the manifest index.
+- [ ] A durable hourly discovery index is still needed for multi-day tag
+  pickers; the current index avoids span reads but still reads one manifest
+  per chunk in the window.
 
-- [ ] Live X-Ray E2E remains blocked: the demo Lambdas have
-  `TracingConfig=Active`, have `xray:PutTraceSegments`, and receive
-  invocations. Lambda logs show generated `XRAY TraceId` values with
-  `Sampled: true`, but `GetTraceSummaries` and `BatchGetTraces` still return no
-  traces. This points at account-level X-Ray upload/visibility, not the Doctor
-  routing layer. The fake-pusher E2E and merge/dedupe paths are verified.
+### X-Ray live E2E unblock
+
+- Root cause: all three demo accounts had X-Ray transaction-search destination
+  set to `CloudWatchLogs`, but the required spans log group was absent.
+  `PutTraceSegments` failed with
+  `InvalidRequestException: The specified log group does not exist`.
+- Fix: switched the destination back to classic X-Ray
+  (`aws xray update-trace-segment-destination --destination XRay`) and waited
+  for `Status=ACTIVE`. No Doctor code change was needed for ingestion.
+- Verified: synthetic `PutTraceSegments` → `BatchGetTraces`; Lambda
+  `TracingConfig=Active` invocations → `GetTraceSummaries`; Doctor admin
+  search returned 12 AWS traces across all three accounts; `usera` saw the two
+  DivisionA services and `userb` saw only DivisionB.
+- Cross-division trace detail is denied in ~0.4s (`404 trace not found`) and
+  no longer falls back to an all-time local scan. Admin/userb trace detail
+  returns in ~0.4s.
+- Transaction Search can be re-enabled later by using the CloudWatch console
+  or the documented API flow and letting AWS create/manage the spans log group;
+  do not manually create the reserved `aws/spans` group.
 
 Files:
 
@@ -477,6 +502,11 @@ Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.
 - [x] Metrics: `Invocations{source="aws",account="<account>"}` returned 2 series for each of the three accounts.
 - [x] Logs: `federation-probe-<partition>` returned for each account's log group.
 - [x] Wildcard logs: `{source="aws", aws_log_group=~".*"}` returned all three accounts.
+- [x] X-Ray traces: `GET /api/search?tags=source=aws` returned **12 traces**
+  across `div-a-orders`, `div-a-billing`, and `div-b-inventory` in ~0.40s.
+- [x] Trace tag values: `service.name` returned all three AWS services in
+  ~0.19–0.45s for admin; `usera` saw only DivisionA services and `userb` only
+  DivisionB.
 - [x] Grafana Prometheus datasource:
   - All partitions → 3 series.
   - `div-a-orders` → 1 series.
