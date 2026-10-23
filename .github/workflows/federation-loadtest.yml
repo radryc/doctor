@@ -14,20 +14,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Checkout Doctor
         uses: actions/checkout@v4
+        with:
+          path: doctor
+
+      # doctor/go.mod replaces github.com/radryc/monofs with ../monofs.
+      - name: Checkout MonoFS
+        uses: actions/checkout@v4
+        with:
+          repository: radryc/monofs
+          path: monofs
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: doctor/go.mod
           cache: true
+          cache-dependency-path: doctor/go.sum
 
       - name: Download modules
+        working-directory: doctor
         run: go mod download
 
       - name: Federation load and chaos budgets
+        working-directory: doctor
         run: make loadtest-federation
 
       - name: Federation race chaos
+        working-directory: doctor
         run: make loadtest-federation-race
