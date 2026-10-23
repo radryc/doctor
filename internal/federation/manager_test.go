@@ -3,6 +3,8 @@ package federation
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -293,5 +295,43 @@ func TestManagerPartialFailureReturnsRemainingData(t *testing.T) {
 	}
 	if got := len(proxy.PrometheusResultSlice(proxy.ExtractPrometheusData(resp))); got != 1 {
 		t.Fatalf("result length = %d, want 1", got)
+	}
+}
+
+type staticTokenResolver struct {
+	token string
+}
+
+func (s staticTokenResolver) Resolve(context.Context, Target) (string, error) { return s.token, nil }
+func (s staticTokenResolver) Invalidate(Target)                               {}
+
+func TestManagerResolvesTokenRefThroughClientTokenSource(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	defer server.Close()
+
+	catalog, err := NewCatalog([]Target{{
+		ID:           "aws-111111111111-us-east-1",
+		Account:      "111111111111",
+		Region:       "us-east-1",
+		Endpoint:     server.URL,
+		TokenRef:     "guardian-pusher://aws-pusher",
+		Capabilities: []Signal{SignalMetrics},
+	}}, "v1")
+	if err != nil {
+		t.Fatalf("NewCatalog() error = %v", err)
+	}
+	manager := NewManager(catalog, Options{
+		TokenResolver: staticTokenResolver{token: "resolved-token"},
+	})
+	if _, err := manager.PrometheusQuery(context.Background(), `up{account="111111111111"}`, time.Now()); err != nil {
+		t.Fatalf("PrometheusQuery() error = %v", err)
+	}
+	if gotAuth != "Bearer resolved-token" {
+		t.Fatalf("Authorization = %q, want resolved token", gotAuth)
 	}
 }

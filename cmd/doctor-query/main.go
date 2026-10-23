@@ -132,6 +132,11 @@ func main() {
 			cfg.AccessPolicyURL, cfg.AccessPolicyFile, policyGate.Enforced())
 	}
 
+	federationTokens, tokenSource := buildFederationTokenResolver(cfg, sharedFS)
+	if federationTokens != nil {
+		log.Printf("federation token resolver enabled: %s", tokenSource)
+	}
+
 	var awsClient proxy.AWSClient
 	switch {
 	case cfg.FederationEnabled:
@@ -148,8 +153,9 @@ func main() {
 			break
 		}
 		manager := federation.NewManager(catalog, federation.Options{
-			MaxFanout: cfg.FederationMaxFanout,
-			Timeout:   cfg.FederationTimeout,
+			MaxFanout:     cfg.FederationMaxFanout,
+			Timeout:       cfg.FederationTimeout,
+			TokenResolver: federationTokens,
 		})
 		awsClient = manager
 		svc.SetAWSBackend(manager)
@@ -417,6 +423,87 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 	}
 	svc.SetProxyRouter(router)
 	log.Printf("proxy router enabled (max inflight %d, backend timeout %s)", cfg.ProxyMaxInflight, cfg.ProxyBackendTimeout)
+}
+
+// buildFederationTokenResolver selects the token source for catalog targets.
+// The default is Guardian (lazy, one pusher at a time), with a sharded MonoFS
+// bundle as a fallback and env only for development/static catalogs.
+func buildFederationTokenResolver(cfg config.QueryConfig, files ruler.FileStore) (federation.TokenResolver, string) {
+	mode := strings.ToLower(strings.TrimSpace(cfg.FederationTokenResolver))
+	if mode == "" {
+		mode = "auto"
+	}
+	guardianToken := strings.TrimSpace(cfg.GuardianToken)
+	if guardianToken == "" {
+		guardianToken = strings.TrimSpace(cfg.AccessPolicyToken)
+	}
+	guardianURL := strings.TrimSpace(cfg.GuardianAPIURL)
+	if guardianURL == "" {
+		guardianURL = strings.TrimSpace(cfg.GuardianURL)
+	}
+
+	var guardian federation.TokenResolver
+	if guardianURL != "" {
+		guardian = federation.NewGuardianTokenResolver(federation.GuardianTokenResolverOptions{
+			BaseURL:  guardianURL,
+			Token:    guardianToken,
+			CacheTTL: cfg.FederationTokenCacheTTL,
+		})
+	}
+	var bundle federation.TokenResolver
+	if files != nil && strings.TrimSpace(cfg.MonoFSFileToken) != "" {
+		bundle = federation.NewBundleTokenResolver(federation.BundleTokenResolverOptions{
+			Files:      files,
+			Root:       cfg.FederationTokenBundleRoot,
+			Tenant:     cfg.FederationSnapshotTenant,
+			ShardCount: cfg.FederationTokenShardCount,
+			CacheTTL:   cfg.FederationTokenCacheTTL,
+		})
+	}
+
+	switch mode {
+	case "none", "off", "disabled":
+		return nil, "disabled"
+	case "env":
+		return federation.EnvTokenResolver{}, "env"
+	case "guardian":
+		if guardian == nil {
+			log.Printf("federation token resolver: guardian requested but no Guardian API URL is configured")
+			return nil, "guardian (unconfigured)"
+		}
+		return guardian, "guardian"
+	case "bundle", "monofs":
+		if bundle == nil {
+			log.Printf("federation token resolver: bundle requested but MonoFS file store is not configured")
+			return nil, "bundle (unconfigured)"
+		}
+		return bundle, "monofs bundle"
+	case "auto":
+		chain := federation.ChainTokenResolver{federation.EnvTokenResolver{}}
+		sources := "env"
+		if guardian != nil {
+			chain = append(chain, guardian)
+			sources += ",guardian"
+		}
+		if bundle != nil {
+			chain = append(chain, bundle)
+			sources += ",monofs-bundle"
+		}
+		return chain, sources
+	default:
+		log.Printf("federation token resolver: unknown mode %q, using auto", mode)
+		chain := federation.ChainTokenResolver{federation.EnvTokenResolver{}}
+		sources := "env"
+		if guardian != nil {
+			chain = append(chain, guardian)
+			sources += ",guardian"
+		}
+		if bundle != nil {
+			chain = append(chain, bundle)
+			sources += ",monofs-bundle"
+		}
+		return chain, sources
+	}
 }
 
 // loadFederationCatalog loads the catalog from the configured snapshot store.

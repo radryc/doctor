@@ -21,17 +21,19 @@ type Options struct {
 	MaxFanout     int
 	Timeout       time.Duration
 	ClientFactory ClientFactory
+	TokenResolver TokenResolver
 	Logger        *log.Logger
 }
 
 // Manager implements proxy.AWSClient by resolving a query to a bounded set of
 // catalog targets, fanning out, and merging the results.
 type Manager struct {
-	catalog *Catalog
-	planner *Planner
-	factory ClientFactory
-	timeout time.Duration
-	logger  *log.Logger
+	catalog       *Catalog
+	planner       *Planner
+	factory       ClientFactory
+	tokenResolver TokenResolver
+	timeout       time.Duration
+	logger        *log.Logger
 
 	mu      sync.Mutex
 	clients map[string]proxy.AWSClient
@@ -47,19 +49,29 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 	}
 	if opts.ClientFactory == nil {
 		opts.ClientFactory = func(target Target) (proxy.AWSClient, error) {
-			return awsstore.NewClient(target.Endpoint, target.Token), nil
+			if target.Token != "" {
+				return awsstore.NewClient(target.Endpoint, target.Token), nil
+			}
+			if opts.TokenResolver == nil {
+				return nil, fmt.Errorf("federation target %q has no token and no token resolver is configured", target.ID)
+			}
+			return awsstore.NewClientWithTokenSource(target.Endpoint, targetTokenSource{
+				resolver: opts.TokenResolver,
+				target:   target,
+			}), nil
 		}
 	}
 	if opts.Logger == nil {
 		opts.Logger = log.Default()
 	}
 	return &Manager{
-		catalog: catalog,
-		planner: NewPlanner(catalog, opts.MaxFanout),
-		factory: opts.ClientFactory,
-		timeout: opts.Timeout,
-		logger:  opts.Logger,
-		clients: make(map[string]proxy.AWSClient),
+		catalog:       catalog,
+		planner:       NewPlanner(catalog, opts.MaxFanout),
+		factory:       opts.ClientFactory,
+		tokenResolver: opts.TokenResolver,
+		timeout:       opts.Timeout,
+		logger:        opts.Logger,
+		clients:       make(map[string]proxy.AWSClient),
 	}
 }
 
@@ -123,15 +135,23 @@ func (m *Manager) CheckScope(ctx context.Context, q Query) error {
 
 func (m *Manager) clientFor(target Target) (proxy.AWSClient, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if client, ok := m.clients[target.ID]; ok {
+		m.mu.Unlock()
 		return client, nil
 	}
+	m.mu.Unlock()
+
 	client, err := m.factory(target)
 	if err != nil {
 		return nil, err
 	}
+	m.mu.Lock()
+	if existing, ok := m.clients[target.ID]; ok {
+		m.mu.Unlock()
+		return existing, nil
+	}
 	m.clients[target.ID] = client
+	m.mu.Unlock()
 	return client, nil
 }
 
