@@ -1,0 +1,33 @@
+name: federation-loadtest
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly 50k/150k federation budget and chaos run.
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  federation-loadtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Federation load and chaos budgets
+        run: make loadtest-federation
+
+      - name: Federation race chaos
+        run: make loadtest-federation-race
