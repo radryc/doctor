@@ -105,6 +105,7 @@ type QueryConfig struct {
 	FederationBreakerCooldown      time.Duration
 	FederationMetadataTTL          time.Duration
 	FederationTimeout              time.Duration
+	TraceDiscoveryCacheTTL         time.Duration
 
 	ProxyEnabled              bool
 	ProxyBackendsFile         string
@@ -291,6 +292,7 @@ func LoadQuery(service string) QueryConfig {
 		FederationBreakerCooldown:      envDuration("DOCTOR_FEDERATION_BREAKER_COOLDOWN", 30*time.Second),
 		FederationMetadataTTL:          envDuration("DOCTOR_FEDERATION_METADATA_TTL", time.Hour),
 		FederationTimeout:              envDuration("DOCTOR_FEDERATION_TIMEOUT", 5*time.Second),
+		TraceDiscoveryCacheTTL:         envDuration("DOCTOR_TRACE_DISCOVERY_CACHE_TTL", 30*time.Second),
 
 		ProxyEnabled:              envBool("DOCTOR_PROXY_ENABLED", true),
 		ProxyBackendsFile:         envString("DOCTOR_PROXY_BACKENDS_FILE", ""),

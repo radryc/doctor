@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/radryc/monofs/pkg/authz"
@@ -52,6 +53,12 @@ type Service struct {
 	rulesProxy       *httputil.ReverseProxy
 	policyGate       *access.PolicyGate
 	dashboardStore   DashboardStore
+
+	traceDiscoveryMu       sync.Mutex
+	traceDiscoveryCacheTTL time.Duration
+	traceTagValuesCache    map[string]traceTagValuesCacheEntry
+	traceTagsCache         map[string]traceTagsCacheEntry
+	traceScopesCache       map[string]traceScopesCacheEntry
 }
 
 // SetPolicyGate installs the repo-managed access policy. Logs and traces are

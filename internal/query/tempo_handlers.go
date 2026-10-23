@@ -477,6 +477,9 @@ func (s *Service) handleTempoMetricsQuery(w http.ResponseWriter, r *http.Request
 
 // collectTraceTags gathers tag names from the router or the local/AWS path.
 func (s *Service) collectTraceTags(ctx context.Context, tenant string) (map[string]struct{}, []proxy.Warning, error) {
+	if tags, warnings, ok := s.cachedTraceTags(ctx, tenant); ok {
+		return tags, warnings, nil
+	}
 	tags := make(map[string]struct{})
 	if s.proxyRouter != nil {
 		names, warnings, err := s.proxyRouter.TraceTags(ctx, tenant)
@@ -486,6 +489,7 @@ func (s *Service) collectTraceTags(ctx context.Context, tenant string) (map[stri
 		for _, name := range names {
 			tags[name] = struct{}{}
 		}
+		s.storeTraceTags(ctx, tenant, tags, warnings)
 		return tags, warnings, nil
 	}
 	local := localTracesUpstream{svc: s}
@@ -499,11 +503,15 @@ func (s *Service) collectTraceTags(ctx context.Context, tenant string) (map[stri
 	if s.awsReady() {
 		tags["service.name"] = struct{}{}
 	}
+	s.storeTraceTags(ctx, tenant, tags, nil)
 	return tags, nil, nil
 }
 
 // collectTraceTagValues gathers the values of one tag.
 func (s *Service) collectTraceTagValues(ctx context.Context, tenant, tag string) (map[string]struct{}, []proxy.Warning, error) {
+	if values, warnings, ok := s.cachedTraceTagValues(ctx, tenant, tag); ok {
+		return values, warnings, nil
+	}
 	values := make(map[string]struct{})
 	if s.proxyRouter != nil {
 		found, warnings, err := s.proxyRouter.TraceTagValues(ctx, tenant, tag)
@@ -513,6 +521,7 @@ func (s *Service) collectTraceTagValues(ctx context.Context, tenant, tag string)
 		for _, value := range found {
 			values[value] = struct{}{}
 		}
+		s.storeTraceTagValues(ctx, tenant, tag, values, warnings)
 		return values, warnings, nil
 	}
 	local := localTracesUpstream{svc: s}
@@ -528,6 +537,7 @@ func (s *Service) collectTraceTagValues(ctx context.Context, tenant, tag string)
 			values[service] = struct{}{}
 		}
 	}
+	s.storeTraceTagValues(ctx, tenant, tag, values, nil)
 	return values, nil, nil
 }
 
@@ -568,14 +578,22 @@ func (s *Service) handleTempoTagsV2(w http.ResponseWriter, r *http.Request) {
 // collectTraceTagScopes gathers scoped tag names, falling back to classifying
 // the v1 tag list when the router cannot report scopes.
 func (s *Service) collectTraceTagScopes(ctx context.Context, tenant string) ([]tempo.TagScope, []proxy.Warning, error) {
+	if scopes, warnings, ok := s.cachedTraceScopes(ctx, tenant); ok {
+		return scopes, warnings, nil
+	}
 	if s.proxyRouter != nil {
-		return s.proxyRouter.TraceTagScopes(ctx, tenant)
+		scopes, warnings, err := s.proxyRouter.TraceTagScopes(ctx, tenant)
+		if err == nil {
+			s.storeTraceScopes(ctx, tenant, scopes, warnings)
+		}
+		return scopes, warnings, err
 	}
 	local := localTracesUpstream{svc: s}
 	scopes, err := local.TraceTagScopes(ctx, tenant)
 	if err != nil {
 		return nil, nil, err
 	}
+	s.storeTraceScopes(ctx, tenant, scopes, nil)
 	return scopes, nil, nil
 }
 

@@ -435,10 +435,12 @@ Files:
 - [x] Catalog reloads invalidate the discovery cache immediately.
 - [x] With all three pushers stopped, `/v1/logs/services?include=aws` continued
   returning cached log groups instead of failing on X-Ray discovery.
-- [ ] Local log/trace service discovery itself still has a slow path
-  (`include=traces` can exceed the UI timeout on a cold local trace scan);
-  this is separate from X-Ray service discovery and needs its own cache/query
-  optimization.
+- [x] Local trace tag/service discovery is cached by tenant + identity for
+  `DOCTOR_TRACE_DISCOVERY_CACHE_TTL` (default 30s). Empty results are cached
+  too. This removes the repeated 15–25s local trace scan on page reloads while
+  preserving per-user visibility.
+- [ ] A cold first page load can still pay the local trace scan cost; a
+  background/indexed discovery path is the next optimization.
 
 - [ ] Live X-Ray E2E remains blocked: the demo Lambdas have
   `TracingConfig=Active`, have `xray:PutTraceSegments`, and receive
