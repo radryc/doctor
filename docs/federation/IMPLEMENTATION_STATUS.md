@@ -439,6 +439,8 @@ Files:
   `DOCTOR_TRACE_DISCOVERY_CACHE_TTL` (default 30s). Empty results are cached
   too. This removes the repeated 15–25s local trace scan on page reloads while
   preserving per-user visibility.
+- [x] Live check: `/api/search/tag/service.name/values` went from **1.0s** on
+  the cold request to **<1ms** on cached requests.
 - [ ] A cold first page load can still pay the local trace scan cost; a
   background/indexed discovery path is the next optimization.
 
