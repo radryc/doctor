@@ -2,6 +2,9 @@ package federation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -54,6 +57,9 @@ type Controller struct {
 	Tokens        *TokenBundleWriter
 	Lease         *LeaderLease
 	MetadataCache *MetadataCache
+
+	lastPublishedHash string
+	publishedOnce     bool
 }
 
 // NewController wires the default production dependencies.
@@ -209,6 +215,18 @@ func (c *Controller) Sync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	snapshotHash, err := federationSnapshotHash(result.Snapshot)
+	if err != nil {
+		return err
+	}
+	if c.publishedOnce && c.lastPublishedHash == snapshotHash {
+		if err := c.saveMetadataCache(ctx); err != nil {
+			c.Config.Logger.Printf("federation controller: metadata cache save failed: %v", err)
+		}
+		c.Config.Logger.Printf("federation controller: catalog unchanged targets=%d token_shards=%d elapsed=%s",
+			len(result.Snapshot.Targets), changedShards, time.Since(start).Round(time.Millisecond))
+		return nil
+	}
 	expected, err := c.expectedVersion(ctx)
 	if err != nil {
 		return err
@@ -220,9 +238,22 @@ func (c *Controller) Sync(ctx context.Context) error {
 	if err := c.saveMetadataCache(ctx); err != nil {
 		c.Config.Logger.Printf("federation controller: metadata cache save failed: %v", err)
 	}
+	c.lastPublishedHash = snapshotHash
+	c.publishedOnce = true
 	c.Config.Logger.Printf("federation controller: published version=%s targets=%d partitions=%d token_shards=%d warnings=%d elapsed=%s",
 		version, len(result.Snapshot.Targets), len(partitions), changedShards, len(warnings), time.Since(start).Round(time.Millisecond))
 	return nil
+}
+
+func federationSnapshotHash(snapshot Snapshot) (string, error) {
+	// Version and GeneratedAt deliberately do not participate: an unchanged
+	// target set should not rewrite hundreds of shards every cycle.
+	raw, err := json.Marshal(snapshot.Targets)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (c *Controller) expectedVersion(ctx context.Context) (string, error) {
