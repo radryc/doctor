@@ -116,11 +116,33 @@ type TraceQuery struct {
 	Limit   int
 }
 
+// TokenSource supplies and refreshes the bearer token for a pusher.
+// Invalidate is called after a 401 so the next Token call bypasses its cache.
+type TokenSource interface {
+	Token(ctx context.Context) (string, error)
+	Invalidate()
+}
+
+// HTTPError is returned for non-200 pusher responses. It keeps the status
+// code available for retry/circuit-breaker decisions.
+type HTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("aws backend HTTP %d: %s", e.StatusCode, strings.TrimSpace(e.Body))
+}
+
 // Client talks to the pusher AWS read API.
 type Client struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
+	baseURL     string
+	token       string
+	tokenSource TokenSource
+	httpClient  *http.Client
 }
 
 // NewClient builds a client for the given base URL.
@@ -132,6 +154,14 @@ func NewClient(baseURL, token string) *Client {
 			Timeout: 45 * time.Second,
 		},
 	}
+}
+
+// NewClientWithTokenSource builds a client that resolves its bearer token
+// lazily and refreshes it once after a 401.
+func NewClientWithTokenSource(baseURL string, source TokenSource) *Client {
+	client := NewClient(baseURL, "")
+	client.tokenSource = source
+	return client
 }
 
 // Enabled reports whether a backend URL is configured.
@@ -353,11 +383,10 @@ func (c *Client) promql(ctx context.Context, path string, params url.Values) (ma
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(body)), nil
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doHTTP(req)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +396,7 @@ func (c *Client) promql(ctx context.Context, path string, params url.Values) (ma
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("aws promql HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(payload)}
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(payload, &decoded); err != nil {
@@ -398,22 +427,71 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(encoded)), nil
+	}
 	return c.do(req, out)
 }
 
-func (c *Client) do(req *http.Request, out any) error {
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
+// doHTTP attaches authorization, retries once with a refreshed token after a
+// 401, and returns the response without consuming its body.
+func (c *Client) doHTTP(req *http.Request) (*http.Response, error) {
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.httpClient.Do(req)
+	attempts := 1
+	if c.tokenSource != nil {
+		attempts = 2
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		current := req
+		if attempt > 0 {
+			current = req.Clone(req.Context())
+			if req.Header != nil {
+				current.Header = req.Header.Clone()
+			}
+			if req.GetBody != nil {
+				body, err := req.GetBody()
+				if err != nil {
+					return nil, err
+				}
+				current.Body = body
+			}
+		}
+		token := c.token
+		if c.tokenSource != nil {
+			var err error
+			token, err = c.tokenSource.Token(req.Context())
+			if err != nil {
+				return nil, err
+			}
+		}
+		if token != "" {
+			current.Header.Set("Authorization", "Bearer "+token)
+		} else {
+			current.Header.Del("Authorization")
+		}
+		resp, err := c.httpClient.Do(current)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && c.tokenSource != nil && attempt == 0 {
+			_ = resp.Body.Close()
+			c.tokenSource.Invalidate()
+			continue
+		}
+		return resp, nil
+	}
+	return nil, &HTTPError{StatusCode: http.StatusUnauthorized}
+}
+
+func (c *Client) do(req *http.Request, out any) error {
+	resp, err := c.doHTTP(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("aws backend HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return &HTTPError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	if out == nil {
 		return nil

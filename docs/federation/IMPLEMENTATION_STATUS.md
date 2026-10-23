@@ -104,6 +104,31 @@ Files:
 - `doctor/internal/federation/manager.go`
 - `doctor/internal/proxy/aws.go` (`AWSLogRecords`, `LogGroupResolver` support)
 
+### Token resolution (P0/PR2)
+
+- [x] `TokenResolver` interface (`Resolve`, `Invalidate`).
+- [x] Lazy Guardian resolver via `GET /api/m2m/pushers/{name}`; per-target
+  cache, singleflight, 401 invalidation.
+- [x] Sharded MonoFS token-bundle fallback (256 shards by default, lazy shard
+  reads, per-target O(1) lookup).
+- [x] `ChainTokenResolver`: env (dev) → Guardian → MonoFS bundle.
+- [x] `awsstore.TokenSource` + `HTTPError`; one refresh/retry on 401.
+- [x] Config: `DOCTOR_FEDERATION_TOKEN_RESOLVER`,
+  `DOCTOR_FEDERATION_TOKEN_CACHE_TTL`,
+  `DOCTOR_FEDERATION_TOKEN_BUNDLE_ROOT`,
+  `DOCTOR_FEDERATION_TOKEN_SHARD_COUNT`.
+- [x] Tests: `internal/federation/token_test.go`,
+  `internal/store/aws/client_test.go`,
+  `internal/federation/manager_test.go`.
+- [ ] Guardian M2M pusher endpoint deployment (code on Guardian branch
+  `federation-m2m-pushers`).
+
+Files:
+
+- `doctor/internal/federation/token.go`
+- `doctor/internal/store/aws/client.go`
+- `doctor/cmd/doctor-query/main.go`
+
 ### E4 — Query integration
 
 - [x] `Service.aws` accepts the `proxy.AWSClient` interface.
