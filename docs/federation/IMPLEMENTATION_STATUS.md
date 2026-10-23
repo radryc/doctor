@@ -170,6 +170,9 @@ Files:
 - [x] Live dashboard API returns the new catalog panels; live Prometheus
   queries return catalog targets=3, partitions=3, stale=0, and per-region
   `us-east-1`=3. Reload counters are populated after a publish.
+- [x] Native table widgets honor their configured endpoint. The catalog status
+  table now calls `/v1/federation/status` instead of repeating the proxy
+  endpoint table; initial status includes `source=monofs:<version>`.
 - [x] Tests: `internal/federation/reload_test.go`,
   `internal/dashboards/presets_test.go`.
 
