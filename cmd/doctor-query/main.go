@@ -172,6 +172,7 @@ func main() {
 		if metricsErr != nil {
 			log.Printf("federation catalog metrics disabled: %v", metricsErr)
 		} else {
+			manager.SetMetrics(catalogMetrics)
 			defer func() { _ = catalogMetrics.Unregister() }()
 		}
 		if catalogStore != nil && cfg.FederationReloadInterval > 0 {

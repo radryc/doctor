@@ -53,6 +53,7 @@ type Manager struct {
 	maxFanout            int
 	maxConcurrentTargets int
 	maxAttempts          int
+	metrics              *CatalogMetrics
 	breakerThreshold     int
 	breakerCooldown      time.Duration
 	logger               *log.Logger
@@ -226,6 +227,13 @@ func (m *Manager) Version() string {
 	return state.catalog.Version()
 }
 
+// SetMetrics attaches query-plane telemetry after registration.
+func (m *Manager) SetMetrics(metrics *CatalogMetrics) {
+	if m != nil {
+		m.metrics = metrics
+	}
+}
+
 // Planner exposes the underlying planner for admin/debug endpoints.
 func (m *Manager) Planner() *Planner {
 	state := m.current()
@@ -324,7 +332,15 @@ func (m *Manager) planWith(state *managerState, ctx context.Context, q Query) ([
 	if state == nil || state.planner == nil {
 		return nil, errors.New("federation manager is not configured")
 	}
+	started := time.Now()
 	plan, err := state.planner.Plan(ctx, q)
+	selected := len(plan.Targets)
+	if meta := RequestMetaFromContext(ctx); meta != nil && state.catalog != nil {
+		meta.SetPlan(state.catalog.Version(), plan.Matched, selected)
+	}
+	if m.metrics != nil {
+		m.metrics.RecordPlan(string(q.Signal), string(plan.Mode), plan.Matched, selected, time.Since(started))
+	}
 	if err != nil {
 		return nil, err
 	}
