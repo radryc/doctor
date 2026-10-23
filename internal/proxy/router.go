@@ -1110,6 +1110,12 @@ func (r *Router) noteBackendFailure(backend Backend, err error) {
 	if err == nil || isLocalBackend(backend) || IsParseError(err) {
 		return
 	}
+	// Scope and fan-out rejection are client/query errors. A dashboard that
+	// asks for an unscoped live-AWS query should get a 422, but must not mark
+	// the AWS backend unhealthy or open its circuit breaker.
+	if errors.Is(err, ErrScopeRequired) || errors.Is(err, ErrTooBroad) || errors.Is(err, ErrNoTargets) {
+		return
+	}
 	if errors.Is(err, context.Canceled) {
 		return
 	}
