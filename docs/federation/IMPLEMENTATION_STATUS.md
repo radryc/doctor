@@ -120,8 +120,22 @@ Files:
 - [x] Tests: `internal/federation/token_test.go`,
   `internal/store/aws/client_test.go`,
   `internal/federation/manager_test.go`.
-- [ ] Guardian M2M pusher endpoint deployment (code on Guardian branch
-  `federation-m2m-pushers`).
+- [x] Guardian M2M pusher endpoint deployed and verified:
+  unauthorized `403`; authorized `/api/m2m/pushers/{name}` returns the pusher
+  token; paginated list returns `total`/`hasMore`/`nextCursor`.
+- [x] Live token_ref catalog: Doctor loaded
+  `monofs:1792749549329844260` with 3 targets and used the Guardian resolver
+  (no `DIV_PUSHER_TOKEN_*` dependency in the catalog).
+- [x] Live AWS metrics via Guardian-resolved targets: 3 accounts
+  (`677296948949`, `755370915520`, `780603797542`).
+- [x] Live logs/traces RBAC: `usera` sees DivisionA only; `userb` sees
+  DivisionB only; admin sees all. `demo.sh verify` passes.
+- [x] PR1 budget tests pass: 150k catalog ~0.8s; 300-shard save/load
+  ~0.75s/0.12s.
+- [ ] X-Ray end-to-end still has no trace data: Lambda is deployed with
+  `TracingConfig=Active` and X-Ray IAM permissions, but
+  `GetTraceSummaries` returns 0. This is an AWS-demo/account issue, not the
+  resolver path.
 
 Files:
 
