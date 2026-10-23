@@ -446,9 +446,10 @@ Files:
 
 - [ ] Live X-Ray E2E remains blocked: the demo Lambdas have
   `TracingConfig=Active`, have `xray:PutTraceSegments`, and receive
-  invocations, but `GetTraceSummaries` still returns zero traces. This points
-  at account-level X-Ray ingestion/visibility, not the Doctor routing layer.
-  The fake-pusher E2E and merge/dedupe paths are verified.
+  invocations. Lambda logs show generated `XRAY TraceId` values with
+  `Sampled: true`, but `GetTraceSummaries` and `BatchGetTraces` still return no
+  traces. This points at account-level X-Ray upload/visibility, not the Doctor
+  routing layer. The fake-pusher E2E and merge/dedupe paths are verified.
 
 Files:
 
