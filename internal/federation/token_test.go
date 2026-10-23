@@ -116,6 +116,23 @@ func TestChainTokenResolverFallsBackToBundle(t *testing.T) {
 	}
 }
 
+func TestBundleTokenResolverSupportsGuardianPusherRefs(t *testing.T) {
+	files := ruler.NewMemoryStore()
+	bundle := NewBundleTokenResolver(BundleTokenResolverOptions{
+		Files:      files,
+		Root:       "/doctor/v1/federation/tokens",
+		Tenant:     "default",
+		ShardCount: 4,
+	})
+	target := Target{ID: "aws-1", TokenRef: "guardian-pusher://aws-1"}
+	writeBundleShard(t, files, bundle, target, map[string]string{target.ID: "bundle-token"})
+
+	token, err := bundle.Resolve(context.Background(), target)
+	if err != nil || token != "bundle-token" {
+		t.Fatalf("Resolve() = %q, %v", token, err)
+	}
+}
+
 func writeBundleShard(t *testing.T, files *ruler.MemoryStore, resolver *BundleTokenResolver, target Target, tokens map[string]string) {
 	t.Helper()
 	shard := resolver.shardFor(target.ID)
