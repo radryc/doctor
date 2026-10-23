@@ -132,7 +132,15 @@ Files:
 - [x] CAS manifest version precondition.
 - [x] `doctor-federation-publish` CLI to seed/publish a static catalog to MonoFS.
 - [x] Tests: `internal/federation/snapshot_test.go`.
-- [ ] In-cluster publish/load verification — host-side read verification is blocked by per-node MonoFS DNS resolution; the store is covered by unit tests and the write path succeeded.
+- [x] In-cluster publish/load verification — published 3 targets (version
+  `1792743800844127340`, shard size 500) and verified the snapshot from an
+  in-cluster pod. Host-side `--verify` still hits per-node MonoFS DNS
+  resolution; run verification from a pod in the cluster.
+- [x] Doctor query loads the MonoFS snapshot: startup log
+  `multi-account aws federation enabled with 3 target(s) from
+  monofs:1792743800844127340`.
+- [x] 50k synthetic catalog build: 50,000 targets produced in ~1.3s by
+  `doctor-federation-build` (builder only; publish sharding covered by tests).
 
 Files:
 
@@ -190,6 +198,10 @@ Environment: kind cluster `strata`, three demo pushers `:19290/:19291/:19292`.
   - `usera` querying a `div-b-inventory` log group returns 0 records.
 - [x] Broad query with `DOCTOR_FEDERATION_MAX_FANOUT=1` → HTTP 422 `query matches too many AWS federation targets`.
 - [ ] X-Ray trace data end-to-end — blocked because the demo AWS CloudFormation stacks were deleted; routing/merge covered by unit tests.
+- [ ] CloudWatch/X-Ray functional queries after the MonoFS catalog switch —
+  the catalog loads, but the demo pushers now fail with expired AWS SSO
+  credentials (`InvalidGrantException`). Re-authenticate the demo profiles and
+  recreate the stacks before testing live AWS data again.
 
 ## Not started
 
