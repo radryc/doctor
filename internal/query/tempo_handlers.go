@@ -521,6 +521,9 @@ func (s *Service) collectTraceTagValues(ctx context.Context, tenant, tag string)
 		for _, value := range found {
 			values[value] = struct{}{}
 		}
+		if tag == "service.name" || tag == "service" {
+			s.filterTraceServiceValues(ctx, values)
+		}
 		s.storeTraceTagValues(ctx, tenant, tag, values, warnings)
 		return values, warnings, nil
 	}
@@ -536,6 +539,7 @@ func (s *Service) collectTraceTagValues(ctx context.Context, tenant, tag string)
 		for _, service := range s.awsServices(ctx) {
 			values[service] = struct{}{}
 		}
+		s.filterTraceServiceValues(ctx, values)
 	}
 	s.storeTraceTagValues(ctx, tenant, tag, values, nil)
 	return values, nil, nil

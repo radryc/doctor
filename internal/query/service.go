@@ -56,6 +56,7 @@ type Service struct {
 
 	traceDiscoveryMu       sync.Mutex
 	traceDiscoveryCacheTTL time.Duration
+	traceDiscoveryWindow   time.Duration
 	traceTagValuesCache    map[string]traceTagValuesCacheEntry
 	traceTagsCache         map[string]traceTagsCacheEntry
 	traceScopesCache       map[string]traceScopesCacheEntry

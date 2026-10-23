@@ -199,7 +199,7 @@ func (l localTracesUpstream) discovery(ctx context.Context, tenant, kind, tag st
 		return nil, false, nil
 	}
 	end := time.Now().UTC()
-	values, err := source.QueryTraceDiscovery(ctx, tenant, kind, tag, end.Add(-doctorDiscoveryWindow), end)
+	values, err := source.QueryTraceDiscovery(ctx, tenant, kind, tag, end.Add(-l.svc.traceWindow()), end)
 	if err != nil {
 		// During a rolling MonoFS upgrade the client may be newer than the
 		// server. Fall back to the legacy span scan rather than breaking the
@@ -436,7 +436,7 @@ func (l localTracesUpstream) TraceTagValues(ctx context.Context, tenant, tag str
 
 func (l localTracesUpstream) recentRecords(ctx context.Context, tenant string) ([]segment.TraceRecord, error) {
 	end := time.Now().UTC()
-	start := end.Add(-doctorDiscoveryWindow)
+	start := end.Add(-l.svc.traceWindow())
 	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, "", "", start, end, traceDiscoverySpanLimit)
 	if err != nil {
 		return nil, err

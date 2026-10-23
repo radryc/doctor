@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
@@ -93,6 +94,35 @@ func (s *Service) awsServiceInfos(ctx context.Context) []awsstore.ServiceInfo {
 		return nil
 	}
 	return services
+}
+
+// filterTraceServiceValues removes service names that belong only to AWS
+// partitions the caller cannot see. Names shared by a visible partition are
+// kept; this closes the service-picker leak without hiding native services.
+func (s *Service) filterTraceServiceValues(ctx context.Context, values map[string]struct{}) {
+	if s == nil || s.policyGate == nil || s.aws == nil {
+		return
+	}
+	visible := make(map[string]struct{})
+	hidden := make(map[string]struct{})
+	for _, svc := range s.awsServiceInfos(ctx) {
+		if svc.Name == "" {
+			continue
+		}
+		_, allowed := s.policyPartitionAllowed(ctx, svc.Account, svc.Region,
+			awsPartition(svc.Region, svc.Account), policy.SignalTraces)
+		if allowed {
+			visible[svc.Name] = struct{}{}
+		} else {
+			hidden[svc.Name] = struct{}{}
+		}
+	}
+	for name := range hidden {
+		if _, ok := visible[name]; ok {
+			continue
+		}
+		delete(values, name)
+	}
 }
 
 // awsServices returns X-Ray service names.
