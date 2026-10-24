@@ -9,6 +9,7 @@ import (
 
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
+	"github.com/rydzu/ainfra/doctor/internal/tracecontext"
 )
 
 // AWS partition metadata labels, shared with native telemetry.
@@ -602,30 +603,19 @@ func firstNonEmpty(values ...string) string {
 // normalizeXRayTraceID converts an X-Ray trace ID (1-<8hex>-<24hex>) into the
 // W3C 32-hex form Grafana's Tempo plugin expects. Other IDs pass through.
 func normalizeXRayTraceID(id string) string {
-	trimmed := strings.TrimSpace(id)
-	parts := strings.SplitN(trimmed, "-", 3)
-	if len(parts) != 3 || parts[0] != "1" || len(parts[1]) != 8 || len(parts[2]) != 24 {
-		return trimmed
+	canonical, err := tracecontext.CanonicalTraceID(id)
+	if err != nil {
+		return strings.TrimSpace(id)
 	}
-	return parts[1] + parts[2]
+	return canonical
 }
 
 // xrayTraceID converts a W3C 32-hex trace ID back to the X-Ray format the
 // read API expects. X-Ray-formatted IDs pass through.
 func xrayTraceID(id string) string {
-	trimmed := strings.TrimSpace(id)
-	if len(trimmed) != 32 || !isHexString(trimmed) {
-		return trimmed
+	converted, err := tracecontext.XRayTraceID(id)
+	if err != nil {
+		return strings.TrimSpace(id)
 	}
-	return "1-" + trimmed[:8] + "-" + trimmed[8:]
-}
-
-func isHexString(value string) bool {
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
+	return converted
 }
