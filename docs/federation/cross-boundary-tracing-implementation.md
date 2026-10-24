@@ -227,6 +227,9 @@ traceparent/AWSTraceHeader injection into the app's SQS producer.
 - [x] Added the managed ADOT Node.js Lambda layer and `xray-lambda`
       configuration to the demo CDK stack.
 - [x] Added the X-Ray-compatible ID generator to the demo ECS app.
+- [x] Replaced nginx with a Node.js app that emits OTLP traces, generates
+      X-Ray-compatible roots, propagates W3C/X-Ray context, and injects trace
+      headers into SQS messages.
 - [ ] Add an API Gateway HTTP API entry point (the current live entry is ALB).
 - [ ] Implement `spec.placements` and placement-aware federation.
 - [ ] Live API Gateway -> Lambda -> k8s and ALB -> ECS -> SQS -> Lambda
