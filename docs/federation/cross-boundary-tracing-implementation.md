@@ -219,8 +219,17 @@ go test ./internal/ui ./internal/domain/... ./internal/awsread
       instead of resetting it to CloudWatch Logs.
 - [x] Added the ADOT Lambda layer and `OTEL_PROPAGATORS=tracecontext,baggage,xray-lambda`
       to the demo Lambda template.
+- [x] Replaced the demo nginx container with an instrumented Node.js app.
+- [x] Added an ADOT collector sidecar and pointed the app at it.
+- [x] Added `AWSXRayIdGenerator`, composite W3C/X-Ray propagation, and
+traceparent/AWSTraceHeader injection into the app's SQS producer.
+- [x] Enabled ALB X-Ray tracing and a real `/health` target.
 - [x] Added the managed ADOT Node.js Lambda layer and `xray-lambda`
       configuration to the demo CDK stack.
-- [ ] Wire the X-Ray-compatible ID generator into every app SDK/agent root.
+- [x] Added the X-Ray-compatible ID generator to the demo ECS app.
+- [ ] Add an API Gateway HTTP API entry point (the current live entry is ALB).
 - [ ] Implement `spec.placements` and placement-aware federation.
-- [ ] Live API Gateway HTTP API -> Lambda -> k8s validation.
+- [ ] Live API Gateway -> Lambda -> k8s and ALB -> ECS -> SQS -> Lambda
+      validation.
+- [ ] Roll the updated Doctor query image.
+- [ ] Add the trace locator/fleet view.
