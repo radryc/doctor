@@ -177,12 +177,10 @@ func traceLookupWindow(records []segment.TraceRecord, from, to time.Time) (time.
 	}
 	start = start.Add(-30 * time.Minute)
 	end = end.Add(30 * time.Minute)
-	if !from.IsZero() && from.Before(start) {
-		start = from
-	}
-	if !to.IsZero() && to.After(end) {
-		end = to
-	}
+	// Do not widen to the caller's full Grafana range. A seven-day dashboard
+	// range would otherwise turn a mixed trace lookup back into a huge local
+	// scan. The AWS span timestamps are the authoritative window; apply a
+	// wider margin explicitly if an async boundary needs it.
 	return start, end
 }
 
