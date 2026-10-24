@@ -487,3 +487,48 @@ func TestTempoBuildInfo(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestTempoTraceByIDMergesLocalAndAWS(t *testing.T) {
+	base := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	const (
+		canonical = "4bf92f3577b34da6a3ce929d0e0e4736"
+		xrayID    = "1-4bf92f35-77b34da6a3ce929d0e0e4736"
+		rootSpan  = "aaaaaaaaaaaaaaaa"
+		childSpan = "bbbbbbbbbbbbbbbb"
+	)
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{{
+		TraceID:   canonical,
+		SpanID:    rootSpan,
+		Name:      "checkout",
+		Service:   "checkout-api",
+		StartTime: base,
+		EndTime:   base.Add(500 * time.Millisecond),
+	}}}
+	aws := &fakeAWSBackend{spans: []awsstore.Span{{
+		TraceID:      xrayID,
+		SpanID:       childSpan,
+		ParentSpanID: rootSpan,
+		Name:         "process-order",
+		Service:      "order-processor",
+		StartTime:    base.Add(100 * time.Millisecond),
+		EndTime:      base.Add(400 * time.Millisecond),
+	}}}
+	svc := &Service{defaultTenant: "default", logEngine: backend, aws: aws}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/traces/"+canonical, nil)
+	rec := httptest.NewRecorder()
+	svc.handleTempoTraceByID(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{rootSpan, childSpan, canonical} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+	if !strings.Contains(body, `"key":"source","value":{"stringValue":"aws"}`) {
+		t.Fatalf("body missing AWS source label: %s", body)
+	}
+}

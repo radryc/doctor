@@ -69,38 +69,7 @@ func (s *Service) serveTempoTraceByID(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	var (
-		records  []segment.TraceRecord
-		found    bool
-		warnings []proxy.Warning
-		queryErr error
-	)
-	// X-Ray trace IDs are normalized to 32-hex for Tempo, which is
-	// indistinguishable from a native OTel ID. Try the AWS source first so a
-	// federated trace does not trigger an all-time local MonoFS scan.
-	if s.awsReady() {
-		awsRecords, awsFound, awsErr := (s.AWSUpstream()).GetTraceRaw(r.Context(), tenant, traceID)
-		if awsErr == nil && awsFound {
-			if s.policyGate != nil {
-				awsRecords = s.policyGate.FilterSpans(identityFromContext(r.Context()), awsRecords)
-			}
-			if len(awsRecords) == 0 {
-				http.Error(w, "trace not found", http.StatusNotFound)
-				return
-			}
-			records = awsRecords
-			found = true
-		}
-	}
-	if !found {
-		if s.proxyRouter != nil {
-			records, warnings, queryErr = s.proxyRouter.GetTrace(r.Context(), tenant, traceID)
-			found = len(records) > 0
-		} else {
-			local := localTracesUpstream{svc: s}
-			records, found, queryErr = local.GetTrace(r.Context(), tenant, traceID)
-		}
-	}
+	records, warnings, found, queryErr := s.loadFederatedTrace(r.Context(), tenant, traceID, from, to)
 	if queryErr != nil {
 		if isAccessDenied(queryErr) {
 			http.Error(w, queryErr.Error(), http.StatusForbidden)
@@ -142,6 +111,79 @@ func (s *Service) serveTempoTraceByID(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 	writeJSON(w, http.StatusOK, tempo.TraceFromRecords(records))
+}
+
+// loadFederatedTrace retrieves one trace across the native and AWS sources.
+// AWS spans determine the local search window, so a mixed trace does not
+// require an all-time local scan. If AWS returns a trace but the caller cannot
+// see all spans, the visible subset is returned with a partial warning.
+func (s *Service) loadFederatedTrace(ctx context.Context, tenant, traceID string, from, to time.Time) ([]segment.TraceRecord, []proxy.Warning, bool, error) {
+	warnings := make([]proxy.Warning, 0, 2)
+	if s.awsReady() && s.aws != nil {
+		awsRecords, awsFound, awsErr := (s.AWSUpstream()).GetTraceRaw(ctx, tenant, traceID)
+		if awsErr != nil {
+			warnings = append(warnings, proxy.Warning{Backend: "aws", Signal: proxy.SignalTraces, Message: awsErr.Error()})
+		} else if awsFound {
+			visible := awsRecords
+			partial := false
+			if s.policyGate != nil {
+				visible = s.policyGate.FilterSpans(identityFromContext(ctx), awsRecords)
+				partial = len(visible) != len(awsRecords)
+			}
+			localFrom, localTo := traceLookupWindow(awsRecords, from, to)
+			localRecords, _, localErr := (localTracesUpstream{svc: s}).GetTraceWindow(ctx, tenant, traceID, localFrom, localTo)
+			if localErr != nil {
+				warnings = append(warnings, proxy.Warning{Backend: "monofs", Signal: proxy.SignalTraces, Message: localErr.Error()})
+			}
+			merged := proxy.MergeTraceRecords(localRecords, proxy.TraceRemote{
+				Source:  proxy.SourceAWS,
+				Backend: "aws-federated",
+				Records: visible,
+			})
+			if len(merged) == 0 {
+				return nil, warnings, false, nil
+			}
+			if partial {
+				warnings = append(warnings, proxy.Warning{Backend: "aws", Signal: proxy.SignalTraces, Message: "partial trace: some spans are not visible"})
+			}
+			return merged, warnings, true, nil
+		}
+	}
+
+	if s.proxyRouter != nil {
+		records, routerWarnings, err := s.proxyRouter.GetTraceWindow(ctx, tenant, traceID, from, to)
+		warnings = append(warnings, routerWarnings...)
+		return records, warnings, len(records) > 0, err
+	}
+	records, found, err := (localTracesUpstream{svc: s}).GetTraceWindow(ctx, tenant, traceID, from, to)
+	return records, warnings, found, err
+}
+
+func traceLookupWindow(records []segment.TraceRecord, from, to time.Time) (time.Time, time.Time) {
+	if len(records) == 0 {
+		return from, to
+	}
+	start, end := records[0].StartTime, records[0].EndTime
+	for _, record := range records[1:] {
+		if !record.StartTime.IsZero() && (start.IsZero() || record.StartTime.Before(start)) {
+			start = record.StartTime
+		}
+		if !record.EndTime.IsZero() && (end.IsZero() || record.EndTime.After(end)) {
+			end = record.EndTime
+		}
+	}
+	if start.IsZero() {
+		return from, to
+	}
+	start = start.Add(-30 * time.Minute)
+	end = end.Add(30 * time.Minute)
+	if !from.IsZero() && from.Before(start) {
+		start = from
+	}
+	if !to.IsZero() && to.After(end) {
+		end = to
+	}
+	return start, end
 }
 
 // acceptsProtobuf reports whether the client asked for the OTLP protobuf body.

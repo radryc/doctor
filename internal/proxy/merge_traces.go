@@ -15,14 +15,16 @@ type TraceRemote struct {
 }
 
 // MergeTraceRecords merges remote spans into the local result, deduplicating by
-// (trace_id, span_id) and preferring the local copy. Cross-backend duplicates
-// that differ are kept and tagged with shard=<backend>.
+// (trace_id, span_id) and preferring the local copy. A span duplicated across
+// different sources is merged into one record and annotated with both sources;
+// duplicate replicas from the same source are retained with shard labels.
 func MergeTraceRecords(local []segment.TraceRecord, remotes ...TraceRemote) []segment.TraceRecord {
 	out := make([]segment.TraceRecord, 0, len(local))
 	out = append(out, local...)
 
 	index := make(map[string]int, len(out))
 	backendOf := make(map[string]string, len(out))
+	sourceOf := make(map[string]string, len(out))
 	for i := range out {
 		key := traceSpanKey(out[i])
 		if key == "" {
@@ -31,6 +33,7 @@ func MergeTraceRecords(local []segment.TraceRecord, remotes ...TraceRemote) []se
 		if _, exists := index[key]; !exists {
 			index[key] = i
 			backendOf[key] = traceRecordSource(out[i])
+			sourceOf[key] = traceRecordSource(out[i])
 		}
 	}
 
@@ -53,15 +56,68 @@ func MergeTraceRecords(local []segment.TraceRecord, remotes ...TraceRemote) []se
 				if backendOf[key] == backend {
 					continue
 				}
+				if sourceOf[key] != traceRecordSource(record) {
+					out[existing] = mergeTraceRecordSources(out[existing], record, backendOf[key], backend)
+					backendOf[key] = backend
+					sourceOf[key] = traceRecordSource(record)
+					continue
+				}
 				out[existing] = withTraceShard(out[existing], backendOf[key])
 				setTraceAttribute(&record, LabelShard, backend)
 			}
 			index[key] = len(out)
 			backendOf[key] = backend
+			sourceOf[key] = traceRecordSource(record)
 			out = append(out, record)
 		}
 	}
 	return out
+}
+
+func mergeTraceRecordSources(existing, incoming segment.TraceRecord, existingBackend, incomingBackend string) segment.TraceRecord {
+	merged := cloneTraceRecord(existing)
+	existingSource := traceRecordSource(merged)
+	for key, value := range incoming.Attributes {
+		if value == "" || key == LabelSource || key == LabelSources || key == LabelBackends {
+			continue
+		}
+		if current := merged.Attributes[key]; current == "" {
+			if merged.Attributes == nil {
+				merged.Attributes = make(map[string]string)
+			}
+			merged.Attributes[key] = value
+		}
+	}
+	sources := map[string]struct{}{}
+	for _, source := range strings.Split(merged.Attributes[LabelSources], ",") {
+		if source = strings.TrimSpace(source); source != "" {
+			sources[source] = struct{}{}
+		}
+	}
+	sources[existingSource] = struct{}{}
+	sources[traceRecordSource(incoming)] = struct{}{}
+	backends := map[string]struct{}{}
+	for _, backend := range strings.Split(merged.Attributes[LabelBackends], ",") {
+		if backend = strings.TrimSpace(backend); backend != "" {
+			backends[backend] = struct{}{}
+		}
+	}
+	backends[existingBackend] = struct{}{}
+	backends[incomingBackend] = struct{}{}
+	setTraceAttribute(&merged, LabelSources, joinSortedKeys(sources))
+	setTraceAttribute(&merged, LabelBackends, joinSortedKeys(backends))
+	return merged
+}
+
+func joinSortedKeys(values map[string]struct{}) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 // MergeTraceSummaries deduplicates search hits by trace ID, merging timing and
@@ -105,6 +161,11 @@ func MergeTraceSummaries(groups ...[]TraceSummary) []TraceSummary {
 	})
 	return out
 }
+
+const (
+	LabelSources  = "sources"
+	LabelBackends = "backends"
+)
 
 func traceSpanKey(record segment.TraceRecord) string {
 	if record.TraceID == "" || record.SpanID == "" {
