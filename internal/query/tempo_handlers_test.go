@@ -531,4 +531,14 @@ func TestTempoTraceByIDMergesLocalAndAWS(t *testing.T) {
 	if !strings.Contains(body, `"key":"source","value":{"stringValue":"aws"}`) {
 		t.Fatalf("body missing AWS source label: %s", body)
 	}
+	if len(backend.traceQueries) != 1 {
+		t.Fatalf("local trace queries = %d, want 1", len(backend.traceQueries))
+	}
+	query := backend.traceQueries[0]
+	if query.from.IsZero() || query.to.IsZero() {
+		t.Fatalf("local trace query was not bounded: %#v", query)
+	}
+	if query.from.After(base) || query.to.Before(base.Add(time.Second)) {
+		t.Fatalf("local trace window = [%v, %v], does not cover trace", query.from, query.to)
+	}
 }
