@@ -217,7 +217,10 @@ go test ./internal/ui ./internal/domain/... ./internal/awsread
       Guardian ECS observability templates and demo observer.
 - [x] Changed the demo AWS bootstrap to keep the X-Ray destination on `XRay`
       instead of resetting it to CloudWatch Logs.
-- [ ] Add the ADOT Lambda layer and `xray-lambda` configuration.
+- [x] Added the ADOT Lambda layer and `OTEL_PROPAGATORS=tracecontext,baggage,xray-lambda`
+      to the demo Lambda template.
+- [x] Added the managed ADOT Node.js Lambda layer and `xray-lambda`
+      configuration to the demo CDK stack.
 - [ ] Wire the X-Ray-compatible ID generator into every app SDK/agent root.
 - [ ] Implement `spec.placements` and placement-aware federation.
 - [ ] Live API Gateway HTTP API -> Lambda -> k8s validation.
