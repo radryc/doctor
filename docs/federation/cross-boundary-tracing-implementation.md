@@ -204,3 +204,20 @@ go test ./internal/ui ./internal/domain/... ./internal/awsread
 - Header conflicts must not silently split traces.
 - Mixed partition routing must come from placement, not intent order.
 - Partial traces must be explicit, especially with RBAC.
+
+## Progress — 2026-10-24
+
+- [x] Added `doctor/internal/tracecontext` with canonical W3C/X-Ray IDs,
+      X-Ray-compatible ID generation, and the bridge propagator.
+- [x] Wired canonical conversion into the AWS upstream.
+- [x] Added bounded trace-window lookup and cross-source trace-detail merge.
+- [x] Merged cross-source duplicate spans and combined span sets.
+- [x] Added a synthetic k8s-parent + AWS-child trace test.
+- [x] Added `OTEL_PROPAGATORS` and parent-based sampler defaults to the
+      Guardian ECS observability templates and demo observer.
+- [x] Changed the demo AWS bootstrap to keep the X-Ray destination on `XRay`
+      instead of resetting it to CloudWatch Logs.
+- [ ] Add the ADOT Lambda layer and `xray-lambda` configuration.
+- [ ] Wire the X-Ray-compatible ID generator into every app SDK/agent root.
+- [ ] Implement `spec.placements` and placement-aware federation.
+- [ ] Live API Gateway HTTP API -> Lambda -> k8s validation.
