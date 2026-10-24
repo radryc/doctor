@@ -115,6 +115,12 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 // GetTrace fans a trace lookup out and merges the spans. found is false when
 // no backend returned spans.
 func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segment.TraceRecord, []Warning, error) {
+	return r.GetTraceWindow(ctx, tenant, traceID, time.Time{}, time.Time{})
+}
+
+// GetTraceWindow is GetTrace with an explicit time window for backends that
+// can use it. It keeps trace detail from scanning the entire local store.
+func (r *Router) GetTraceWindow(ctx context.Context, tenant, traceID string, from, to time.Time) ([]segment.TraceRecord, []Warning, error) {
 	targets, accessWarnings, err := r.traceTargets(ctx)
 	if err != nil {
 		return nil, accessWarnings, err
@@ -148,7 +154,16 @@ func (r *Router) GetTrace(ctx context.Context, tenant, traceID string) ([]segmen
 			}
 			callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
 			defer cancel()
-			records, found, err := target.upstreams.Traces.GetTrace(callCtx, tenant, traceID)
+			var (
+				records []segment.TraceRecord
+				found   bool
+				err     error
+			)
+			if windowSource, ok := target.upstreams.Traces.(TraceWindowSource); ok {
+				records, found, err = windowSource.GetTraceWindow(callCtx, tenant, traceID, from, to)
+			} else {
+				records, found, err = target.upstreams.Traces.GetTrace(callCtx, tenant, traceID)
+			}
 			results[i] = result{index: i, records: records, found: found, err: err}
 		}(i, target)
 	}
@@ -292,11 +307,34 @@ func (r *Router) SearchSpanSets(ctx context.Context, tenant string, search Trace
 	}
 	merged := make(map[string]tempo.SpanSet)
 	for _, sets := range results {
-		for traceID, set := range sets {
-			merged[traceID] = set
-		}
+		mergeSpanSets(merged, sets)
 	}
 	return merged, warnings, nil
+}
+
+func mergeSpanSets(dst, src map[string]tempo.SpanSet) {
+	for traceID, incoming := range src {
+		existing, ok := dst[traceID]
+		if !ok {
+			dst[traceID] = incoming
+			continue
+		}
+		seen := make(map[string]struct{}, len(existing.Spans))
+		for _, span := range existing.Spans {
+			seen[span.SpanID] = struct{}{}
+		}
+		for _, span := range incoming.Spans {
+			if _, duplicate := seen[span.SpanID]; duplicate {
+				continue
+			}
+			existing.Spans = append(existing.Spans, span)
+			seen[span.SpanID] = struct{}{}
+		}
+		if incoming.Matched > existing.Matched {
+			existing.Matched = incoming.Matched
+		}
+		dst[traceID] = existing
+	}
 }
 
 // TraceTagScopes returns the union of scoped tag names across scope-aware

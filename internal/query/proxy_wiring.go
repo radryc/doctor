@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	promstorage "github.com/prometheus/prometheus/storage"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
 	"github.com/rydzu/ainfra/doctor/internal/tempo"
+	"github.com/rydzu/ainfra/doctor/internal/tracecontext"
 )
 
 // SetProxyRouter installs the multi-backend router. When nil, handlers use the
@@ -290,13 +290,20 @@ func (l localTracesUpstream) SearchTraces(ctx context.Context, tenant string, se
 }
 
 func (l localTracesUpstream) GetTrace(ctx context.Context, tenant, traceID string) ([]segment.TraceRecord, bool, error) {
+	return l.GetTraceWindow(ctx, tenant, traceID, time.Time{}, time.Time{})
+}
+
+// GetTraceWindow queries the local store for one trace inside an explicit
+// time window. Callers that know the trace window should use this method; the
+// zero-window compatibility path remains for older callers.
+func (l localTracesUpstream) GetTraceWindow(ctx context.Context, tenant, traceID string, from, to time.Time) ([]segment.TraceRecord, bool, error) {
 	// X-Ray trace IDs are served by the AWS upstream. Querying every local
 	// chunk for an ID that cannot exist there turns a federated trace detail
 	// request into a full local scan and can exceed the HTTP deadline.
 	if isXRayTraceID(traceID) {
 		return nil, false, nil
 	}
-	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, traceID, "", time.Time{}, time.Time{}, traceGetSpanLimit)
+	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, traceID, "", from, to, traceGetSpanLimit)
 	if err != nil {
 		return nil, false, err
 	}
@@ -308,13 +315,7 @@ func (l localTracesUpstream) GetTrace(ctx context.Context, tenant, traceID strin
 
 // isXRayTraceID reports whether id uses the X-Ray 1-<epoch>-<hex> format.
 func isXRayTraceID(id string) bool {
-	parts := strings.Split(strings.TrimSpace(id), "-")
-	if len(parts) != 3 || parts[0] != "1" || len(parts[1]) != 8 || len(parts[2]) < 16 {
-		return false
-	}
-	_, errEpoch := strconv.ParseUint(parts[1], 16, 32)
-	_, errHex := strconv.ParseUint(parts[2][:16], 16, 64)
-	return errEpoch == nil && errHex == nil
+	return tracecontext.IsXRayTraceID(id)
 }
 
 // canonicalizeTraceRecords merges the shared canonical label vocabulary into

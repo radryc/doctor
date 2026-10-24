@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/rydzu/ainfra/doctor/internal/tempo"
 )
 
 func traceSpan(traceID, spanID, service string, start time.Time) segment.TraceRecord {
@@ -64,5 +65,46 @@ func TestMergeTraceSummariesMergesDuplicates(t *testing.T) {
 	}
 	if merged[0].RootServiceName != "api" {
 		t.Fatalf("root service = %q, want api", merged[0].RootServiceName)
+	}
+}
+
+func TestMergeTraceRecordsMergesCrossSourceDuplicate(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	local := traceSpan("trace-1", "span-1", "api", base)
+	local.Attributes = map[string]string{"http.method": "GET"}
+	aws := traceSpan("trace-1", "span-1", "api", base)
+	aws.Attributes = map[string]string{"http.method": "GET", "aws.region": "us-east-1"}
+	merged := MergeTraceRecords([]segment.TraceRecord{local}, TraceRemote{
+		Source:  SourceAWS,
+		Backend: "aws-federated",
+		Records: []segment.TraceRecord{aws},
+	})
+	if len(merged) != 1 {
+		t.Fatalf("merged = %d records, want 1", len(merged))
+	}
+	if got := merged[0].Attributes[LabelSources]; got != "aws,doctor" {
+		t.Fatalf("sources = %q, want aws,doctor", got)
+	}
+	if got := merged[0].Attributes[LabelBackends]; got != "aws-federated,doctor" {
+		t.Fatalf("backends = %q, want aws-federated,doctor", got)
+	}
+	if got := merged[0].Attributes["aws.region"]; got != "us-east-1" {
+		t.Fatalf("merged aws.region = %q", got)
+	}
+}
+
+func TestMergeSpanSetsCombinesDistinctSpans(t *testing.T) {
+	dst := map[string]tempo.SpanSet{
+		"trace-1": {Spans: []tempo.SearchSpan{{SpanID: "a"}}, Matched: 1},
+	}
+	src := map[string]tempo.SpanSet{
+		"trace-1": {Spans: []tempo.SearchSpan{{SpanID: "b"}, {SpanID: "a"}}, Matched: 2},
+	}
+	mergeSpanSets(dst, src)
+	if got := len(dst["trace-1"].Spans); got != 2 {
+		t.Fatalf("spans = %d, want 2", got)
+	}
+	if dst["trace-1"].Matched != 2 {
+		t.Fatalf("matched = %d, want 2", dst["trace-1"].Matched)
 	}
 }

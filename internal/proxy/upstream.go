@@ -43,6 +43,13 @@ type TracesUpstream interface {
 	GetTrace(ctx context.Context, tenant, traceID string) ([]segment.TraceRecord, bool, error)
 }
 
+// TraceWindowSource is implemented by upstreams that can bound a trace-ID
+// lookup to a time window. It prevents an all-time local scan when the caller
+// already knows the trace window (for example, from an AWS span).
+type TraceWindowSource interface {
+	GetTraceWindow(ctx context.Context, tenant, traceID string, from, to time.Time) ([]segment.TraceRecord, bool, error)
+}
+
 // TraceTagSource is implemented by upstreams that expose tag discovery.
 type TraceTagSource interface {
 	TraceTags(ctx context.Context, tenant string) ([]string, error)
