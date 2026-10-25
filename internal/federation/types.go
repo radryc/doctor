@@ -32,21 +32,25 @@ type Health struct {
 // Target is one AWS account/region pusher. A target may serve several Guardian
 // partitions; partitions are labels/indexes, not target identity.
 type Target struct {
-	ID           string            `json:"id" yaml:"id"`
-	Account      string            `json:"account" yaml:"account"`
-	Region       string            `json:"region" yaml:"region"`
-	Partitions   []string          `json:"partitions,omitempty" yaml:"partitions,omitempty"`
-	Tenant       string            `json:"tenant,omitempty" yaml:"tenant,omitempty"`
-	Endpoint     string            `json:"endpoint" yaml:"endpoint"`
-	TokenEnv     string            `json:"token_env,omitempty" yaml:"token_env,omitempty"`
-	TokenRef     string            `json:"token_ref,omitempty" yaml:"token_ref,omitempty"`
-	Token        string            `json:"-" yaml:"-"` // resolved; never serialized
-	Provider     string            `json:"provider,omitempty" yaml:"provider,omitempty"`
-	Capabilities []Signal          `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
-	Health       Health            `json:"health,omitempty" yaml:"health,omitempty"`
-	Version      string            `json:"version,omitempty" yaml:"version,omitempty"`
-	Priority     int               `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID         string   `json:"id" yaml:"id"`
+	Account    string   `json:"account" yaml:"account"`
+	Region     string   `json:"region" yaml:"region"`
+	Partitions []string `json:"partitions,omitempty" yaml:"partitions,omitempty"`
+	// ServicePartitions maps an X-Ray service/function name to a Guardian
+	// partition. Use it when an account hosts more than one partition and the
+	// AWS resource does not carry a guardian.io/partition tag.
+	ServicePartitions map[string]string `json:"service_partitions,omitempty" yaml:"service_partitions,omitempty"`
+	Tenant            string            `json:"tenant,omitempty" yaml:"tenant,omitempty"`
+	Endpoint          string            `json:"endpoint" yaml:"endpoint"`
+	TokenEnv          string            `json:"token_env,omitempty" yaml:"token_env,omitempty"`
+	TokenRef          string            `json:"token_ref,omitempty" yaml:"token_ref,omitempty"`
+	Token             string            `json:"-" yaml:"-"` // resolved; never serialized
+	Provider          string            `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Capabilities      []Signal          `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Health            Health            `json:"health,omitempty" yaml:"health,omitempty"`
+	Version           string            `json:"version,omitempty" yaml:"version,omitempty"`
+	Priority          int               `json:"priority,omitempty" yaml:"priority,omitempty"`
 
 	// MetadataFetchedAt records when /v1/aws/meta was last refreshed. A fresh
 	// timestamp lets query replicas use cached empty discovery results instead

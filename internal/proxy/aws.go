@@ -120,7 +120,12 @@ func ApplyAWSPartition(attrs map[string]string, region, account string) {
 		attrs[AttrAWSAccount] = account
 	}
 	if partition := AWSPartition(region, account); partition != "" {
-		attrs[AWSPartitionLabel] = partition
+		// A federation catalog target may already know the real Guardian
+		// partition. Region is only a fallback; never overwrite a more
+		// specific value with it.
+		if strings.TrimSpace(attrs[AWSPartitionLabel]) == "" {
+			attrs[AWSPartitionLabel] = partition
+		}
 	}
 }
 
@@ -491,6 +496,7 @@ func (u *AWSUpstream) SearchTraces(ctx context.Context, _ string, search TraceSe
 			SpanCount:       summary.SpanCount,
 			Region:          summary.Region,
 			Account:         summary.Account,
+			Partition:       summary.Partition,
 			Status:          summary.Status,
 		})
 	}
@@ -575,6 +581,9 @@ func (u *AWSUpstream) GetTraceRaw(ctx context.Context, _ string, traceID string)
 			attrs[key] = value
 		}
 		attrs[LabelSource] = SourceAWS
+		if span.Partition != "" {
+			attrs[AWSPartitionLabel] = span.Partition
+		}
 		ApplyAWSPartition(attrs, span.Region, span.Account)
 		out = append(out, segment.TraceRecord{
 			TraceID:      normalizeXRayTraceID(span.TraceID),
@@ -582,6 +591,7 @@ func (u *AWSUpstream) GetTraceRaw(ctx context.Context, _ string, traceID string)
 			ParentSpanID: span.ParentSpanID,
 			Name:         span.Name,
 			Service:      firstNonEmpty(span.Service, SourceAWS),
+			Partition:    span.Partition,
 			StartTime:    span.StartTime.UTC(),
 			EndTime:      span.EndTime.UTC(),
 			Attributes:   attrs,

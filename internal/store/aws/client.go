@@ -57,6 +57,9 @@ type Span struct {
 	Attributes   map[string]string `json:"attributes,omitempty"`
 	Region       string            `json:"region,omitempty"`
 	Account      string            `json:"account,omitempty"`
+	// Partition is filled by the federation manager from the catalog target.
+	// The pusher read API does not know Guardian partitions.
+	Partition string `json:"-"`
 }
 
 // TraceSummary mirrors awsread.TraceSummary.
@@ -71,6 +74,8 @@ type TraceSummary struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 	Region     string            `json:"region,omitempty"`
 	Account    string            `json:"account,omitempty"`
+	// Partition is filled by the federation manager from the catalog target.
+	Partition string `json:"-"`
 }
 
 // ServiceInfo mirrors awsread.ServiceInfo.

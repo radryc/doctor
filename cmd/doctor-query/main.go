@@ -542,6 +542,26 @@ func buildFederationTokenResolver(cfg config.QueryConfig, files ruler.FileStore)
 // MonoFS is preferred when configured; a static file remains the bootstrap and
 // local-development fallback.
 func loadFederationCatalog(ctx context.Context, cfg config.QueryConfig, files ruler.FileStore) (*federation.Catalog, string, federation.SnapshotStore, error) {
+	// AWS ECS deployments have no ConfigMap/volume in the first deployment
+	// slice. Accept the same snapshot document inline so Doctor can run with
+	// all desired state carried as an encrypted task-definition environment
+	// value.
+	if raw := strings.TrimSpace(cfg.FederationCatalogJSON); raw != "" {
+		snapshot, err := federation.ParseSnapshot([]byte(raw))
+		if err != nil {
+			return nil, "", nil, fmt.Errorf("parse inline federation catalog: %w", err)
+		}
+		catalog, err := federation.NewCatalog(snapshot.Targets, snapshot.Version)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		source := "inline"
+		if version := strings.TrimSpace(snapshot.Version); version != "" {
+			source += ":" + version
+		}
+		return catalog, source, nil, nil
+	}
+
 	storeName := strings.ToLower(strings.TrimSpace(cfg.FederationSnapshotStore))
 	switch storeName {
 	case "", "file":

@@ -208,6 +208,19 @@ func TestAWSPartitionPrefersRegion(t *testing.T) {
 	}
 }
 
+func TestApplyAWSPartitionPreservesCatalogPartition(t *testing.T) {
+	attrs := map[string]string{AWSPartitionLabel: "checkout"}
+	ApplyAWSPartition(attrs, "eu-west-1", "123")
+	if got := attrs[AWSPartitionLabel]; got != "checkout" {
+		t.Fatalf("partition = %q, want checkout", got)
+	}
+	attrs = map[string]string{}
+	ApplyAWSPartition(attrs, "eu-west-1", "123")
+	if got := attrs[AWSPartitionLabel]; got != "eu-west-1" {
+		t.Fatalf("fallback partition = %q, want eu-west-1", got)
+	}
+}
+
 func TestAWSUpstreamSearchTracesFiltersRegion(t *testing.T) {
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	client := &fakeAWSClient{

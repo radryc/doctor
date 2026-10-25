@@ -85,6 +85,7 @@ type QueryConfig struct {
 
 	FederationEnabled              bool
 	FederationCatalogFile          string
+	FederationCatalogJSON          string
 	FederationSnapshotStore        string
 	FederationSnapshotRoot         string
 	FederationSnapshotTenant       string
@@ -273,6 +274,7 @@ func LoadQuery(service string) QueryConfig {
 
 		FederationEnabled:              envBool("DOCTOR_FEDERATION_ENABLED", false),
 		FederationCatalogFile:          envString("DOCTOR_FEDERATION_CATALOG_FILE", ""),
+		FederationCatalogJSON:          envString("DOCTOR_FEDERATION_CATALOG_JSON", ""),
 		FederationSnapshotStore:        envString("DOCTOR_FEDERATION_SNAPSHOT_STORE", "file"),
 		FederationSnapshotRoot:         envString("DOCTOR_FEDERATION_SNAPSHOT_ROOT", "/doctor/v1/federation"),
 		FederationSnapshotTenant:       envString("DOCTOR_FEDERATION_SNAPSHOT_TENANT", "default"),

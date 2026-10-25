@@ -123,6 +123,7 @@ type TraceSummary struct {
 	SpanCount       int
 	Region          string
 	Account         string
+	Partition       string
 	Status          string
 }
 

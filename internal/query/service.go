@@ -1615,8 +1615,12 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 				if _, exists := traceMap[summary.TraceID]; exists {
 					continue
 				}
+				currentPartition := summary.Partition
+				if currentPartition == "" {
+					currentPartition = awsPartition(summary.Region, summary.Account)
+				}
 				summaryPartition, allowed := s.policyPartitionAllowed(r.Context(), summary.Account, summary.Region,
-					awsPartition(summary.Region, summary.Account), policy.SignalTraces)
+					currentPartition, policy.SignalTraces)
 				if !allowed {
 					continue
 				}

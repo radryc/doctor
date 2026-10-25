@@ -1,8 +1,11 @@
 # Multi-Account Federation — Implementation Status
 
 Date: 2026-10-22  
-Design: [`multi-account-federation-50k-design.md`](./multi-account-federation-50k-design.md)  
-Plan: [`multi-account-federation-50k.md`](./multi-account-federation-50k.md)
+Design: [`docs/federation/multi-account-federation-50k-design.md`](../../../docs/federation/multi-account-federation-50k-design.md)
+
+Plan: [`docs/federation/multi-account-federation-50k.md`](../../../docs/federation/multi-account-federation-50k.md)
+
+Trace plane: [`docs/observability/trace-plane-full.md`](../../../docs/observability/trace-plane-full.md)
 
 ## Session handoff — 2026-10-22
 
