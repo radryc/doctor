@@ -148,6 +148,9 @@ flushes on size or time boundaries.
 | `DOCTOR_RULES_URL` | doctor-rules API base URL for the recording-rules UI proxy | unset |
 | `DOCTOR_AWS_ENABLED` | Federate CloudWatch/Logs Insights/X-Ray via pusher-aws | `true` |
 | `DOCTOR_AWS_BACKEND_URL` / `DOCTOR_AWS_BACKEND_TOKEN` | pusher-aws read API base URL + bearer | unset |
+| `DOCTOR_FEDERATION_ENABLED` | Enable the multi-account AWS federation catalog | `false` |
+| `DOCTOR_FEDERATION_CATALOG_FILE` | Static federation catalog file | unset |
+| `DOCTOR_FEDERATION_CATALOG_JSON` | Inline federation catalog snapshot (AWS ECS deployments) | unset |
 | `DOCTOR_PROXY_ENABLED` | Route queries through the multi-backend proxy | `true` |
 | `DOCTOR_PROXY_BACKENDS_FILE` | YAML/JSON backend registry (hot-reloaded) | unset |
 | `DOCTOR_PROXY_MAX_INFLIGHT` / `DOCTOR_PROXY_BACKEND_TIMEOUT` | Fan-out bound / per-backend timeout | `32`, `15s` |

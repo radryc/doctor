@@ -679,6 +679,7 @@ func (m *Manager) QueryTraces(ctx context.Context, q awsstore.TraceQuery) ([]aws
 			if item.Region == "" {
 				item.Region = res.target.Region
 			}
+			item.Partition = targetPartitionForService(res.target, item.Service)
 			if existing, ok := byTrace[item.TraceID]; ok {
 				if item.SpanCount > existing.SpanCount {
 					byTrace[item.TraceID] = item
@@ -741,6 +742,13 @@ func (m *Manager) GetTrace(ctx context.Context, traceID string) ([]awsstore.Span
 			}
 			if span.Region == "" {
 				span.Region = result.target.Region
+			}
+			if partition := targetPartitionForService(result.target, span.Service); partition != "" {
+				span.Partition = partition
+				if span.Attributes == nil {
+					span.Attributes = map[string]string{}
+				}
+				span.Attributes["guardian_partition"] = partition
 			}
 			key := span.TraceID + "\x00" + span.SpanID
 			if _, ok := seen[key]; ok {
@@ -978,6 +986,23 @@ func (m *Manager) planMatches(ctx context.Context, match []string, start, end ti
 
 func (m *Manager) convertLogRecords(records []awsstore.LogRecord, target Target) []segment.LogRecord {
 	return proxy.AWSLogRecords(records, target.Tenant, "", target.Account, target.Region)
+}
+
+// targetPartitionForService resolves a partition for an AWS record. The
+// service map is authoritative for multi-partition accounts; a target with a
+// single partition is an unambiguous fallback. Never guess when both are
+// absent.
+func targetPartitionForService(target Target, service string) string {
+	service = strings.TrimSpace(service)
+	if service != "" {
+		if partition := strings.TrimSpace(target.ServicePartitions[service]); partition != "" {
+			return partition
+		}
+	}
+	if len(target.Partitions) == 1 {
+		return strings.TrimSpace(target.Partitions[0])
+	}
+	return ""
 }
 
 func (m *Manager) recordLatency(_ Target, _ string, _ time.Duration) {}

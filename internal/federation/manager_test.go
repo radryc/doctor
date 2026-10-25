@@ -167,6 +167,25 @@ func managerTestCatalog(t *testing.T) *Catalog {
 	return catalog
 }
 
+func TestTargetPartitionForService(t *testing.T) {
+	target := Target{
+		Partitions: []string{"checkout", "billing"},
+		ServicePartitions: map[string]string{
+			"checkout-api": "checkout",
+		},
+	}
+	if got := targetPartitionForService(target, "checkout-api"); got != "checkout" {
+		t.Fatalf("service partition = %q, want checkout", got)
+	}
+	if got := targetPartitionForService(target, "unknown"); got != "" {
+		t.Fatalf("unknown partition = %q, want empty", got)
+	}
+	single := Target{Partitions: []string{"checkout"}}
+	if got := targetPartitionForService(single, "anything"); got != "checkout" {
+		t.Fatalf("single partition = %q, want checkout", got)
+	}
+}
+
 func TestManagerRoutesAccountQueryToSingleTarget(t *testing.T) {
 	fakes := map[string]*fakeAWSClient{"aws-a": {}, "aws-b": {}}
 	manager := NewManager(managerTestCatalog(t), Options{
