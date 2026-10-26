@@ -19,6 +19,8 @@ import type {
   ProxyEndpointsResponse,
   ServiceDiscoveryResponse,
   ProbesResponse,
+  FederationStatus,
+  FederationTargetsResponse,
   TempoSearchResponse,
   TempoQueryRangeResponse,
   LokiQueryResponse,
@@ -152,6 +154,12 @@ export const api = {
       `/v1/proxy/endpoints${query ? `?${query}` : ""}`
     );
   },
+
+  // ── Federation Catalog ──────────────────────────────────────────────────────
+  getFederationStatus: () => fetchJSON<FederationStatus>("/v1/federation/status"),
+
+  getFederationTargets: (params: URLSearchParams) =>
+    fetchJSON<FederationTargetsResponse>(`/v1/federation/targets?${params}`),
 
   // Generic native API GET used by dashboard table widgets.
   getNativeJSON: <T>(path: string) => fetchJSON<T>(path),

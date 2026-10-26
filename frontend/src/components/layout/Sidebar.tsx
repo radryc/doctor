@@ -1,7 +1,7 @@
 import { NavLink } from "react-router-dom";
 import {
   Command, ListChecks, FileText, BarChart3, GitBranch,
-  LayoutDashboard, Search, Layers, Activity, Cpu,
+  LayoutDashboard, Search, Layers, Activity, Cpu, Cloud,
 } from "lucide-react";
 import { useConfig } from "../../context/ConfigContext";
 
@@ -9,6 +9,7 @@ const NAV = [
   { to: "/", label: "On-call", icon: LayoutDashboard, end: true },
   { to: "/dashboards", label: "Dashboards", icon: Layers, end: false },
   { to: "/services", label: "APM Services", icon: Activity, end: false },
+  { to: "/federation", label: "Federation", icon: Cloud, end: false },
   { to: "/rules", label: "Recording Rules", icon: ListChecks, end: false },
   { to: "/traces", label: "Traces", icon: GitBranch, end: false },
   { to: "/logs", label: "Logs", icon: FileText, end: false },

@@ -5,6 +5,7 @@ import DashboardPage from "./pages/DashboardPage";
 import DashboardsPage from "./pages/DashboardsPage";
 import ServicesPage from "./pages/ServicesPage";
 import ProbesPage from "./pages/ProbesPage";
+import FederationCatalogPage from "./pages/FederationCatalogPage";
 import TracesPage from "./pages/TracesPage";
 import LogsPage from "./pages/LogsPage";
 import MetricsPage from "./pages/MetricsPage";
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/dashboards/:id" element={<DashboardsPage />} />
             <Route path="/services" element={<ServicesPage />} />
             <Route path="/services/:name" element={<ServicesPage />} />
+            <Route path="/federation" element={<FederationCatalogPage />} />
             <Route path="/probes" element={<ProbesPage />} />
             <Route path="/rules" element={<RecordingRulesPage />} />
             <Route path="/traces" element={<TracesPage />} />

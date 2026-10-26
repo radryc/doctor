@@ -324,6 +324,70 @@ export interface ProxyEndpointsResponse {
   totalMatched?: number;
 }
 
+// ── Federation Catalog ──────────────────────────────────────────────────────
+export interface FederationCircuit {
+  target: string;
+  open: boolean;
+  half_open?: boolean;
+  failures: number;
+  open_until?: string;
+  last_error?: string;
+  last_error_at?: string;
+}
+
+export interface FederationTarget {
+  id: string;
+  account: string;
+  region: string;
+  provider?: string;
+  partitions: string[];
+  endpoint: string;
+  version?: string;
+  capabilities?: string[];
+  labels?: Record<string, string> | null;
+  healthy: boolean;
+  circuit?: FederationCircuit;
+  metric_count: number;
+  log_group_count: number;
+  xray_service_count: number;
+  metadata_fetched_at?: string;
+  metric_names?: string[];
+  log_groups?: string[];
+  xray_services?: string[];
+  service_partitions?: Record<string, string>;
+  tenant?: string;
+  priority?: number;
+}
+
+export interface FederationTargetsResponse {
+  targets: FederationTarget[];
+  total: number;
+  matched: number;
+  nextCursor?: string;
+  hasMore: boolean;
+}
+
+export interface FederationStatus {
+  enabled: boolean;
+  targets?: number;
+  accounts?: Record<string, number>;
+  account_count?: number;
+  accounts_truncated?: boolean;
+  max_fanout?: number;
+  version?: string;
+  source?: string;
+  loaded_at?: string;
+  stale?: boolean;
+  regions?: Record<string, number>;
+  partitions?: Record<string, number>;
+  partition_count?: number;
+  partitions_truncated?: boolean;
+  open_circuits?: number;
+  circuits?: FederationCircuit[];
+  recent_errors?: string[];
+  client_pool_size?: number;
+}
+
 // ── Guardian Synthetic Probes ───────────────────────────────────────────────
 export interface ProbeResult {
   probeID: string;

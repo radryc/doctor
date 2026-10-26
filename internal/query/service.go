@@ -94,15 +94,45 @@ type federationStatusProvider interface {
 	Status() map[string]any
 }
 
+type federationScopedStatusProvider interface {
+	StatusFor(func(string) bool) map[string]any
+}
+
 type federationTargetProvider interface {
 	TargetsPage(context.Context, string, string, string, string, string, int) federation.TargetPage
+}
+
+type federationScopedTargetProvider interface {
+	TargetsPageFor(context.Context, federation.TargetPageOptions) federation.TargetPage
 }
 
 type federationPlanProvider interface {
 	DebugPlan(context.Context, string, federation.Signal, string, string, string) map[string]any
 }
 
-func (s *Service) handleFederationStatus(w http.ResponseWriter, _ *http.Request) {
+// federationPartitionFilter returns nil when the caller can see the whole
+// catalog, or a predicate scoped to the caller's partitions when access policy
+// enforcement is active.
+func (s *Service) federationPartitionFilter(ctx context.Context) func(string) bool {
+	if s.policyGate == nil || !s.policyGate.Enforced() {
+		return nil
+	}
+	id := identityFromContext(ctx)
+	return func(partition string) bool {
+		return s.policyGate.CanSeePartition(id, partition)
+	}
+}
+
+func (s *Service) handleFederationStatus(w http.ResponseWriter, r *http.Request) {
+	visible := s.federationPartitionFilter(r.Context())
+	if provider, ok := s.aws.(federationScopedStatusProvider); ok {
+		writeJSON(w, http.StatusOK, provider.StatusFor(visible))
+		return
+	}
+	if visible != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
 	if provider, ok := s.aws.(federationStatusProvider); ok {
 		writeJSON(w, http.StatusOK, provider.Status())
 		return
@@ -119,6 +149,10 @@ func (s *Service) handleFederationPlan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
 		return
 	}
+	if s.policyGate != nil && s.policyGate.Enforced() && !s.policyGate.IsAdmin(identityFromContext(r.Context())) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "federation plan is admin only"})
+		return
+	}
 	q := r.URL.Query()
 	signal := federation.Signal(strings.ToLower(strings.TrimSpace(q.Get("signal"))))
 	writeJSON(w, http.StatusOK, provider.DebugPlan(
@@ -132,27 +166,49 @@ func (s *Service) handleFederationPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleFederationTargets(w http.ResponseWriter, r *http.Request) {
-	provider, ok := s.aws.(federationTargetProvider)
-	if !ok {
-		writeJSON(w, http.StatusOK, federation.TargetPage{Targets: []map[string]any{}})
-		return
-	}
 	limit := 100
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
 			limit = parsed
 		}
 	}
-	page := provider.TargetsPage(
-		r.Context(),
-		r.URL.Query().Get("account"),
-		r.URL.Query().Get("region"),
-		r.URL.Query().Get("partition"),
-		r.URL.Query().Get("q"),
-		r.URL.Query().Get("cursor"),
-		limit,
-	)
-	writeJSON(w, http.StatusOK, page)
+	includeMetadata := false
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include_metadata"))) {
+	case "1", "true", "yes":
+		includeMetadata = true
+	}
+	visible := s.federationPartitionFilter(r.Context())
+	opts := federation.TargetPageOptions{
+		Account:          r.URL.Query().Get("account"),
+		Region:           r.URL.Query().Get("region"),
+		Partition:        r.URL.Query().Get("partition"),
+		Query:            r.URL.Query().Get("q"),
+		Cursor:           r.URL.Query().Get("cursor"),
+		Limit:            limit,
+		VisiblePartition: visible,
+		IncludeMetadata:  includeMetadata,
+	}
+	if provider, ok := s.aws.(federationScopedTargetProvider); ok {
+		writeJSON(w, http.StatusOK, provider.TargetsPageFor(r.Context(), opts))
+		return
+	}
+	if visible != nil {
+		writeJSON(w, http.StatusOK, federation.TargetPage{Targets: []map[string]any{}})
+		return
+	}
+	if provider, ok := s.aws.(federationTargetProvider); ok {
+		writeJSON(w, http.StatusOK, provider.TargetsPage(
+			r.Context(),
+			opts.Account,
+			opts.Region,
+			opts.Partition,
+			opts.Query,
+			opts.Cursor,
+			opts.Limit,
+		))
+		return
+	}
+	writeJSON(w, http.StatusOK, federation.TargetPage{Targets: []map[string]any{}})
 }
 
 // SetTenantHeader sets the HTTP header used to route queries to a tenant when
