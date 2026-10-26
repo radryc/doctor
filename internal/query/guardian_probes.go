@@ -5,7 +5,56 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
+
+const probeStaleAfter = 3 * time.Minute
+
+type probePusherSummary struct {
+	Total     int `json:"total"`
+	Available int `json:"available"`
+	Down      int `json:"down"`
+}
+
+type probeEnvelope struct {
+	Probes []json.RawMessage `json:"probes"`
+}
+
+// summarizeProbePushers groups the latest probe results by pusher. A pusher is
+// available when at least one of its probes was checked inside the freshness
+// window; otherwise it is counted as down. The response never lists pusher
+// names, so a large fleet cannot flood the UI.
+func summarizeProbePushers(probes []json.RawMessage, now time.Time) probePusherSummary {
+	freshByPusher := map[string]bool{}
+	for _, raw := range probes {
+		var meta struct {
+			Pusher    string    `json:"pusher"`
+			CheckedAt time.Time `json:"checkedAt"`
+		}
+		if json.Unmarshal(raw, &meta) != nil {
+			continue
+		}
+		pusher := strings.TrimSpace(meta.Pusher)
+		if pusher == "" {
+			pusher = "unknown"
+		}
+		if _, ok := freshByPusher[pusher]; !ok {
+			freshByPusher[pusher] = false
+		}
+		if !meta.CheckedAt.IsZero() && now.Sub(meta.CheckedAt) <= probeStaleAfter {
+			freshByPusher[pusher] = true
+		}
+	}
+	summary := probePusherSummary{Total: len(freshByPusher)}
+	for _, fresh := range freshByPusher {
+		if fresh {
+			summary.Available++
+		} else {
+			summary.Down++
+		}
+	}
+	return summary
+}
 
 // handleGuardianProbes proxies Guardian's synthetic probe projection.
 //
@@ -50,30 +99,35 @@ func (s *Service) handleGuardianProbes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to read guardian response"})
 		return
 	}
-	if s.policyGate != nil && s.policyGate.Enforced() {
-		var envelope struct {
-			Probes []json.RawMessage `json:"probes"`
-		}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		var envelope probeEnvelope
 		if err := json.Unmarshal(body, &envelope); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid guardian probes response"})
 			return
 		}
-		id := identityFromContext(r.Context())
-		kept := make([]json.RawMessage, 0, len(envelope.Probes))
-		for _, raw := range envelope.Probes {
-			var meta struct {
-				Partition string `json:"partition"`
+		kept := envelope.Probes
+		if s.policyGate != nil && s.policyGate.Enforced() {
+			id := identityFromContext(r.Context())
+			filtered := make([]json.RawMessage, 0, len(kept))
+			for _, raw := range kept {
+				var meta struct {
+					Partition string `json:"partition"`
+				}
+				if json.Unmarshal(raw, &meta) != nil {
+					continue
+				}
+				if s.policyGate.CanSeePartition(id, meta.Partition) {
+					filtered = append(filtered, raw)
+				}
 			}
-			if json.Unmarshal(raw, &meta) != nil {
-				continue
-			}
-			if s.policyGate.CanSeePartition(id, meta.Partition) {
-				kept = append(kept, raw)
-			}
+			kept = filtered
 		}
-		body, err = json.Marshal(map[string]any{"probes": kept})
+		body, err = json.Marshal(map[string]any{
+			"probes":        kept,
+			"pusherSummary": summarizeProbePushers(kept, time.Now().UTC()),
+		})
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to encode filtered probes"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to encode probes"})
 			return
 		}
 	}

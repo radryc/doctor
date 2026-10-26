@@ -8,10 +8,20 @@ import "./probes.css";
 
 const PROBE_STALE_AFTER_MS = 3 * 60_000;
 
+interface ProbesResponseWithSummary {
+  probes: ProbeResult[];
+  pusherSummary?: {
+    total: number;
+    available: number;
+    down: number;
+  };
+}
+
 export default function ProbesPage() {
   const navigate = useNavigate();
   const { config } = useConfig();
   const [probes, setProbes] = useState<ProbeResult[]>([]);
+  const [pusherSummary, setPusherSummary] = useState<{ total: number; available: number; down: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -24,7 +34,11 @@ export default function ProbesPage() {
     setError("");
     api
       .getProbes()
-      .then((r) => setProbes(r.probes ?? []))
+      .then((response) => {
+        const r = response as ProbesResponseWithSummary;
+        setProbes(r.probes ?? []);
+        setPusherSummary(r.pusherSummary ?? null);
+      })
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load probes"))
       .finally(() => setLoading(false));
   }, []);
@@ -36,12 +50,11 @@ export default function ProbesPage() {
     return () => window.clearInterval(id);
   }, [load]);
 
-  const { partitions, types, stalePushers } = useMemo(() => {
+  const { partitions, types, downPushers, pusherTotal } = useMemo(() => {
     const p = new Set<string>();
     const t = new Set<string>();
     const totalByPusher = new Map<string, number>();
     const staleByPusher = new Map<string, number>();
-    const lastByPusher = new Map<string, string>();
     for (const probe of probes) {
       if (probe.partition) p.add(probe.partition);
       if (probe.type) t.add(probe.type);
@@ -49,21 +62,15 @@ export default function ProbesPage() {
       totalByPusher.set(pusher, (totalByPusher.get(pusher) ?? 0) + 1);
       if (probeStatus(probe) === "stale") {
         staleByPusher.set(pusher, (staleByPusher.get(pusher) ?? 0) + 1);
-        const checked = new Date(probe.checkedAt).getTime();
-        if (Number.isFinite(checked)) {
-          const previous = lastByPusher.get(pusher);
-          if (!previous || checked > new Date(previous).getTime()) {
-            lastByPusher.set(pusher, probe.checkedAt);
-          }
-        }
       }
     }
     return {
       partitions: [...p].sort(),
       types: [...t].sort(),
-      stalePushers: [...totalByPusher.keys()]
-        .filter((pusher) => (staleByPusher.get(pusher) ?? 0) === totalByPusher.get(pusher))
-        .map((pusher) => ({ pusher, lastCheckedAt: lastByPusher.get(pusher) ?? "" })),
+      downPushers: new Set(
+        [...totalByPusher.keys()].filter((pusher) => (staleByPusher.get(pusher) ?? 0) === totalByPusher.get(pusher)),
+      ),
+      pusherTotal: totalByPusher.size,
     };
   }, [probes]);
 
@@ -87,6 +94,11 @@ export default function ProbesPage() {
   const passing = probes.filter((p) => probeStatus(p) === "passing").length;
   const failing = probes.filter((p) => probeStatus(p) === "failing").length;
   const stale = probes.filter((p) => probeStatus(p) === "stale").length;
+  const pusherStats = pusherSummary ?? {
+    total: pusherTotal,
+    available: Math.max(0, pusherTotal - downPushers.size),
+    down: downPushers.size,
+  };
   const avgDuration =
     probes.length > 0
       ? Math.round(probes.reduce((sum, p) => sum + p.durationMs, 0) / probes.length)
@@ -150,21 +162,13 @@ export default function ProbesPage() {
       </div>
 
       <div className="panel-body probes-body">
-        {stalePushers.length > 0 && (
-          <div className="probe-source-warning">
-            <TriangleAlert size={14} />
-            <span>
-              No fresh probe data from pusher{stalePushers.length === 1 ? "" : "s"}{" "}
-              <strong>{stalePushers.map((item) => item.pusher).join(", ")}</strong>.
-              The pusher may be down; these probes are not counted as passing or failing.
-            </span>
-          </div>
-        )}
         <div className="probe-stats">
           <ProbeStat icon={<Activity size={14} />} label="Total probes" value={probes.length} />
           <ProbeStat icon={<CheckCircle2 size={14} />} label="Passing" value={passing} tone="ok" />
           <ProbeStat icon={<XCircle size={14} />} label="Failing" value={failing} tone="err" />
           <ProbeStat icon={<TriangleAlert size={14} />} label="Stale" value={stale} tone="warn" />
+          <ProbeStat icon={<CheckCircle2 size={14} />} label="Pushers available" value={pusherStats.available} tone="ok" />
+          <ProbeStat icon={<XCircle size={14} />} label="Pushers down" value={pusherStats.down} tone="err" />
           <ProbeStat icon={<TriangleAlert size={14} />} label="Avg latency" value={`${avgDuration}ms`} />
         </div>
 
@@ -191,8 +195,7 @@ export default function ProbesPage() {
             {filtered.map((probe) => {
               const status = probeStatus(probe);
               const pusherDown =
-                status === "stale" &&
-                stalePushers.some((item) => item.pusher === (probe.pusher || "unknown"));
+                status === "stale" && downPushers.has(probe.pusher || "unknown");
               const statusLabel =
                 status === "passing" ? "Up" : status === "failing" ? "Down" : pusherDown ? "Pusher down" : "Stale";
               return (
