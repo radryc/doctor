@@ -4,6 +4,9 @@ import { Activity, CheckCircle2, RefreshCw, TriangleAlert, XCircle } from "lucid
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import type { ProbeResult } from "../types/api";
+import "./probes.css";
+
+const PROBE_STALE_AFTER_MS = 3 * 60_000;
 
 export default function ProbesPage() {
   const navigate = useNavigate();
@@ -33,16 +36,34 @@ export default function ProbesPage() {
     return () => window.clearInterval(id);
   }, [load]);
 
-  const { partitions, types } = useMemo(() => {
+  const { partitions, types, stalePushers } = useMemo(() => {
     const p = new Set<string>();
     const t = new Set<string>();
+    const totalByPusher = new Map<string, number>();
+    const staleByPusher = new Map<string, number>();
+    const lastByPusher = new Map<string, string>();
     for (const probe of probes) {
       if (probe.partition) p.add(probe.partition);
       if (probe.type) t.add(probe.type);
+      const pusher = probe.pusher || "unknown";
+      totalByPusher.set(pusher, (totalByPusher.get(pusher) ?? 0) + 1);
+      if (probeStatus(probe) === "stale") {
+        staleByPusher.set(pusher, (staleByPusher.get(pusher) ?? 0) + 1);
+        const checked = new Date(probe.checkedAt).getTime();
+        if (Number.isFinite(checked)) {
+          const previous = lastByPusher.get(pusher);
+          if (!previous || checked > new Date(previous).getTime()) {
+            lastByPusher.set(pusher, probe.checkedAt);
+          }
+        }
+      }
     }
     return {
       partitions: [...p].sort(),
       types: [...t].sort(),
+      stalePushers: [...totalByPusher.keys()]
+        .filter((pusher) => (staleByPusher.get(pusher) ?? 0) === totalByPusher.get(pusher))
+        .map((pusher) => ({ pusher, lastCheckedAt: lastByPusher.get(pusher) ?? "" })),
     };
   }, [probes]);
 
@@ -65,6 +86,7 @@ export default function ProbesPage() {
 
   const passing = probes.filter((p) => probeStatus(p) === "passing").length;
   const failing = probes.filter((p) => probeStatus(p) === "failing").length;
+  const stale = probes.filter((p) => probeStatus(p) === "stale").length;
   const avgDuration =
     probes.length > 0
       ? Math.round(probes.reduce((sum, p) => sum + p.durationMs, 0) / probes.length)
@@ -78,7 +100,7 @@ export default function ProbesPage() {
           <p>
             {loading
               ? "Loading…"
-              : `${probes.length} probe${probes.length === 1 ? "" : "s"} · ${passing} passing · ${failing} failing`}
+              : `${probes.length} probe${probes.length === 1 ? "" : "s"} · ${passing} passing · ${failing} failing · ${stale} stale`}
           </p>
         </div>
         <div className="xp-toolbar">
@@ -109,6 +131,7 @@ export default function ProbesPage() {
               <option value="">All</option>
               <option value="passing">Passing</option>
               <option value="failing">Failing</option>
+              <option value="stale">Stale / pusher down</option>
             </select>
           </label>
           <button className="xp-live-btn" onClick={load} disabled={loading}>
@@ -127,10 +150,21 @@ export default function ProbesPage() {
       </div>
 
       <div className="panel-body probes-body">
+        {stalePushers.length > 0 && (
+          <div className="probe-source-warning">
+            <TriangleAlert size={14} />
+            <span>
+              No fresh probe data from pusher{stalePushers.length === 1 ? "" : "s"}{" "}
+              <strong>{stalePushers.map((item) => item.pusher).join(", ")}</strong>.
+              The pusher may be down; these probes are not counted as passing or failing.
+            </span>
+          </div>
+        )}
         <div className="probe-stats">
           <ProbeStat icon={<Activity size={14} />} label="Total probes" value={probes.length} />
           <ProbeStat icon={<CheckCircle2 size={14} />} label="Passing" value={passing} tone="ok" />
           <ProbeStat icon={<XCircle size={14} />} label="Failing" value={failing} tone="err" />
+          <ProbeStat icon={<TriangleAlert size={14} />} label="Stale" value={stale} tone="warn" />
           <ProbeStat icon={<TriangleAlert size={14} />} label="Avg latency" value={`${avgDuration}ms`} />
         </div>
 
@@ -156,11 +190,23 @@ export default function ProbesPage() {
             </div>
             {filtered.map((probe) => {
               const status = probeStatus(probe);
+              const pusherDown =
+                status === "stale" &&
+                stalePushers.some((item) => item.pusher === (probe.pusher || "unknown"));
+              const statusLabel =
+                status === "passing" ? "Up" : status === "failing" ? "Down" : pusherDown ? "Pusher down" : "Stale";
               return (
                 <div key={probe.probeID} className={`probe-row probe-row--${status}`}>
-                  <span className="probe-row__status">
+                  <span
+                    className="probe-row__status"
+                    title={
+                      status === "stale"
+                        ? `No fresh probe result in the last ${PROBE_STALE_AFTER_MS / 60_000} minutes`
+                        : undefined
+                    }
+                  >
                     <span className={`probe-dot probe-dot--${status}`} />
-                    {status === "passing" ? "Up" : "Down"}
+                    {statusLabel}
                   </span>
                   <span className="probe-row__identity">
                     <strong>{probe.name || probe.service}</strong>
@@ -180,7 +226,10 @@ export default function ProbesPage() {
                   <span className="probe-row__failures">
                     {probe.consecutiveFailures > 0 ? probe.consecutiveFailures : "—"}
                   </span>
-                  <span className="probe-row__checked">{formatAge(probe.checkedAt)}</span>
+                  <span className="probe-row__checked">
+                    {formatAge(probe.checkedAt)}
+                    {status === "stale" ? " · stale" : ""}
+                  </span>
                   <span className="probe-row__actions">
                     <button
                       className="xp-live-btn"
@@ -231,7 +280,7 @@ function ProbeStat({
   icon: React.ReactNode;
   label: string;
   value: number | string;
-  tone?: "ok" | "err";
+  tone?: "ok" | "err" | "warn";
 }) {
   return (
     <div className={`probe-stat${tone ? ` probe-stat--${tone}` : ""}`}>
@@ -242,7 +291,11 @@ function ProbeStat({
   );
 }
 
-function probeStatus(probe: ProbeResult): "passing" | "failing" {
+function probeStatus(probe: ProbeResult): "passing" | "failing" | "stale" {
+  const checked = new Date(probe.checkedAt).getTime();
+  if (!probe.checkedAt || !Number.isFinite(checked) || Date.now() - checked > PROBE_STALE_AFTER_MS) {
+    return "stale";
+  }
   const status = (probe.status ?? "").toLowerCase();
   if (probe.success || status === "up" || status === "passing" || status === "ok" || status === "healthy") {
     return "passing";
