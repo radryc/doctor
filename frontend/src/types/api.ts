@@ -203,6 +203,7 @@ export interface GuardianTopologyNode {
   type: "partition" | "intent" | "asset" | string;
   name: string;
   partition?: string;
+  parent_id?: string;
   intent?: string;
   asset?: string;
   status?: string;

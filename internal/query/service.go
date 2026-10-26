@@ -278,6 +278,7 @@ type guardianTopologyNode struct {
 	ID            string            `json:"id"`
 	Label         string            `json:"label"`
 	Kind          string            `json:"kind"`
+	ParentID      string            `json:"parentID,omitempty"`
 	Intent        string            `json:"intent,omitempty"`
 	Asset         string            `json:"asset,omitempty"`
 	AssetType     string            `json:"assetType,omitempty"`
@@ -1025,6 +1026,7 @@ func (s *Service) handleGuardianTopology(w http.ResponseWriter, r *http.Request)
 		Type          string            `json:"type"`
 		Name          string            `json:"name"`
 		Partition     string            `json:"partition"`
+		ParentID      string            `json:"parent_id,omitempty"`
 		Intent        string            `json:"intent,omitempty"`
 		Asset         string            `json:"asset,omitempty"`
 		Status        string            `json:"status"`
@@ -1065,6 +1067,7 @@ func (s *Service) handleGuardianTopology(w http.ResponseWriter, r *http.Request)
 				Type:          n.Kind,
 				Name:          n.Label,
 				Partition:     n.Partition,
+				ParentID:      n.ParentID,
 				Intent:        n.Intent,
 				Asset:         n.Asset,
 				Status:        n.Status,
@@ -1110,6 +1113,7 @@ func (s *Service) handleGuardianTopology(w http.ResponseWriter, r *http.Request)
 			Type:          n.Kind,
 			Name:          n.Label,
 			Partition:     partition,
+			ParentID:      n.ParentID,
 			Intent:        n.Intent,
 			Asset:         n.Asset,
 			Status:        n.Status,
