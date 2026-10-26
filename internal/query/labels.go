@@ -105,41 +105,49 @@ func canonicalServiceName(partition, intent, asset string) string {
 // Loki stream labels. Point attributes outside this set stay queryable via the
 // log body / line filters but do not fragment streams.
 var lokiLabelAllowlist = map[string]struct{}{
-	labelService:            {},
-	labelServiceFull:        {},
-	labelServiceAlias:       {},
-	labelTenant:             {},
-	labelSource:             {},
-	labelPartition:          {},
-	labelIntent:             {},
-	labelAsset:              {},
-	"guardian_cluster":      {},
-	"guardian_pusher":       {},
-	"guardian_provider":     {},
-	"guardian_account":      {},
-	"guardian_region":       {},
-	"k8s_cluster_name":      {},
-	"pusher":                {},
-	"provider":              {},
-	"level":                 {},
-	"trace_id":              {},
-	"span_id":               {},
-	"k8s_namespace_name":    {},
-	"k8s_pod_name":          {},
-	"k8s_container_name":    {},
-	"k8s_node_name":         {},
-	"guardian_component":    {},
-	"guardian_probe_name":   {},
-	"guardian_probe_type":   {},
-	"guardian_probe_mode":   {},
-	"guardian_probe_target": {},
-	"guardian_probe_path":   {},
-	"guardian_probe_id":     {},
-	"guardian_probe_status": {},
-	"aws_log_group":         {},
-	"aws_log_stream":        {},
-	"aws_region":            {},
-	"aws_account":           {},
+	labelService:                 {},
+	labelServiceFull:             {},
+	labelServiceAlias:            {},
+	labelTenant:                  {},
+	labelSource:                  {},
+	labelPartition:               {},
+	labelIntent:                  {},
+	labelAsset:                   {},
+	"guardian_cluster":           {},
+	"guardian_pusher":            {},
+	"guardian_provider":          {},
+	"guardian_account":           {},
+	"guardian_region":            {},
+	"k8s_cluster_name":           {},
+	"pusher":                     {},
+	"provider":                   {},
+	"level":                      {},
+	"trace_id":                   {},
+	"span_id":                    {},
+	"k8s_namespace_name":         {},
+	"k8s_pod_name":               {},
+	"k8s_container_name":         {},
+	"k8s_node_name":              {},
+	"guardian_component":         {},
+	"guardian_asset_type":        {},
+	"guardian_identity_kind":     {},
+	"guardian_producer_service":  {},
+	"guardian_target_partition":  {},
+	"guardian_target_intent":     {},
+	"guardian_target_asset":      {},
+	"guardian_target_asset_type": {},
+	"guardian_target_service":    {},
+	"guardian_probe_name":        {},
+	"guardian_probe_type":        {},
+	"guardian_probe_mode":        {},
+	"guardian_probe_target":      {},
+	"guardian_probe_path":        {},
+	"guardian_probe_id":          {},
+	"guardian_probe_status":      {},
+	"aws_log_group":              {},
+	"aws_log_stream":             {},
+	"aws_region":                 {},
+	"aws_account":                {},
 }
 
 func filterLokiLabels(labels map[string]string) map[string]string {
@@ -155,11 +163,39 @@ func filterLokiLabels(labels map[string]string) map[string]string {
 // traceIdentityLabels resolves the identity of a trace span, preferring the
 // typed fields and falling back to attributes stored with the span.
 func traceIdentityLabels(span segment.TraceRecord) (partition, intent, asset string) {
-	attrs := mergeStringMaps(span.ResourceAttributes, span.Attributes)
-	attrPartition, attrIntent, attrAsset := identityFromAttributes(attrs)
-	return firstNonEmpty(span.Partition, attrPartition),
-		firstNonEmpty(span.Intent, attrIntent),
-		firstNonEmpty(span.Asset, attrAsset)
+	// Identity belongs on the resource. Span attributes may describe a target
+	// (reconcile task, probe, flow), so they are only a last resort when the
+	// resource carries no identity at all.
+	resourcePartition, resourceIntent, resourceAsset := identityFromAttributes(span.ResourceAttributes)
+	partition = firstNonEmpty(span.Partition, resourcePartition)
+	intent = firstNonEmpty(span.Intent, resourceIntent)
+	asset = firstNonEmpty(span.Asset, resourceAsset)
+	if partition == "" && intent == "" && asset == "" {
+		partition, intent, asset = identityFromAttributes(span.Attributes)
+	}
+	return partition, intent, asset
+}
+
+func logIdentity(record segment.LogRecord) (partition, intent, asset string) {
+	resourcePartition, resourceIntent, resourceAsset := identityFromAttributes(record.ResourceAttributes)
+	partition = firstNonEmpty(record.Partition, resourcePartition)
+	intent = firstNonEmpty(record.Intent, resourceIntent)
+	asset = firstNonEmpty(record.Asset, resourceAsset)
+	if partition == "" && intent == "" && asset == "" {
+		partition, intent, asset = identityFromAttributes(record.Attributes)
+	}
+	return partition, intent, asset
+}
+
+func metricIdentity(record segment.MetricPointRecord) (partition, intent, asset string) {
+	resourcePartition, resourceIntent, resourceAsset := identityFromAttributes(record.ResourceAttributes)
+	partition = firstNonEmpty(record.Partition, resourcePartition)
+	intent = firstNonEmpty(record.Intent, resourceIntent)
+	asset = firstNonEmpty(record.Asset, resourceAsset)
+	if partition == "" && intent == "" && asset == "" {
+		partition, intent, asset = identityFromAttributes(record.Attributes)
+	}
+	return partition, intent, asset
 }
 
 // canonicalLabels projects a record's identity and attributes into the shared

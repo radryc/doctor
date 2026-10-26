@@ -184,3 +184,56 @@ func TestHandlePrometheusQueryExcludesCorrelationLabelsFromSeries(t *testing.T) 
 		t.Fatalf("bounded label route = %q, want /healthz", got)
 	}
 }
+
+func TestTraceIdentityDoesNotUseSpanTargetAttributes(t *testing.T) {
+	span := segment.TraceRecord{
+		Service: "guardian.pusher.k8s-main",
+		ResourceAttributes: map[string]string{
+			"guardian.partition": "guardian",
+		},
+		Attributes: map[string]string{
+			"guardian.partition": "doctor",
+			"guardian.intent":    "ingest",
+		},
+	}
+
+	partition, intent, asset := traceIdentityLabels(span)
+	if partition != "guardian" {
+		t.Fatalf("partition = %q, want the producer partition", partition)
+	}
+	if intent != "" || asset != "" {
+		t.Fatalf("target span attributes leaked into producer identity: %q/%q", intent, asset)
+	}
+}
+
+func TestCanonicalLabelsPreserveTargetIdentity(t *testing.T) {
+	labels := canonicalLabels(
+		"guardian.pusher.k8s-main",
+		"default",
+		"guardian",
+		"pusher",
+		"k8s-main",
+		map[string]string{
+			"guardian.target.partition": "doctor",
+			"guardian.target.intent":    "ingest",
+			"guardian.asset.type":       "Compute",
+			"guardian.identity.kind":    "platform",
+		},
+	)
+
+	if labels["guardian_target_partition"] != "doctor" {
+		t.Fatalf("guardian_target_partition = %q", labels["guardian_target_partition"])
+	}
+	if labels["guardian_target_intent"] != "ingest" {
+		t.Fatalf("guardian_target_intent = %q", labels["guardian_target_intent"])
+	}
+	if labels["guardian_asset_type"] != "Compute" {
+		t.Fatalf("guardian_asset_type = %q", labels["guardian_asset_type"])
+	}
+	if labels["guardian_identity_kind"] != "platform" {
+		t.Fatalf("guardian_identity_kind = %q", labels["guardian_identity_kind"])
+	}
+	if labels["service"] != "guardian.pusher.k8s-main" {
+		t.Fatalf("service = %q", labels["service"])
+	}
+}
