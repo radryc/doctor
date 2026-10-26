@@ -29,6 +29,10 @@ users:
     partitions: [div-a-orders, div-a-billing]
     logs: [div-a-orders, div-a-billing]
     traces: [div-a-orders, div-a-billing]
+  userb@example.com:
+    partitions: [div-b-inventory]
+    logs: [div-b-inventory]
+    traces: [div-b-inventory]
   admin@example.com:
     partitions: ["*"]
     role: admin

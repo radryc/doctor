@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Activity,
   BarChart3,
+  Cloud,
   Copy,
   Cpu,
   FileText,
@@ -99,6 +100,14 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         keywords: "services apm red latency errors traces catalog",
         icon: Activity,
         run: go("/services"),
+      },
+      {
+        id: "nav-federation",
+        group: "Go to",
+        label: "Federation catalog",
+        keywords: "aws federation catalog accounts partitions targets cloudwatch xray",
+        icon: Cloud,
+        run: go("/federation"),
       },
       {
         id: "nav-probes",

@@ -291,17 +291,33 @@ const statusMaxPartitionEntries = 512
 
 // Status summarizes the federation catalog for the admin/status endpoint.
 func (m *Manager) Status() map[string]any {
+	return m.StatusFor(nil)
+}
+
+// StatusFor summarizes the catalog while hiding targets and partitions that
+// the caller cannot see. A nil predicate means every partition is visible.
+func (m *Manager) StatusFor(visible func(string) bool) map[string]any {
 	state := m.current()
 	if state == nil || state.catalog == nil {
 		return map[string]any{"enabled": false}
 	}
 	targets := state.catalog.Targets()
+	accounts := make(map[string]int)
 	regions := make(map[string]int)
 	partitions := make(map[string]int, statusMaxPartitionEntries)
 	allPartitions := make(map[string]struct{}, len(targets))
+	visibleTargets := make(map[string]struct{}, len(targets))
+	targetCount := 0
 	for _, target := range targets {
+		visiblePartitions := visibleTargetPartitions(target.Partitions, visible)
+		if visible != nil && len(visiblePartitions) == 0 {
+			continue
+		}
+		targetCount++
+		visibleTargets[target.ID] = struct{}{}
+		accounts[target.Account]++
 		regions[target.Region]++
-		for _, partition := range target.Partitions {
+		for _, partition := range visiblePartitions {
 			allPartitions[partition] = struct{}{}
 			if _, included := partitions[partition]; included {
 				partitions[partition]++
@@ -312,6 +328,20 @@ func (m *Manager) Status() map[string]any {
 	}
 	stale := m.staleAfter > 0 && !state.loadedAt.IsZero() && time.Since(state.loadedAt) > m.staleAfter
 	openCircuits, circuits := m.circuitStatus()
+	if visible != nil {
+		filtered := make([]breakerSnapshot, 0, len(circuits))
+		openCircuits = 0
+		for _, circuit := range circuits {
+			if _, ok := visibleTargets[circuit.Target]; !ok {
+				continue
+			}
+			filtered = append(filtered, circuit)
+			if circuit.Open {
+				openCircuits++
+			}
+		}
+		circuits = filtered
+	}
 	recentErrors := make([]string, 0, len(circuits))
 	for _, circuit := range circuits {
 		if circuit.LastError != "" {
@@ -323,7 +353,9 @@ func (m *Manager) Status() map[string]any {
 	}
 	return map[string]any{
 		"enabled":              m.Enabled(),
-		"targets":              len(targets),
+		"targets":              targetCount,
+		"accounts":             accounts,
+		"account_count":        len(accounts),
 		"max_fanout":           state.planner.MaxFanout(),
 		"version":              state.catalog.Version(),
 		"source":               state.source,
