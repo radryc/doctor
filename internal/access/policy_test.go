@@ -184,6 +184,26 @@ func TestAWSCanonicalization(t *testing.T) {
 	}
 }
 
+func TestCanSeePartition(t *testing.T) {
+	gate := newTestGate(t, true)
+	if !gate.CanSeePartition(foo(), "aws-x") || !gate.CanSeePartition(foo(), "k8s-z") {
+		t.Fatal("foo should see granted partitions")
+	}
+	if gate.CanSeePartition(foo(), "other") {
+		t.Fatal("foo should not see an ungranted partition")
+	}
+	if gate.CanSeePartition(foo(), "") {
+		t.Fatal("empty partition should be denied under enforcement")
+	}
+	if !gate.CanSeePartition(admin(), "other") {
+		t.Fatal("admin should see every partition")
+	}
+	observe := newTestGate(t, false)
+	if !observe.CanSeePartition(foo(), "other") {
+		t.Fatal("observe mode should not filter")
+	}
+}
+
 func TestSignalForPath(t *testing.T) {
 	cases := []struct {
 		path   string

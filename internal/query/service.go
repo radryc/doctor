@@ -1685,7 +1685,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 		if partition != "" && part != partition {
 			continue
 		}
-		comp := firstNonEmpty(attrs["guardian.component"], attrs["guardian_component"], rec.Service)
+		comp := firstNonEmpty(rec.Service, attrs["guardian.component"], attrs["guardian_component"])
 		if comp != "" && !seen[comp] {
 			seen[comp] = true
 			components = append(components, comp)
@@ -1764,28 +1764,39 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 }
 
 type svcInfo struct {
-	hasTraces   bool
-	hasMetrics  bool
-	hasLogs     bool
-	fullName    string
-	partition   string
-	intent      string
-	asset       string
-	cluster     string
-	pusher      string
-	truncated   bool
-	lastSeen    time.Time
-	traceCount  int
-	metricNames map[string]struct{}
+	hasTraces           bool
+	hasMetrics          bool
+	hasLogs             bool
+	hasRuntimeMetrics   bool
+	hasAssetObservation bool
+	fullName            string
+	alias               string
+	assetType           string
+	identityKind        string
+	partition           string
+	intent              string
+	asset               string
+	cluster             string
+	pusher              string
+	truncated           bool
+	lastSeen            time.Time
+	traceIDs            map[string]struct{}
+	traceErrorIDs       map[string]struct{}
+	traceSpanCount      int
+	traceErrorCount     int
+	logErrorCount       int
+	metricNames         map[string]struct{}
 }
 
 type discoveredService struct {
 	// Name is the canonical service identity emitted by the query service.
-	Name string `json:"name"`
-	// Service is kept as a compatibility alias for API consumers that used the
-	// older service field. New clients should read name.
-	Service       string   `json:"service"`
+	Name          string   `json:"name"`
 	FullName      string   `json:"full_name,omitempty"`
+	Alias         string   `json:"alias,omitempty"`
+	Kind          string   `json:"kind"`
+	AssetType     string   `json:"asset_type,omitempty"`
+	IdentityKind  string   `json:"identity_kind,omitempty"`
+	Runtime       bool     `json:"runtime"`
 	Truncated     bool     `json:"truncated,omitempty"`
 	HasMetrics    bool     `json:"has_metrics"`
 	HasTraces     bool     `json:"has_traces"`
@@ -1799,8 +1810,26 @@ type discoveredService struct {
 	LastSeen      string   `json:"last_seen"`
 	TraceCount    int      `json:"trace_count"`
 	LogCount      int      `json:"log_count"`
-	ErrorRate     float64  `json:"error_rate,omitempty"`
+	ErrorRate     float64  `json:"error_rate"`
 	SuggestedDash []string `json:"suggested_dashboards"`
+}
+
+// filterVisibleServices scopes the APM service catalog to the caller's
+// partitions. Metrics remain globally readable through the metrics APIs; this
+// prevents the catalog from exposing service identities from other
+// partitions.
+func (s *Service) filterVisibleServices(ctx context.Context, services []discoveredService) []discoveredService {
+	if s.policyGate == nil || !s.policyGate.Enforced() {
+		return services
+	}
+	id := identityFromContext(ctx)
+	kept := make([]discoveredService, 0, len(services))
+	for _, svc := range services {
+		if s.policyGate.CanSeePartition(id, svc.Partition) {
+			kept = append(kept, svc)
+		}
+	}
+	return kept
 }
 
 type serviceSuggestion struct {
@@ -1835,6 +1864,15 @@ func mergeServiceIdentity(info *svcInfo, primary, secondary map[string]string, p
 	} else if info.partition != "" && info.intent != "" && info.asset != "" {
 		info.fullName = info.partition + "." + info.intent + "." + info.asset
 	}
+	if alias := firstNonEmpty(attr(attrServiceAlias), attr(labelServiceAlias)); alias != "" {
+		info.alias = alias
+	}
+	if assetType := firstNonEmpty(attr("guardian.asset.type"), attr("guardian_asset_type")); assetType != "" {
+		info.assetType = assetType
+	}
+	if identityKind := firstNonEmpty(attr("guardian.identity.kind"), attr("guardian_identity_kind")); identityKind != "" {
+		info.identityKind = identityKind
+	}
 	if cluster := firstNonEmpty(attr("guardian.cluster"), attr("k8s.cluster.name")); cluster != "" {
 		info.cluster = cluster
 	}
@@ -1854,24 +1892,36 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 	}
 	cutoff := time.Now().UTC().Add(-window)
 
+	svcMap := make(map[string]*svcInfo)
+	getInfo := func(name string) *svcInfo {
+		info, ok := svcMap[name]
+		if !ok {
+			info = newSvcInfo()
+			svcMap[name] = info
+		}
+		return info
+	}
+
 	// Collect services from traces.
 	traces, err := s.logEngine.QueryTraces(r.Context(), tenant, "", "", cutoff, time.Now().UTC(), 5000)
 	if err != nil {
 		traces = nil
 	}
-
-	svcMap := make(map[string]*svcInfo)
 	for _, t := range traces {
 		if t.Service == "" {
 			continue
 		}
-		info, ok := svcMap[t.Service]
-		if !ok {
-			info = &svcInfo{metricNames: make(map[string]struct{})}
-			svcMap[t.Service] = info
-		}
+		info := getInfo(t.Service)
 		info.hasTraces = true
-		info.traceCount++
+		info.traceSpanCount++
+		if t.TraceID != "" {
+			info.traceIDs[t.TraceID] = struct{}{}
+			if traceStatusIsError(t.StatusCode) {
+				info.traceErrorIDs[t.TraceID] = struct{}{}
+			}
+		} else if traceStatusIsError(t.StatusCode) {
+			info.traceErrorCount++
+		}
 		partition, intent, asset := traceIdentityLabels(t)
 		mergeServiceIdentity(info, t.ResourceAttributes, t.Attributes, partition, intent, asset)
 		if t.EndTime.After(info.lastSeen) {
@@ -1891,19 +1941,15 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		if l.Service == "" {
 			continue
 		}
-		info, ok := svcMap[l.Service]
-		if !ok {
-			info = &svcInfo{metricNames: make(map[string]struct{})}
-			svcMap[l.Service] = info
-		}
+		info := getInfo(l.Service)
 		info.hasLogs = true
-		attrs := mergeStringMaps(l.ResourceAttributes, l.Attributes)
-		partition, intent, asset := identityFromAttributes(attrs)
+		partition, intent, asset := logIdentity(l)
 		mergeServiceIdentity(info, l.ResourceAttributes, l.Attributes, partition, intent, asset)
 		logCountBySvc[l.Service]++
 		totalLogs++
 		if l.SeverityText == "ERROR" || l.SeverityText == "FATAL" || l.SeverityNumber >= 17 {
 			errorCountBySvc[l.Service]++
+			info.logErrorCount++
 		}
 		if l.Timestamp.After(info.lastSeen) {
 			info.lastSeen = l.Timestamp
@@ -1923,15 +1969,31 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		if m.Service == "" {
 			return nil
 		}
-		info, ok := svcMap[m.Service]
-		if !ok {
-			info = &svcInfo{metricNames: make(map[string]struct{})}
-			svcMap[m.Service] = info
-		}
+		info := getInfo(m.Service)
 		info.hasMetrics = true
-		attrs := mergeStringMaps(m.ResourceAttributes, m.Attributes)
-		partition, intent, asset := identityFromAttributes(attrs)
+		partition, intent, asset := metricIdentity(m)
 		mergeServiceIdentity(info, m.ResourceAttributes, m.Attributes, partition, intent, asset)
+		if m.MetricName == assetObservationMetric {
+			info.hasAssetObservation = true
+			// Asset observation describes the target, so its point-level alias
+			// and type win over the producer's resource metadata.
+			info.alias = firstNonEmpty(m.Attributes["service.alias"], m.Attributes["service_alias"])
+			info.identityKind = "managed"
+			// Asset observation describes the target, so its point-level type
+			// wins over the producer's resource type.
+			if assetType := firstNonEmpty(
+				m.Attributes["guardian_asset_type"],
+				m.Attributes["guardian.asset.type"],
+				info.assetType,
+			); assetType != "" {
+				info.assetType = assetType
+			}
+			if info.partition != "" && info.intent != "" && info.asset != "" {
+				info.fullName = info.partition + "." + info.intent + "." + info.asset
+			}
+		} else {
+			info.hasRuntimeMetrics = true
+		}
 		if m.MetricName != "" {
 			info.metricNames[m.MetricName] = struct{}{}
 		}
@@ -1947,18 +2009,18 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		if svc.Name == "" {
 			continue
 		}
-		info, ok := svcMap[svc.Name]
-		if !ok {
-			info = &svcInfo{metricNames: make(map[string]struct{})}
-			svcMap[svc.Name] = info
-		}
+		info := getInfo(svc.Name)
 		info.hasTraces = true
-		if partition := awsPartition(svc.Region, svc.Account); partition != "" {
+		partition := awsPartition(svc.Region, svc.Account)
+		if s.policyGate != nil {
+			partition = s.policyGate.CanonicalPartition(svc.Account, svc.Region, partition)
+		}
+		if partition != "" {
 			info.partition = partition
 		}
 	}
 
-	// Build response.
+	includeAssets := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_assets")), "true")
 	services := make([]discoveredService, 0, len(svcMap))
 	for name, info := range svcMap {
 		metricNames := make([]string, 0, len(info.metricNames))
@@ -1967,6 +2029,10 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		}
 		sort.Strings(metricNames)
 
+		kind := classifyServiceKind(info)
+		if kind == serviceKindAsset && !includeAssets {
+			continue
+		}
 		suggested := []string{}
 		if info.hasTraces || info.hasLogs || info.hasMetrics {
 			suggested = append(suggested, "red")
@@ -1975,36 +2041,55 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 			suggested = append(suggested, "use")
 		}
 
+		traceCount := len(info.traceIDs)
+		if traceCount == 0 {
+			traceCount = info.traceSpanCount
+		}
 		errorRate := 0.0
 		if totalLogs > 0 && logCountBySvc[name] > 0 {
 			errorRate = float64(errorCountBySvc[name]) / float64(logCountBySvc[name])
+		} else if traceCount > 0 {
+			errorTraces := len(info.traceErrorIDs) + info.traceErrorCount
+			errorRate = float64(errorTraces) / float64(traceCount)
+			if errorRate > 1 {
+				errorRate = 1
+			}
 		}
 
 		fullName := info.fullName
 		if fullName == "" {
 			fullName = name
 		}
+		partition := info.partition
+		if s.policyGate != nil && partition != "" {
+			partition = s.policyGate.CanonicalPartition("", "", partition)
+		}
 		services = append(services, discoveredService{
 			Name:          name,
-			Service:       name,
 			FullName:      fullName,
+			Alias:         info.alias,
+			Kind:          kind,
+			AssetType:     info.assetType,
+			IdentityKind:  info.identityKind,
+			Runtime:       kind == serviceKindRuntime,
 			Truncated:     info.truncated,
 			HasMetrics:    info.hasMetrics,
 			HasTraces:     info.hasTraces,
 			HasLogs:       info.hasLogs,
 			MetricNames:   metricNames,
-			Partition:     info.partition,
+			Partition:     partition,
 			Intent:        info.intent,
 			Asset:         info.asset,
 			Cluster:       info.cluster,
 			Pusher:        info.pusher,
 			LastSeen:      formatRFC3339OrEmpty(info.lastSeen),
-			TraceCount:    info.traceCount,
+			TraceCount:    traceCount,
 			LogCount:      logCountBySvc[name],
 			ErrorRate:     errorRate,
 			SuggestedDash: suggested,
 		})
 	}
+	services = s.filterVisibleServices(r.Context(), services)
 
 	sort.Slice(services, func(i, j int) bool {
 		return services[i].Name < services[j].Name
@@ -2015,8 +2100,51 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 		"window":         window.String(),
 		"services":       services,
 		"total_services": len(services),
+		"include_assets": includeAssets,
 		"discovered_at":  time.Now().UTC(),
 	})
+}
+
+const (
+	serviceKindRuntime     = "runtime"
+	serviceKindAsset       = "asset"
+	assetObservationMetric = "guardian_asset_observation_current"
+)
+
+func newSvcInfo() *svcInfo {
+	return &svcInfo{
+		metricNames:   make(map[string]struct{}),
+		traceIDs:      make(map[string]struct{}),
+		traceErrorIDs: make(map[string]struct{}),
+	}
+}
+
+func classifyServiceKind(info *svcInfo) string {
+	if info == nil {
+		return serviceKindAsset
+	}
+	switch info.assetType {
+	case "Compute", "LoadBalancer":
+		return serviceKindRuntime
+	case "":
+		// No asset type (older producers or external services). Presence of
+		// runtime signals is a safe fallback; an observation-only series is an
+		// asset by default.
+		if info.hasTraces || info.hasLogs || info.hasRuntimeMetrics {
+			return serviceKindRuntime
+		}
+		return serviceKindAsset
+	default:
+		if info.hasTraces || info.hasLogs || info.hasRuntimeMetrics {
+			return serviceKindRuntime
+		}
+		return serviceKindAsset
+	}
+}
+
+func traceStatusIsError(status string) bool {
+	status = strings.ToUpper(strings.TrimSpace(status))
+	return strings.Contains(status, "ERROR")
 }
 
 func (s *Service) handleServiceSuggest(w http.ResponseWriter, r *http.Request) {

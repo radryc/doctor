@@ -1,6 +1,7 @@
 package query
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -48,6 +49,33 @@ func (s *Service) handleGuardianProbes(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to read guardian response"})
 		return
+	}
+	if s.policyGate != nil && s.policyGate.Enforced() {
+		var envelope struct {
+			Probes []json.RawMessage `json:"probes"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid guardian probes response"})
+			return
+		}
+		id := identityFromContext(r.Context())
+		kept := make([]json.RawMessage, 0, len(envelope.Probes))
+		for _, raw := range envelope.Probes {
+			var meta struct {
+				Partition string `json:"partition"`
+			}
+			if json.Unmarshal(raw, &meta) != nil {
+				continue
+			}
+			if s.policyGate.CanSeePartition(id, meta.Partition) {
+				kept = append(kept, raw)
+			}
+		}
+		body, err = json.Marshal(map[string]any{"probes": kept})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to encode filtered probes"})
+			return
+		}
 	}
 	if contentType := strings.TrimSpace(resp.Header.Get("Content-Type")); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
