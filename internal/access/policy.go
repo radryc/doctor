@@ -139,6 +139,27 @@ func (g *PolicyGate) Allowed(id authz.Identity, signal policy.Signal) bool {
 	return g.Ready()
 }
 
+// CanSeePartition reports whether the identity may see the partition in
+// catalog/list views such as APM Services, Synthetics, and Fleet. Metrics stay
+// globally readable; this gate is for partition identities, not metric data.
+// Observe mode and a disabled gate pass through.
+func (g *PolicyGate) CanSeePartition(id authz.Identity, partition string) bool {
+	if g == nil || !g.enforce {
+		return true
+	}
+	if g.IsAdmin(id) {
+		return true
+	}
+	p := g.policy()
+	if p == nil {
+		return false
+	}
+	if strings.TrimSpace(partition) == "" {
+		return false
+	}
+	return p.CanSeePartition(id, partition)
+}
+
 // PartitionVisible decides one record. Under enforcement, records without a
 // partition are denied unless the identity is an admin.
 func (g *PolicyGate) PartitionVisible(id authz.Identity, partition string, signal policy.Signal) bool {
