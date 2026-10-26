@@ -1285,3 +1285,92 @@ func TestHandleLokiSeriesRespectsRequestedTimeRange(t *testing.T) {
 		t.Fatalf("service = %q, want old-api", got)
 	}
 }
+
+func TestHandleServiceDiscoveryGroupsComponentsAndHidesAssets(t *testing.T) {
+	base := time.Now().UTC().Add(-time.Minute)
+	backend := &fakeLogEngineBackend{
+		traces: []segment.TraceRecord{
+			{Service: "doctor.ingest.ingest", TraceID: "trace-1", StatusCode: "STATUS_CODE_UNSET", StartTime: base, EndTime: base, Partition: "doctor", Intent: "ingest", Asset: "ingest"},
+			{Service: "doctor.ingest.ingest", TraceID: "trace-2", StatusCode: "STATUS_CODE_ERROR", StartTime: base, EndTime: base, Partition: "doctor", Intent: "ingest", Asset: "ingest"},
+		},
+		logs: []segment.LogRecord{
+			{Service: "doctor.ingest.ingest", SeverityText: "ERROR", Timestamp: base, Partition: "doctor", Intent: "ingest", Asset: "ingest"},
+			{Service: "doctor.ingest.ingest", SeverityText: "INFO", Timestamp: base, Partition: "doctor", Intent: "ingest", Asset: "ingest"},
+		},
+		metrics: []segment.MetricPointRecord{
+			{
+				Service:    "doctor.ingest.ingest",
+				Tenant:     "default",
+				MetricName: "http_requests_total",
+				Timestamp:  base,
+				Partition:  "doctor",
+				Intent:     "ingest",
+				Asset:      "ingest",
+				Attributes: map[string]string{"guardian_asset_type": "Compute"},
+			},
+			{
+				Service:    "agent.secrets.deepseek-api-key",
+				Tenant:     "default",
+				MetricName: "guardian_asset_observation_current",
+				Timestamp:  base,
+				Partition:  "agent",
+				Intent:     "secrets",
+				Asset:      "deepseek-api-key",
+				Attributes: map[string]string{"guardian_asset_type": "Secret"},
+			},
+		},
+	}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	type serviceResult struct {
+		Name       string  `json:"name"`
+		Kind       string  `json:"kind"`
+		AssetType  string  `json:"asset_type"`
+		Runtime    bool    `json:"runtime"`
+		TraceCount int     `json:"trace_count"`
+		ErrorRate  float64 `json:"error_rate"`
+	}
+	decode := func(query string) map[string]serviceResult {
+		req := httptest.NewRequest(http.MethodGet, "/v1/services/discover?tenant=default&window=24h"+query, nil)
+		rec := httptest.NewRecorder()
+		svc.handleServiceDiscovery(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Services []serviceResult `json:"services"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		out := map[string]serviceResult{}
+		for _, service := range resp.Services {
+			out[service.Name] = service
+		}
+		return out
+	}
+
+	runtime := decode("")
+	if _, ok := runtime["agent.secrets.deepseek-api-key"]; ok {
+		t.Fatalf("asset leaked into the default catalog: %#v", runtime)
+	}
+	ingest, ok := runtime["doctor.ingest.ingest"]
+	if !ok {
+		t.Fatalf("doctor.ingest.ingest missing: %#v", runtime)
+	}
+	if ingest.Kind != serviceKindRuntime || !ingest.Runtime {
+		t.Fatalf("ingest kind = %q runtime = %v", ingest.Kind, ingest.Runtime)
+	}
+	if ingest.TraceCount != 2 {
+		t.Fatalf("ingest trace count = %d, want 2 unique traces", ingest.TraceCount)
+	}
+
+	withAssets := decode("&include_assets=true")
+	asset, ok := withAssets["agent.secrets.deepseek-api-key"]
+	if !ok {
+		t.Fatalf("asset missing when include_assets=true: %#v", withAssets)
+	}
+	if asset.Kind != serviceKindAsset || asset.AssetType != "Secret" || asset.Runtime {
+		t.Fatalf("asset classification = %#v", asset)
+	}
+}

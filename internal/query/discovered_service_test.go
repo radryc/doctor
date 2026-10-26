@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestDiscoveredServiceEmitsNameAndCompatibilityAlias(t *testing.T) {
-	data, err := json.Marshal(discoveredService{Name: "api", Service: "api"})
+func TestDiscoveredServiceEmitsName(t *testing.T) {
+	data, err := json.Marshal(discoveredService{Name: "api"})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -17,7 +17,7 @@ func TestDiscoveredServiceEmitsNameAndCompatibilityAlias(t *testing.T) {
 	if payload["name"] != "api" {
 		t.Fatalf("name = %v, want api", payload["name"])
 	}
-	if payload["service"] != "api" {
-		t.Fatalf("service = %v, want api", payload["service"])
+	if _, ok := payload["service"]; ok {
+		t.Fatalf("legacy service field must not be emitted: %v", payload["service"])
 	}
 }
