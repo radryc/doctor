@@ -62,6 +62,10 @@ export interface TraceSummary {
 
 export interface RecentTracesResponse {
   traces: TraceSummary[];
+  returned?: number;
+  has_more?: boolean;
+  next_cursor?: string;
+  page_size?: number;
 }
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
@@ -482,9 +486,12 @@ export interface LokiQueryResponse {
 export interface DiscoveredService {
   /** Canonical service name (matches the backend `name` field). */
   name: string;
-  /** @deprecated Compatibility alias emitted by older Doctor backends. */
-  service?: string;
   full_name?: string;
+  alias?: string;
+  kind?: "runtime" | "asset" | string;
+  asset_type?: string;
+  identity_kind?: string;
+  runtime?: boolean;
   truncated?: boolean;
   partition?: string;
   intent?: string;
@@ -509,6 +516,7 @@ export interface DiscoveredService {
 export interface ServiceDiscoveryResponse {
   services: DiscoveredService[];
   total_services?: number;
+  include_assets?: boolean;
   window?: string;
   discovered_at?: string;
 }

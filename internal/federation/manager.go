@@ -289,6 +289,10 @@ func (m *Manager) Planner() *Planner {
 // operator convenience, not for serializing 150k rows.
 const statusMaxPartitionEntries = 512
 
+// statusMaxAccountEntries bounds the account map in the status response for
+// the same reason. The account_count field remains complete.
+const statusMaxAccountEntries = 512
+
 // Status summarizes the federation catalog for the admin/status endpoint.
 func (m *Manager) Status() map[string]any {
 	return m.StatusFor(nil)
@@ -302,7 +306,8 @@ func (m *Manager) StatusFor(visible func(string) bool) map[string]any {
 		return map[string]any{"enabled": false}
 	}
 	targets := state.catalog.Targets()
-	accounts := make(map[string]int)
+	accounts := make(map[string]int, statusMaxAccountEntries)
+	allAccounts := make(map[string]struct{}, len(targets))
 	regions := make(map[string]int)
 	partitions := make(map[string]int, statusMaxPartitionEntries)
 	allPartitions := make(map[string]struct{}, len(targets))
@@ -315,7 +320,12 @@ func (m *Manager) StatusFor(visible func(string) bool) map[string]any {
 		}
 		targetCount++
 		visibleTargets[target.ID] = struct{}{}
-		accounts[target.Account]++
+		allAccounts[target.Account] = struct{}{}
+		if _, included := accounts[target.Account]; included {
+			accounts[target.Account]++
+		} else if len(accounts) < statusMaxAccountEntries {
+			accounts[target.Account] = 1
+		}
 		regions[target.Region]++
 		for _, partition := range visiblePartitions {
 			allPartitions[partition] = struct{}{}
@@ -355,7 +365,8 @@ func (m *Manager) StatusFor(visible func(string) bool) map[string]any {
 		"enabled":              m.Enabled(),
 		"targets":              targetCount,
 		"accounts":             accounts,
-		"account_count":        len(accounts),
+		"account_count":        len(allAccounts),
+		"accounts_truncated":   len(allAccounts) > len(accounts),
 		"max_fanout":           state.planner.MaxFanout(),
 		"version":              state.catalog.Version(),
 		"source":               state.source,

@@ -220,11 +220,17 @@ func (f *fakeLogEngineBackend) StreamMetricSeries(_ context.Context, tenant stri
 		if query.Service != "" && metric.Service != query.Service {
 			continue
 		}
-		labelsKey := metricLabelMapString(metric.Attributes)
+		if !fakeMetricLabelsMatch(metric, query.LabelMatchers) {
+			continue
+		}
+		labelsKey := metricLabelMapString(metric.Attributes) + "\x01" + metricLabelMapString(metric.ResourceAttributes)
 		key := seriesKey{name: metric.MetricName, key: metric.Service + "\x00" + labelsKey}
 		entry := byKey[key]
 		if entry == nil {
-			labels := make(map[string]string, len(metric.Attributes))
+			labels := make(map[string]string, len(metric.Attributes)+len(metric.ResourceAttributes))
+			for name, value := range metric.ResourceAttributes {
+				labels[name] = value
+			}
 			for name, value := range metric.Attributes {
 				labels[name] = value
 			}
@@ -274,6 +280,9 @@ func fakeMetricLabelsMatch(metric segment.MetricPointRecord, matchers []segment.
 			value = metric.Service
 		default:
 			value = metric.Attributes[matcher.Name]
+			if value == "" {
+				value = metric.ResourceAttributes[matcher.Name]
+			}
 		}
 		switch matcher.Type {
 		case segment.MetricMatchEqual:

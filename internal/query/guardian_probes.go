@@ -21,9 +21,12 @@ type probeEnvelope struct {
 }
 
 // summarizeProbePushers groups the latest probe results by pusher. A pusher is
-// available when at least one of its probes was checked inside the freshness
-// window; otherwise it is counted as down. The response never lists pusher
-// names, so a large fleet cannot flood the UI.
+// connected when at least one of its probes was checked inside the freshness
+// window; otherwise it is counted as not connected ("down" in the JSON for
+// compatibility). "Not connected" here means no fresh synthetic probe result:
+// the pusher process may still be running with no probe targets (for example
+// after its stacks were deleted). The response never lists pusher names, so a
+// large fleet cannot flood the UI.
 func summarizeProbePushers(probes []json.RawMessage, now time.Time) probePusherSummary {
 	freshByPusher := map[string]bool{}
 	for _, raw := range probes {

@@ -12,6 +12,28 @@ import (
 // MaxServiceNameLength mirrors Guardian's canonical identity cap.
 const MaxServiceNameLength = 200
 
+// IsCanonicalServiceName reports whether name has the canonical
+// <partition>.<intent>.<asset> shape. It is deliberately strict: pod names,
+// short aliases, and two-segment control-plane names are not canonical.
+func IsCanonicalServiceName(name string) bool {
+	_, _, _, ok := SplitServiceName(name)
+	return ok
+}
+
+// SplitServiceName splits a canonical <partition>.<intent>.<asset> name.
+func SplitServiceName(name string) (partition, intent, asset string, ok bool) {
+	parts := strings.Split(strings.TrimSpace(name), ".")
+	if len(parts) != 3 {
+		return "", "", "", false
+	}
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			return "", "", "", false
+		}
+	}
+	return parts[0], parts[1], parts[2], true
+}
+
 // CanonicalServiceName builds <partition>.<intent>.<asset> and applies the
 // same deterministic hash suffix as Guardian above MaxServiceNameLength.
 func CanonicalServiceName(partition, intent, asset string) string {

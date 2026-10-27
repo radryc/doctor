@@ -69,7 +69,7 @@ function VariableControl({
       });
       api
         .discoverServices(params)
-        .then((r) => finish((r.services ?? []).map((s) => s.name || s.service || "")))
+        .then((r) => finish((r.services ?? []).map((s) => s.name || "")))
         .catch(() => {
           const fallback = new URLSearchParams({
             tenant,

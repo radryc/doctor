@@ -158,9 +158,9 @@ func TestServiceREDPresetTopFailingOperationsIsTraceQL(t *testing.T) {
 	t.Fatal("red-top-failing-ops widget not found")
 }
 
-// The Active Series stat must match both a short service name and its
-// canonical doctor.<intent>.<asset> variants.
-func TestServiceREDPresetActiveSeriesMatchesCanonicalServices(t *testing.T) {
+// The Active Series stat must match the exact canonical service name. Prefix
+// matching would let doctor.ingest.ingest include doctor.ingest.ingest-edge.
+func TestServiceREDPresetActiveSeriesMatchesExactServices(t *testing.T) {
 	var preset DashboardDocument
 	for _, candidate := range builtInPresets() {
 		if candidate.ID == "preset-service-red" {
@@ -179,8 +179,8 @@ func TestServiceREDPresetActiveSeriesMatchesCanonicalServices(t *testing.T) {
 			t.Fatal("red-active-series has no queries")
 		}
 		expr := widget.Queries[0].Expr
-		if !strings.Contains(expr, `$service(\\..*)?`) {
-			t.Fatalf("active-series query %q must include canonical service variants", expr)
+		if strings.Contains(expr, `$service(\\..*)?`) {
+			t.Fatalf("active-series query %q must not use a service prefix matcher", expr)
 		}
 		resolved := strings.ReplaceAll(expr, "$service", ".*")
 		if _, err := promparser.NewParser(promparser.Options{}).ParseExpr(resolved); err != nil {

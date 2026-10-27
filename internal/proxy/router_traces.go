@@ -26,7 +26,7 @@ func (r *Router) ListServices(ctx context.Context, tenant string) ([]string, []W
 		if upstream == nil {
 			continue
 		}
-		callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+		callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
 		services, err := upstream.ListServices(callCtx, tenant)
 		cancel()
 		if err != nil {
@@ -152,7 +152,7 @@ func (r *Router) GetTraceWindow(ctx context.Context, tenant, traceID string, fro
 				results[i] = result{index: i, err: fmt.Errorf("backend %s circuit breaker open", target.backend.Name)}
 				return
 			}
-			callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+			callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
 			defer cancel()
 			var (
 				records []segment.TraceRecord
@@ -225,7 +225,7 @@ func (r *Router) TraceTags(ctx context.Context, tenant string) ([]string, []Warn
 		if !ok {
 			continue
 		}
-		callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+		callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
 		names, err := source.TraceTags(callCtx, tenant)
 		cancel()
 		if err != nil {
@@ -260,7 +260,7 @@ func (r *Router) TraceTagValues(ctx context.Context, tenant, tag string) ([]stri
 		if !ok {
 			continue
 		}
-		callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+		callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
 		found, err := source.TraceTagValues(callCtx, tenant, tag)
 		cancel()
 		if err != nil {
@@ -352,7 +352,7 @@ func (r *Router) TraceTagScopes(ctx context.Context, tenant string) ([]tempo.Tag
 	}
 	warnings := append([]Warning(nil), accessWarnings...)
 	for _, target := range targets {
-		callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+		callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
 		if scopeSource, ok := target.upstreams.Traces.(TraceTagScopeSource); ok {
 			scopes, scopeErr := scopeSource.TraceTagScopes(callCtx, tenant)
 			cancel()
@@ -595,7 +595,7 @@ func (r *Router) forEachTraceTarget(ctx context.Context, targets []traceTarget, 
 				results[i] = result{target: target, err: fmt.Errorf("backend %s circuit breaker open", target.backend.Name)}
 				return
 			}
-			callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+			callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
 			defer cancel()
 			results[i] = result{target: target, err: fn(callCtx, target)}
 		}(i, target)

@@ -35,6 +35,7 @@ import type {
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import TraceWaterfall from "../components/charts/TraceWaterfall";
+import TraceFlow from "../components/charts/TraceFlow";
 import GraphQueryBuilder from "../components/charts/GraphQueryBuilder";
 import { resolveNodeKind } from "../components/topology/nodeKind";
 import {
@@ -119,9 +120,269 @@ const SAVED_DASHBOARDS_KEY = "doctor.savedDashboards.v1";
 function healthColor(level?: string): string {
   const n = (level || "").toLowerCase();
   if (n === "healthy") return "var(--ui-green)";
-  if (n === "degraded" || n === "attention") return "var(--ui-amber)";
+  if (n === "degraded" || n === "attention" || n === "warning") return "var(--ui-amber)";
   if (n === "unhealthy" || n === "failing" || n === "failed") return "var(--ui-red)";
   return "var(--ui-faint)";
+}
+
+// Match Guardian's topology default: hide low-level CFN plumbing (VPCs,
+// subnets, security groups, IAM roles, ...) so the flow reads as services.
+function isInfrastructureNode(node: GuardianTopologyNode): boolean {
+  const tier = String(node.meta?.tier ?? "").toLowerCase();
+  if (tier === "infrastructure") return true;
+  const cfnType = String(node.meta?.cfnType ?? "");
+  return cfnType.startsWith("AWS::EC2::") || cfnType.startsWith("AWS::IAM::");
+}
+
+type HealthMetricMode = "errors" | "latency" | "saturation" | "availability";
+
+interface HealthMetricRule {
+  metric: string;
+  label: string;
+  mode: HealthMetricMode;
+  /** Healthy at or below this value (at or above for availability). */
+  healthy: number;
+  /** Warning at or below this value (at or above for availability). */
+  warning: number;
+  unit?: string;
+  source: string;
+}
+
+function autoHealthMetric(
+  node: LayoutNode | null,
+  config: AssetObservabilityConfig | null,
+): HealthMetricRule | null {
+  if (!node) return null;
+  if (config?.health?.metric) {
+    return {
+      metric: config.health.metric,
+      label: "Configured health metric",
+      mode: config.health.mode ?? "errors",
+      healthy: config.health.healthy ?? 0,
+      warning: config.health.warning ?? 1,
+      unit: config.health.unit,
+      source: "helper manifest",
+    };
+  }
+  if (node.type === "intent") {
+    // An intent has no CFN type of its own. Doctor components expose
+    // doctor_component_up; everything else is scraped by the OTel collector
+    // and exposes the standard up metric.
+    if (node.partition === "doctor") {
+      return {
+        metric: "doctor_component_up",
+        label: "Availability",
+        mode: "availability",
+        healthy: 1,
+        warning: 0.5,
+        source: "intent default",
+      };
+    }
+    return {
+      metric: "up",
+      label: "Availability",
+      mode: "availability",
+      healthy: 1,
+      warning: 0.5,
+      source: "intent default",
+    };
+  }
+  if (node.type !== "asset") return null;
+  const cfnType = String(node.meta?.cfnType ?? "");
+  const assetType = String(node.meta?.type ?? "");
+  const configured = config?.metrics?.find((metric) => metric.trim());
+  const rule = (
+    metric: string,
+    label: string,
+    mode: HealthMetricMode,
+    healthy: number,
+    warning: number,
+    unit?: string,
+    source = "asset type",
+  ): HealthMetricRule => ({
+    metric,
+    label,
+    mode,
+    healthy,
+    warning,
+    unit,
+    source,
+  });
+
+  switch (cfnType) {
+    case "AWS::SQS::Queue":
+      return rule("ApproximateAgeOfOldestMessage", "Oldest message age", "latency", 60, 300, "s");
+    case "AWS::SNS::Topic":
+      return rule("NumberOfNotificationsFailed", "Failed notifications", "errors", 0, 1);
+    case "AWS::Lambda::Function":
+      return rule("Errors", "Invocation errors", "errors", 0, 1);
+    case "AWS::DynamoDB::Table":
+      return rule("ThrottledRequests", "Throttled requests", "errors", 0, 1);
+    case "AWS::ECS::Service":
+      return rule("CPUUtilization", "CPU utilization", "saturation", 70, 85, "%");
+    case "AWS::ElasticLoadBalancingV2::LoadBalancer":
+      return rule("HTTPCode_Target_5XX_Count", "Target 5xx responses", "errors", 0, 1);
+    case "AWS::EC2::Instance":
+      return rule("StatusCheckFailed", "Status checks failed", "errors", 0, 1);
+    case "AWS::Events::Rule":
+      return rule("FailedInvocations", "Failed invocations", "errors", 0, 1);
+    case "AWS::StepFunctions::StateMachine":
+      return rule("ExecutionsFailed", "Failed executions", "errors", 0, 1);
+    case "AWS::Kinesis::Stream":
+      return rule("WriteProvisionedThroughputExceeded", "Write throttles", "errors", 0, 1);
+    case "AWS::RDS::DBInstance":
+      return rule("CPUUtilization", "CPU utilization", "saturation", 70, 85, "%");
+    case "AWS::Logs::LogGroup":
+      return null;
+    default:
+      break;
+  }
+
+  if (configured) {
+    return rule(configured, "Configured metric", "errors", 0, 1, undefined, "helper manifest");
+  }
+  if (assetType === "CDKStack") return null;
+  if (node.partition === "doctor") {
+    return rule("doctor_component_up", "Availability", "availability", 1, 0.5, undefined, "partition default");
+  }
+  return rule("up", "Availability", "availability", 1, 0.5, undefined, "default");
+}
+
+function healthStatusFromValue(
+  rule: HealthMetricRule,
+  value: number,
+): "healthy" | "warning" | "failing" {
+  if (rule.mode === "availability") {
+    if (value >= rule.healthy) return "healthy";
+    if (value >= rule.warning) return "warning";
+    return "failing";
+  }
+  if (value <= rule.healthy) return "healthy";
+  if (value <= rule.warning) return "warning";
+  return "failing";
+}
+
+function healthRuleText(rule: HealthMetricRule): string {
+  if (rule.mode === "availability") {
+    return `healthy ≥ ${rule.healthy}, warning ≥ ${rule.warning}`;
+  }
+  return `healthy ≤ ${rule.healthy}${rule.unit ?? ""}, warning ≤ ${rule.warning}${rule.unit ?? ""}`;
+}
+
+function formatHealthValue(value: number, unit?: string): string {
+  if (unit === "%") return `${value.toFixed(1)}%`;
+  if (unit === "s") return `${value.toFixed(1)}s`;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+// Candidate metrics in preference order. The first one that returns a sample
+// becomes the automatically created key-metric chart.
+function candidateMetricNames(node: LayoutNode | null): string[] {
+  if (!node) return ["up"];
+  const partition = (node.partition || "").toLowerCase();
+  const intent = (node.intent || "").toLowerCase();
+  const names: string[] = [];
+  if (partition === "monofs" || intent === "monofs-storage") {
+    names.push(
+      "kvs_active_keys",
+      "monofs_router_ingest_bytes_total",
+      "monofs_server_ingest_bytes_total",
+      "monofs_router_guardian_upsert_bytes_total",
+      "process_cpu_seconds_total",
+      "process_resident_memory_bytes",
+      "up",
+    );
+  } else if (partition === "doctor") {
+    names.push(
+      "doctor_component_up",
+      "process_cpu_seconds_total",
+      "process_resident_memory_bytes",
+      "container_cpu_usage_seconds_total",
+      "up",
+    );
+  } else if (
+    partition === "guardian" ||
+    partition === "guardian-configs" ||
+    partition === "otel" ||
+    partition === "opentelemetry" ||
+    partition === "agent" ||
+    partition === "monitoring"
+  ) {
+    names.push(
+      "up",
+      "process_cpu_seconds_total",
+      "process_resident_memory_bytes",
+      "container_cpu_usage_seconds_total",
+    );
+  } else {
+    names.push(
+      "CPUUtilization",
+      "Errors",
+      "ThrottledRequests",
+      "ApproximateAgeOfOldestMessage",
+      "HTTPCode_Target_5XX_Count",
+      "Invocations",
+      "up",
+    );
+  }
+  return [...new Set(names)];
+}
+
+function metricQueryWithSelector(metric: string, selector: string): string {
+  const isCounter = metric.endsWith("_total") || metric.endsWith("_count");
+  const isErrorCount = /error|throttle|failed|5xx|4xx/i.test(metric);
+  if (isCounter) return `sum(rate(${metric}{${selector}}[5m]))`;
+  if (isErrorCount) return `sum(${metric}{${selector}})`;
+  return `max(${metric}{${selector}})`;
+}
+
+function metricQuery(metric: string, serviceRegex: string): string {
+  return metricQueryWithSelector(metric, `service=~"${serviceRegex}"`);
+}
+
+function escapeLabelValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function isAWSNode(node: LayoutNode): boolean {
+  return String(node.meta?.cfnType ?? "").startsWith("AWS::");
+}
+
+// Local metrics carry the resolved Guardian identity as labels. Prefer those
+// over the broad service regex, which for an intent such as "ingest" would
+// otherwise also match every service in the "doctor" partition.
+function nodeMetricSelectors(node: LayoutNode, serviceRegex: string): string[] {
+  if (isAWSNode(node) || !node.partition || !node.intent) {
+    return [`service=~"${serviceRegex}"`];
+  }
+  const parts = [
+    `guardian_partition="${escapeLabelValue(node.partition)}"`,
+    `guardian_intent="${escapeLabelValue(node.intent)}"`,
+  ];
+  if (node.type === "asset" && node.asset) {
+    parts.push(`guardian_asset="${escapeLabelValue(node.asset)}"`);
+  }
+  const selectors = [parts.join(", ")];
+
+  // Some local workloads predate the resolved identity labels. Fall back to a
+  // service-name regex for intents and compute/load-balancer assets only; for
+  // volumes, configs, images, and secrets a partition-wide regex would match
+  // unrelated services and make an unmeasured resource look healthy.
+  const assetType = String(node.meta?.type ?? "");
+  const allowServiceFallback =
+    node.type === "intent" ||
+    assetType === "Compute" ||
+    assetType === "LoadBalancer" ||
+    assetType === "";
+  if (allowServiceFallback) {
+    const tokens =
+      node.type === "intent"
+        ? [node.name, node.id, node.intent || ""]
+        : [node.name, node.id, node.asset || ""];
+    const specific = prometheusServiceRegex(tokens);
+    selectors.push(`service=~"${specific}"`);
+  }
+  return selectors;
 }
 
 function buildGraph(nodes: GuardianTopologyNode[]): LayoutNode[] {
@@ -171,6 +432,18 @@ function buildGraph(nodes: GuardianTopologyNode[]): LayoutNode[] {
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Prometheus label matchers are fully anchored. Identity tokens such as
+// "monofs-storage" must therefore be wrapped in .* to match a service like
+// "monofs.monofs-storage.node-a".
+function prometheusServiceRegex(tokens: string[]): string {
+  const escaped = tokens
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map(escapeRegex);
+  if (escaped.length === 0) return ".*";
+  return `.*(${escaped.join("|")}).*`;
 }
 
 function toIsoRange(minutes: number): { from: string; to: string } {
@@ -242,8 +515,16 @@ function mergeMetricPoints(
     .map(([, value]) => value);
 }
 
-async function runRangeQuery(query: string, tenant: string, from: string, to: string, step: string) {
+async function runRangeQuery(
+  query: string,
+  tenant: string,
+  from: string,
+  to: string,
+  step: string,
+  partition?: string
+) {
   const params = new URLSearchParams({ query, start: from, end: to, step, tenant });
+  if (partition) params.set("partition", partition);
   const response = await api.queryPrometheusRange(params);
   if (response.status !== "success") return [];
   if (response.data.resultType !== "matrix") return [];
@@ -417,9 +698,11 @@ function mergeObservabilityConfigs(
   const metrics = new Set<string>();
   const logs = new Map<string, { query: string; level?: string }>();
   const traces = new Map<string, { service: string; operation?: string; thresholdMs?: number }>();
+  let health: AssetObservabilityConfig["health"];
 
   for (const config of configs) {
     if (!config) continue;
+    if (config.health) health = config.health;
     for (const metric of config.metrics ?? []) {
       const normalized = metric.trim();
       if (normalized) metrics.add(normalized);
@@ -442,11 +725,12 @@ function mergeObservabilityConfigs(
     }
   }
 
-  if (metrics.size === 0 && logs.size === 0 && traces.size === 0) return null;
+  if (metrics.size === 0 && logs.size === 0 && traces.size === 0 && !health) return null;
   return {
     metrics: [...metrics],
     logs: [...logs.values()],
     traces: [...traces.values()],
+    ...(health ? { health } : {}),
   };
 }
 
@@ -478,10 +762,13 @@ export default function PartitionAssetsPage() {
   const [helperManifest, setHelperManifest] = useState<HelperFileManifest | null>(routeState?.helperManifest || null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<LayoutNode | null>(null);
+  const [showInfrastructure, setShowInfrastructure] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null);
+  const tabsRef = useRef<HTMLDivElement | null>(null);
+  const graphBootstrapRef = useRef("");
 
   const [activeTab, setActiveTab] = useState<"metrics" | "traces" | "logs" | "graphs">(
     () => (searchParams.get("tab") as "metrics" | "traces" | "logs" | "graphs") || "metrics"
@@ -496,11 +783,22 @@ export default function PartitionAssetsPage() {
   const [metricSource, setMetricSource] = useState("none");
   const [metricError, setMetricError] = useState<string | null>(null);
   const [discoveredMetrics, setDiscoveredMetrics] = useState<string[]>([]);
+  const [detectedMetric, setDetectedMetric] = useState("");
+  const [metricsProbing, setMetricsProbing] = useState(false);
+  const [metricsAvailable, setMetricsAvailable] = useState(false);
+  const [keyMetricData, setKeyMetricData] = useState<Array<{ time: string; value: number }>>([]);
+  const [keyMetricLoading, setKeyMetricLoading] = useState(false);
+  const [keyMetricError, setKeyMetricError] = useState<string | null>(null);
+  const [healthMetricValue, setHealthMetricValue] = useState<number | null>(null);
+  const [healthMetricLoading, setHealthMetricLoading] = useState(false);
+  const [healthMetricError, setHealthMetricError] = useState<string | null>(null);
+  const [healthMetricStatus, setHealthMetricStatus] = useState<"healthy" | "warning" | "failing" | "unknown">("unknown");
 
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [selectedTrace, setSelectedTrace] = useState<TraceSummary | null>(null);
   const [traceSpans, setTraceSpans] = useState<TraceRecord[]>([]);
   const [tracesLoading, setTracesLoading] = useState(false);
+  const [tracesFallback, setTracesFallback] = useState(false);
   const [tracesError, setTracesError] = useState<string | null>(null);
 
   const [logs, setLogs] = useState<LogRecord[]>([]);
@@ -656,11 +954,22 @@ export default function PartitionAssetsPage() {
     e.target.value = "";
   }, []);
 
-  const layoutNodes = useMemo(() => {
-    if (!rawTopology?.nodes?.length) return [];
-    const partitionNodes = rawTopology.nodes.filter((n) => n.partition === name);
-    return buildGraph(partitionNodes);
-  }, [rawTopology, name]);
+  const partitionTopologyNodes = useMemo(
+    () => (rawTopology?.nodes ?? []).filter((node) => node.partition === name),
+    [rawTopology, name],
+  );
+
+  const visibleTopologyNodes = useMemo(
+    () =>
+      showInfrastructure
+        ? partitionTopologyNodes
+        : partitionTopologyNodes.filter((node) => !isInfrastructureNode(node)),
+    [partitionTopologyNodes, showInfrastructure],
+  );
+
+  const hiddenInfrastructureCount = partitionTopologyNodes.length - visibleTopologyNodes.length;
+
+  const layoutNodes = useMemo(() => buildGraph(visibleTopologyNodes), [visibleTopologyNodes]);
 
   const nodeById = useMemo(() => new Map(layoutNodes.map((n) => [n.id, n])), [layoutNodes]);
 
@@ -685,7 +994,11 @@ export default function PartitionAssetsPage() {
 
     if (nodeId && layoutNodes.length > 0) {
       const found = layoutNodes.find((n) => n.id === nodeId);
-      if (found) setSelectedNode(found);
+      if (found) {
+        setSelectedNode(found);
+        setMetricsProbing(true);
+        setLogsLoading(true);
+      }
     }
   }, [searchParams, layoutNodes]);
 
@@ -710,7 +1023,14 @@ export default function PartitionAssetsPage() {
   const handleNodeSelect = useCallback(
     (node: LayoutNode) => {
       setSelectedNode(node);
+      setMetricsProbing(true);
+      setLogsLoading(true);
       updateSearchParams({ node: node.id, tab: activeTab, range: String(timeRange) });
+      // The inspector lives below the topology; make the click visibly do
+      // something even on tall pages.
+      window.requestAnimationFrame(() => {
+        tabsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
     },
     [activeTab, timeRange, updateSearchParams]
   );
@@ -783,10 +1103,12 @@ export default function PartitionAssetsPage() {
       "$node": selectedNode.id,
       "$intent": selectedNode.intent || "",
       "$partition": selectedNode.partition || "",
-      "$serviceRegex": [selectedNode.name, selectedNode.id, selectedNode.intent || "", selectedNode.partition || ""]
-        .filter(Boolean)
-        .map(escapeRegex)
-        .join("|"),
+      "$serviceRegex": prometheusServiceRegex([
+        selectedNode.name,
+        selectedNode.id,
+        selectedNode.intent || "",
+        selectedNode.partition || "",
+      ]),
     };
 
     let resolved = query;
@@ -873,6 +1195,201 @@ export default function PartitionAssetsPage() {
     [selectedNode, helperManifest]
   );
 
+  const healthRule = useMemo(
+    () => autoHealthMetric(selectedNode, observabilityConfig),
+    [selectedNode, observabilityConfig]
+  );
+
+  // Probe the node's likely metrics. The first metric with a sample becomes the
+  // automatically created Key Metric chart. If none exist, the Metrics/Graphs
+  // tabs are hidden instead of showing permanently empty charts.
+  useEffect(() => {
+    const node = selectedNode;
+    if (!node) {
+      setMetricsProbing(false);
+      setMetricsAvailable(false);
+      setDetectedMetric("");
+      return;
+    }
+    let cancelled = false;
+    setMetricsProbing(true);
+    setMetricsAvailable(false);
+    setDetectedMetric("");
+
+    async function detectMetrics(target: LayoutNode) {
+      const serviceRegex = prometheusServiceRegex([
+        target.name,
+        target.id,
+        target.intent || "",
+        target.partition || "",
+      ]);
+      const selectors = nodeMetricSelectors(target, serviceRegex);
+      for (const metric of candidateMetricNames(target)) {
+        for (const selector of selectors) {
+          try {
+            const params = new URLSearchParams({
+              tenant,
+              query: metricQueryWithSelector(metric, selector),
+            });
+            if (!isAWSNode(target) && target.partition) params.set("partition", target.partition);
+            const response = await api.queryPrometheus(params);
+            if (cancelled) return;
+            if (
+              response.status === "success" &&
+              response.data.resultType === "vector" &&
+              response.data.result.length > 0
+            ) {
+              setDetectedMetric(metric);
+              setMetricsAvailable(true);
+              return;
+            }
+          } catch {
+            // Try the next selector or candidate.
+          }
+        }
+      }
+    }
+
+    void detectMetrics(node).finally(() => {
+      if (!cancelled) setMetricsProbing(false);
+    });
+    return () => { cancelled = true; };
+  }, [selectedNode?.id, tenant]);
+
+  useEffect(() => {
+    const node = selectedNode;
+    const metric = detectedMetric;
+    if (!node || !metric) {
+      setKeyMetricData([]);
+      setKeyMetricError(null);
+      return;
+    }
+    let cancelled = false;
+    async function loadKeyMetric(target: LayoutNode, metricName: string) {
+      setKeyMetricLoading(true);
+      setKeyMetricError(null);
+      try {
+        const serviceRegex = prometheusServiceRegex([
+          target.name,
+          target.id,
+          target.intent || "",
+          target.partition || "",
+        ]);
+        const selectors = nodeMetricSelectors(target, serviceRegex);
+        const { from, to } = toIsoRange(timeRange);
+        const step = stepForMinutes(timeRange);
+        const partition = isAWSNode(target) ? "" : target.partition || "";
+        let points: Array<{ ts: number; value: number }> = [];
+        for (const selector of selectors) {
+          points = await runRangeQuery(
+            metricQueryWithSelector(metricName, selector),
+            tenant,
+            from,
+            to,
+            step,
+            partition
+          );
+          if (points.length > 0) break;
+        }
+        if (cancelled) return;
+        setKeyMetricData(points.map((point) => ({
+          time: new Date(point.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          value: point.value,
+        })));
+        if (points.length === 0) setKeyMetricError("No samples for this metric in the selected window");
+      } catch (err) {
+        if (!cancelled) setKeyMetricError(err instanceof Error ? err.message : "Failed to query key metric");
+      } finally {
+        if (!cancelled) setKeyMetricLoading(false);
+      }
+    }
+    void loadKeyMetric(node, metric);
+    return () => { cancelled = true; };
+  }, [selectedNode?.id, detectedMetric, timeRange, tenant]);
+
+  useEffect(() => {
+    if (!detectedMetric) return;
+    setCustomQuery(metricQuery(detectedMetric, "$serviceRegex"));
+  }, [detectedMetric, selectedNode?.id]);
+
+  useEffect(() => {
+    const node = selectedNode;
+    const rule = healthRule;
+    if (!node || !rule) {
+      setHealthMetricValue(null);
+      setHealthMetricStatus("unknown");
+      setHealthMetricError(null);
+      return;
+    }
+    setHealthMetricValue(null);
+    setHealthMetricStatus("unknown");
+    setHealthMetricError(null);
+    let cancelled = false;
+    async function loadHealthMetric(target: LayoutNode, metricRule: HealthMetricRule) {
+      setHealthMetricLoading(true);
+      setHealthMetricError(null);
+      try {
+        const serviceRegex = prometheusServiceRegex([
+          target.name,
+          target.id,
+          target.intent || "",
+          target.partition || "",
+        ]);
+        const aggregation =
+          metricRule.mode === "errors"
+            ? "sum"
+            : metricRule.mode === "availability"
+              ? "min"
+              : "max";
+        const selectors = nodeMetricSelectors(target, serviceRegex);
+        const partition = isAWSNode(target) ? "" : target.partition || "";
+        let value: number | null = null;
+        for (const selector of selectors) {
+          try {
+            const params = new URLSearchParams({
+              tenant,
+              query: `${aggregation}(${metricRule.metric}{${selector}})`,
+            });
+            if (partition) params.set("partition", partition);
+            const response = await api.queryPrometheus(params);
+            if (
+              response.status === "success" &&
+              response.data.resultType === "vector" &&
+              response.data.result.length > 0
+            ) {
+              const parsed = Number(response.data.result[0].value[1]);
+              if (Number.isFinite(parsed)) {
+                value = parsed;
+                break;
+              }
+            }
+          } catch {
+            // Try the next selector.
+          }
+        }
+        if (cancelled) return;
+        if (value === null) {
+          setHealthMetricValue(null);
+          setHealthMetricStatus("unknown");
+          setHealthMetricError("No samples in the current window");
+          return;
+        }
+        setHealthMetricValue(value);
+        setHealthMetricStatus(healthStatusFromValue(metricRule, value));
+      } catch (err) {
+        if (!cancelled) {
+          setHealthMetricValue(null);
+          setHealthMetricStatus("unknown");
+          setHealthMetricError(err instanceof Error ? err.message : "Failed to query health metric");
+        }
+      } finally {
+        if (!cancelled) setHealthMetricLoading(false);
+      }
+    }
+    void loadHealthMetric(node, rule);
+    return () => { cancelled = true; };
+  }, [selectedNode?.id, selectedNode?.name, selectedNode?.intent, selectedNode?.partition, healthRule, tenant]);
+
   useEffect(() => {
     if (!selectedNode) {
       setDiscoveredMetrics([]);
@@ -880,10 +1397,12 @@ export default function PartitionAssetsPage() {
     }
 
     let cancelled = false;
-    const tokenSet = [selectedNode.name, selectedNode.id, selectedNode.intent || "", selectedNode.partition || ""]
-      .filter(Boolean)
-      .map(escapeRegex);
-    const serviceRegex = tokenSet.join("|") || "$serviceRegex";
+    const serviceRegex = prometheusServiceRegex([
+      selectedNode.name,
+      selectedNode.id,
+      selectedNode.intent || "",
+      selectedNode.partition || "",
+    ]);
 
     async function loadMetricDiscovery() {
       try {
@@ -919,9 +1438,12 @@ export default function PartitionAssetsPage() {
       const { from, to } = toIsoRange(timeRange);
       const step = stepForMinutes(timeRange);
 
-      const tokenSet = [node.name, node.id, node.intent || "", node.partition || ""]
-        .filter(Boolean);
-      const serviceRegex = tokenSet.map(escapeRegex).join("|");
+      const serviceRegex = prometheusServiceRegex([
+        node.name,
+        node.id,
+        node.intent || "",
+        node.partition || "",
+      ]);
 
       const p95Queries: SourceQuery[] = [
         { query: `histogram_quantile(0.95, sum by (le) (rate(request_duration_seconds_bucket{service=~"${serviceRegex}"}[5m])))`, source: `asset:${node.name}` },
@@ -979,6 +1501,7 @@ export default function PartitionAssetsPage() {
     async function loadTraces() {
       setTracesLoading(true);
       setTracesError(null);
+      setTracesFallback(false);
       setSelectedTrace(null);
       setTraceSpans([]);
 
@@ -986,9 +1509,11 @@ export default function PartitionAssetsPage() {
       const tokenSet = [node.name, node.id, node.intent || "", node.partition || ""]
         .map((v) => v.trim())
         .filter(Boolean);
+      const partition = (node.partition || name || "").trim();
 
       try {
         const traceParams = new URLSearchParams({ tenant, from, to, limit: "60" });
+        if (partition) traceParams.set("partition", partition);
 
         const serviceList = await api.getLogServices(tenant);
         const matchingServices = (serviceList.services || [])
@@ -1009,9 +1534,12 @@ export default function PartitionAssetsPage() {
           }
         }
 
-        if (traceResults.length === 0) {
+        if (traceResults.length === 0 && partition) {
+          // Do not fall back to every tenant trace. If the asset has no
+          // telemetry, show only traces from its own partition.
           const fallback = await api.getRecentTraces(traceParams);
           traceResults = fallback.traces || [];
+          if (!cancelled && traceResults.length > 0) setTracesFallback(true);
         }
 
         if (cancelled) return;
@@ -1019,7 +1547,11 @@ export default function PartitionAssetsPage() {
         const top = traceResults.slice(0, 10);
         setTraces(top);
         if (top.length === 0) {
-          setTracesError("No traces in selected time window");
+          setTracesError(
+            partition
+              ? `No traces for this asset or partition "${partition}" in the selected window`
+              : "No traces in selected time window",
+          );
           return;
         }
 
@@ -1048,33 +1580,103 @@ export default function PartitionAssetsPage() {
 
     async function loadLogs() {
       setLogsLoading(true);
+      setLogs([]);
       setLogsError(null);
 
       const { from, to } = toIsoRange(timeRange);
-      const tokenSet = [node.name, node.id, node.intent || "", node.partition || ""]
-        .filter(Boolean);
+      // Log search is a substring match, not a structured matcher. The old
+      // code joined every identity token (including "intent:..."), which made
+      // intent nodes such as monofs-storage return zero results. Try the most
+      // specific human-readable token first and fall back progressively.
+      const candidates = [...new Set(
+        [node.name, node.asset, node.intent, node.partition]
+          .map((value) => (value || "").trim())
+          .filter(Boolean),
+      )];
 
       try {
-        const params = new URLSearchParams({
-          tenant,
-          from,
-          to,
-          limit: "200",
-        });
+        let results: LogRecord[] = [];
 
-        if (tokenSet.length > 0) {
-          params.set("q", tokenSet.join(" "));
+        // First try exact service names. The text search ("q") only matches
+        // message bodies; service names such as monofs.monofs-storage.router-a
+        // are not necessarily present in the body.
+        let matchingServices: string[] = [];
+        try {
+          const serviceList = await api.getLogServices(tenant);
+          matchingServices = (serviceList.services || [])
+            .filter((service) => {
+              const value = service.toLowerCase();
+              return candidates.some((candidate) => value.includes(candidate.toLowerCase()));
+            })
+            .slice(0, 6);
+        } catch {
+          matchingServices = [];
         }
 
-        const data = await api.searchLogs(params);
+        // The canonical identity service name is not always present in the
+        // recent log-service catalog (for example a router with sparse logs),
+        // so query it explicitly as well.
+        const canonicalService = [node.partition, node.intent, node.asset || node.name]
+          .filter(Boolean)
+          .join(".");
+        const servicesToQuery = [...new Set([...matchingServices, canonicalService].filter(Boolean))]
+          .slice(0, 8);
+
+        for (const serviceName of servicesToQuery) {
+          if (cancelled) return;
+          const params = new URLSearchParams({
+            tenant,
+            from,
+            to,
+            limit: "100",
+            service: serviceName,
+          });
+          const data = await api.searchLogs(params);
+          results.push(...(data.results || []));
+        }
+
+        if (results.length === 0) {
+          // Fall back to the body text search and keep only records whose
+          // identity matches the node. Unrelated matches are dropped.
+          for (const candidate of candidates) {
+            if (cancelled) return;
+            const params = new URLSearchParams({
+              tenant,
+              from,
+              to,
+              limit: "200",
+              q: candidate,
+            });
+            const data = await api.searchLogs(params);
+            if ((data.results || []).length > 0) {
+              results = data.results || [];
+              break;
+            }
+          }
+          results = results.filter((log) => {
+            const haystack = [log.service, log.partition, log.intent, log.asset]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+            return candidates.some((candidate) => haystack.includes(candidate.toLowerCase()));
+          });
+        }
+
         if (cancelled) return;
-
-        if ((data.results || []).length === 0) {
-          setLogs([]);
-          setLogsError("No logs found for selected asset");
-        } else {
-          setLogs(data.results || []);
+        if (results.length > 0) {
+          const seen = new Set<string>();
+          results = results
+            .filter((log) => {
+              const key = `${log.timestamp}|${log.service}|${log.body}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            })
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+            .slice(0, 200);
         }
+        setLogs(results);
+        setLogsError(results.length === 0 ? "No logs found for the selected node" : null);
       } catch (err) {
         if (!cancelled) setLogsError(err instanceof Error ? err.message : "Failed to load logs");
       } finally {
@@ -1131,6 +1733,40 @@ export default function PartitionAssetsPage() {
         : g
     )));
   }, [executeGraphQuery]);
+
+  // When the Graphs tab is opened, bootstrap a working default graph from the
+  // automatically detected metric instead of presenting an empty board.
+  useEffect(() => {
+    if (activeTab !== "graphs" || !selectedNode || !detectedMetric) return;
+    const bootKey = `${selectedNode.id}:${detectedMetric}`;
+    if (graphBootstrapRef.current === bootKey) return;
+    graphBootstrapRef.current = bootKey;
+    const query = metricQuery(detectedMetric, "$serviceRegex");
+    setCustomQuery(query);
+    setCustomLoading(true);
+    setCustomError(null);
+    void executeGraphQuery(query).then((result) => {
+      setCustomData(result.data);
+      setCustomSeries(result.series);
+      setCustomError(result.error);
+      setCustomLoading(false);
+    });
+    if (adhocGraphs.length === 0) {
+      const id = `adhoc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      setAdhocGraphs([{
+        id,
+        title: `${detectedMetric} · ${selectedNode.name}`,
+        query,
+        rangeMinutes: timeRange,
+        refreshIntervalSec: 0,
+        data: [],
+        series: [],
+        loading: true,
+        error: null,
+      }]);
+      void refreshAdhocGraph(id, query, timeRange);
+    }
+  }, [activeTab, selectedNode?.id, detectedMetric, timeRange, executeGraphQuery, refreshAdhocGraph, adhocGraphs.length]);
 
   const reorderAdhocGraph = useCallback((sourceId: string, targetId: string) => {
     if (!sourceId || !targetId || sourceId === targetId) return;
@@ -1369,6 +2005,21 @@ export default function PartitionAssetsPage() {
     setSavedDashboards((prev) => prev.filter((d) => d.id !== dashboardId));
   }, []);
 
+  const showMetrics = metricsProbing || metricsAvailable;
+  const showLogs = logsLoading || logs.length > 0;
+  const showGraphs = metricsProbing || metricsAvailable;
+
+  useEffect(() => {
+    if (!selectedNode) return;
+    if (activeTab === "metrics" && !showMetrics) {
+      setActiveTab(showLogs ? "logs" : "traces");
+    } else if (activeTab === "logs" && !showLogs) {
+      setActiveTab("traces");
+    } else if (activeTab === "graphs" && !showGraphs) {
+      setActiveTab(showLogs ? "logs" : "traces");
+    }
+  }, [activeTab, selectedNode?.id, showMetrics, showLogs, showGraphs]);
+
   if (partitionLoading) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center">
@@ -1524,7 +2175,23 @@ export default function PartitionAssetsPage() {
                   </span>
                 )}
               </span>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-slate-600">
+                  {hiddenInfrastructureCount > 0 && !showInfrastructure
+                    ? `${hiddenInfrastructureCount} infra hidden`
+                    : ""}
+                </span>
+                <button
+                  onClick={() => setShowInfrastructure((value) => !value)}
+                  className={`px-2 py-0.5 border text-[10px] transition-colors ${
+                    showInfrastructure
+                      ? "border-amber-500/50 text-amber-300 bg-amber-500/10"
+                      : "border-slate-700 text-slate-400 hover:text-slate-200"
+                  }`}
+                  title="VPCs, subnets, security groups, IAM roles, and other CFN plumbing"
+                >
+                  {showInfrastructure ? "Hide infrastructure" : "Show infrastructure"}
+                </button>
                 <button onClick={() => setZoom((z) => Math.min(3, z + 0.15))} className="p-1 hover:bg-slate-800"><ZoomIn className="w-3 h-3" /></button>
                 <button onClick={() => setZoom((z) => Math.max(0.3, z - 0.15))} className="p-1 hover:bg-slate-800"><ZoomOut className="w-3 h-3" /></button>
                 <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-1 hover:bg-slate-800"><RotateCcw className="w-3 h-3" /></button>
@@ -1586,7 +2253,9 @@ export default function PartitionAssetsPage() {
                 {layoutNodes.map((node) => {
                   const kind = resolveNodeKind(node);
                   const selected = selectedNode?.id === node.id;
-                  const hColor = healthColor(node.health?.level);
+                  const hColor = healthColor(
+                    selected && healthMetricStatus !== "unknown" ? healthMetricStatus : node.health?.level,
+                  );
                   const isIntent = kind === "intent";
                   const w = isIntent ? 120 : 100;
                   const h = isIntent ? 44 : 36;
@@ -1597,6 +2266,7 @@ export default function PartitionAssetsPage() {
                       key={node.id}
                       transform={`translate(${node.x} ${node.y})`}
                       onClick={(e) => { e.stopPropagation(); handleNodeSelect(node); }}
+                      onMouseDown={(e) => e.stopPropagation()}
                       className="cursor-pointer transition-transform"
                     >
                       {selected && (
@@ -1624,21 +2294,23 @@ export default function PartitionAssetsPage() {
         </div>
 
         {/* Dashboard tabs */}
-        <div className="px-6 pb-12">
+        <div className="px-6 pb-12" ref={tabsRef}>
           <div className="bg-slate-900/60 border border-slate-800 overflow-hidden">
             {/* Tab bar */}
             <div className="flex items-center border-b border-slate-800/60 bg-slate-950/60">
-              <button
-                onClick={() => handleTabChange("metrics")}
-                className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
-                  activeTab === "metrics"
-                    ? "border-sky-400 text-sky-300 bg-sky-500/5"
-                    : "border-transparent text-slate-500 hover:text-slate-400"
-                }`}
-              >
-                <BarChart3 className="w-3.5 h-3.5" />
-                Metrics
-              </button>
+              {showMetrics && (
+                <button
+                  onClick={() => handleTabChange("metrics")}
+                  className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
+                    activeTab === "metrics"
+                      ? "border-sky-400 text-sky-300 bg-sky-500/5"
+                      : "border-transparent text-slate-500 hover:text-slate-400"
+                  }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  Metrics
+                </button>
+              )}
               <button
                 onClick={() => handleTabChange("traces")}
                 className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
@@ -1650,28 +2322,32 @@ export default function PartitionAssetsPage() {
                 <GanttChartSquare className="w-3.5 h-3.5" />
                 Traces
               </button>
-              <button
-                onClick={() => handleTabChange("logs")}
-                className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
-                  activeTab === "logs"
-                    ? "border-amber-400 text-amber-300 bg-amber-500/5"
-                    : "border-transparent text-slate-500 hover:text-slate-400"
-                }`}
-              >
-                <ScrollText className="w-3.5 h-3.5" />
-                Logs
-              </button>
-              <button
-                onClick={() => handleTabChange("graphs")}
-                className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
-                  activeTab === "graphs"
-                    ? "border-cyan-400 text-cyan-300 bg-cyan-500/5"
-                    : "border-transparent text-slate-500 hover:text-slate-400"
-                }`}
-              >
-                <BarChart3 className="w-3.5 h-3.5" />
-                Graphs
-              </button>
+              {showLogs && (
+                <button
+                  onClick={() => handleTabChange("logs")}
+                  className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
+                    activeTab === "logs"
+                      ? "border-amber-400 text-amber-300 bg-amber-500/5"
+                      : "border-transparent text-slate-500 hover:text-slate-400"
+                  }`}
+                >
+                  <ScrollText className="w-3.5 h-3.5" />
+                  Logs
+                </button>
+              )}
+              {showGraphs && (
+                <button
+                  onClick={() => handleTabChange("graphs")}
+                  className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
+                    activeTab === "graphs"
+                      ? "border-cyan-400 text-cyan-300 bg-cyan-500/5"
+                      : "border-transparent text-slate-500 hover:text-slate-400"
+                  }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  Graphs
+                </button>
+              )}
 
               <div className="flex-1" />
 
@@ -1732,7 +2408,15 @@ export default function PartitionAssetsPage() {
                   {/* Selected node header */}
                   <div className="flex items-center gap-3 mb-4 pb-3 border-b border-slate-800/60">
                     <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full" style={{ backgroundColor: healthColor(selectedNode.health?.level) }} />
+                      <div
+                        className="w-2 h-2 rounded-full"
+                        style={{
+                          backgroundColor: healthColor(
+                            healthMetricStatus === "unknown" ? selectedNode.health?.level : healthMetricStatus,
+                          ),
+                        }}
+                        title={healthMetricStatus === "unknown" ? "Topology health" : `Health metric: ${healthMetricStatus}`}
+                      />
                       <span className="text-sm font-semibold text-slate-200">{selectedNode.name}</span>
                       <span className="text-[10px] text-slate-500 uppercase px-1.5 py-0.5 bg-slate-800 rounded">
                         {resolveNodeKind(selectedNode)}
@@ -1744,6 +2428,22 @@ export default function PartitionAssetsPage() {
                     {selectedNode.intent && (
                       <span className="text-[10px] text-slate-500">/ {selectedNode.intent}</span>
                     )}
+                    {healthRule && healthMetricStatus !== "unknown" && (
+                      <span
+                        className="text-[10px] font-mono px-2 py-0.5 rounded border"
+                        style={{
+                          color: healthColor(healthMetricStatus),
+                          borderColor: `${healthColor(healthMetricStatus)}66`,
+                        }}
+                        title={`${healthRule.metric}: ${healthRuleText(healthRule)}`}
+                      >
+                        {healthRule.metric} ={" "}
+                        {healthMetricValue !== null
+                          ? formatHealthValue(healthMetricValue, healthRule.unit)
+                          : "…"}{" "}
+                        · {healthMetricStatus}
+                      </span>
+                    )}
                     <div className="flex-1" />
                     {/* Helper config hint */}
                     {helperManifest && selectedNode.name in helperManifest.assets && (
@@ -1754,8 +2454,93 @@ export default function PartitionAssetsPage() {
                   </div>
 
                   {/* Metrics tab */}
-                  {activeTab === "metrics" && (
+                  {activeTab === "metrics" && showMetrics && (
                     <div className="space-y-5">
+                      <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="text-xs font-semibold text-slate-300 flex items-center gap-2">
+                            <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                            Key metric (auto-detected)
+                          </h3>
+                          <span className="text-[10px] text-slate-500">
+                            {selectedNode.name} · {selectedNode.intent || selectedNode.partition}
+                          </span>
+                        </div>
+                        {metricsProbing || keyMetricLoading ? (
+                          <div className="h-44 flex items-center justify-center"><Loader2 className="w-5 h-5 text-slate-600 animate-spin" /></div>
+                        ) : detectedMetric ? (
+                          <>
+                            <p className="text-[11px] text-slate-400">
+                              <span className="font-mono text-slate-300">{detectedMetric}</span>
+                              <span className="text-slate-600"> · automatically selected from the node’s available series</span>
+                            </p>
+                            <div className="h-44">
+                              {keyMetricError ? (
+                                <div className="h-full flex items-center justify-center text-xs text-slate-600">{keyMetricError}</div>
+                              ) : keyMetricData.length === 0 ? (
+                                <div className="h-full flex items-center justify-center text-xs text-slate-600">No samples in the selected window</div>
+                              ) : (
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <LineChart data={keyMetricData}>
+                                    <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
+                                    <YAxis stroke="var(--chart-text)" fontSize={10} />
+                                    <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
+                                    <Line type="monotone" dataKey="value" name={detectedMetric} stroke="var(--chart-1)" strokeWidth={1.5} dot={false} />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <p className="text-[10px] text-slate-500">
+                            No metric series found for this node. The Metrics and Graphs tabs are hidden.
+                          </p>
+                        )}
+                      </div>
+
+                      {healthRule && metricsAvailable && (healthMetricLoading || healthMetricStatus !== "unknown") && (
+                      <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="text-xs font-semibold text-slate-300 flex items-center gap-2">
+                            <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                            Health metric (auto-detected)
+                          </h3>
+                          <span
+                            className="text-[10px] px-2 py-0.5 rounded border uppercase tracking-wider"
+                            style={{
+                              color: healthColor(healthMetricStatus),
+                              borderColor: `${healthColor(healthMetricStatus)}66`,
+                            }}
+                          >
+                            {healthMetricStatus === "unknown" ? "unknown" : healthMetricStatus}
+                          </span>
+                        </div>
+                        {healthRule ? (
+                          <>
+                            <p className="text-[11px] text-slate-400">
+                              <span className="font-mono text-slate-300">{healthRule.metric}</span>
+                              <span className="text-slate-600"> · {healthRule.label} · source: {healthRule.source}</span>
+                            </p>
+                            <p className="text-[10px] text-slate-500">
+                              Rule: {healthRuleText(healthRule)}.{" "}
+                              {healthMetricLoading
+                                ? "Querying…"
+                                : healthMetricError
+                                  ? healthMetricError
+                                  : healthMetricValue !== null
+                                    ? `Current value: ${formatHealthValue(healthMetricValue, healthRule.unit)}.`
+                                    : "No samples in the current window; using topology health."}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-[10px] text-slate-500">
+                            No single health metric is defined for this asset type. Use a helper manifest metric to override it.
+                          </p>
+                        )}
+                      </div>
+                      )}
+
+                      {metricsAvailable && (
                       <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4 space-y-3">
                         <div className="flex items-center justify-between gap-3">
                           <h3 className="text-xs font-semibold text-slate-300">Custom graph query</h3>
@@ -1797,7 +2582,9 @@ export default function PartitionAssetsPage() {
                           )}
                         </div>
                       </div>
+                      )}
 
+                      {selectedNode.type === "asset" && metricData.length > 0 && (
                       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                         {/* Latency chart */}
                         <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4">
@@ -1859,17 +2646,45 @@ export default function PartitionAssetsPage() {
                           )}
                         </div>
                       </div>
+                      )}
                     </div>
                   )}
 
                   {/* Traces tab */}
                   {activeTab === "traces" && (
-                    <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                    <div className="space-y-4">
+                      <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
+                        <div className="flex items-center justify-between gap-3 mb-2">
+                          <h3 className="text-xs font-semibold text-slate-300 flex items-center gap-2">
+                            <Network className="w-3.5 h-3.5 text-violet-400" />
+                            Trace Flow
+                          </h3>
+                          {selectedTrace ? (
+                            <span className="text-[10px] text-slate-500 font-mono truncate" title={selectedTrace.trace_id}>
+                              {selectedTrace.trace_id}
+                            </span>
+                          ) : null}
+                        </div>
+                        {tracesLoading ? (
+                          <div className="py-8 flex items-center justify-center"><Loader2 className="w-5 h-5 text-slate-600 animate-spin" /></div>
+                        ) : traceSpans.length === 0 ? (
+                          <p className="text-xs text-slate-600 py-4">Select a trace to view its flow</p>
+                        ) : (
+                          <TraceFlow spans={traceSpans} />
+                        )}
+                      </div>
+                      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                       <div className="xl:col-span-1 bg-slate-950/60 border border-slate-800 rounded-lg p-3">
                         <h3 className="text-xs font-semibold text-slate-300 flex items-center gap-2 mb-2">
                           <GanttChartSquare className="w-3.5 h-3.5 text-violet-400" />
                           Recent Traces
                         </h3>
+                        {tracesFallback && !tracesLoading ? (
+                          <p className="text-[10px] text-amber-400/80 mb-2">
+                            No direct traces for {selectedNode.name}; showing traces from partition{" "}
+                            <code>{selectedNode.partition}</code>.
+                          </p>
+                        ) : null}
                         {tracesLoading ? (
                           <div className="py-8 flex items-center justify-center"><Loader2 className="w-5 h-5 text-slate-600 animate-spin" /></div>
                         ) : tracesError ? (
@@ -1910,11 +2725,12 @@ export default function PartitionAssetsPage() {
                           )}
                         </div>
                       </div>
+                      </div>
                     </div>
                   )}
 
                   {/* Logs tab */}
-                  {activeTab === "logs" && (
+                  {activeTab === "logs" && showLogs && (
                     <div>
                       {logsLoading ? (
                         <div className="py-8 flex items-center justify-center"><Loader2 className="w-5 h-5 text-slate-600 animate-spin" /></div>
@@ -1951,7 +2767,7 @@ export default function PartitionAssetsPage() {
                   )}
 
                   {/* Graphs tab */}
-                  {activeTab === "graphs" && (
+                  {activeTab === "graphs" && metricsAvailable && (
                     <div className="space-y-4">
                       <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4">
                         <h3 className="text-xs font-semibold text-slate-300 mb-2">Graph Editor</h3>

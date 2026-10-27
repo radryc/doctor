@@ -7,21 +7,8 @@ import { useInspector } from "../context/InspectorContext";
 import { useTimeRange } from "../context/TimeRangeContext";
 import type { DiscoveredService, LogRecord } from "../types/api";
 
-// Services are emitted with both short names ("doctor") and canonical names
-// ("doctor.query.query"). Match the exact service or any dot-prefixed child.
-// Dots in the service name are written as [.] so the expression stays valid in
-// both PromQL and TraceQL string literals without backslash escaping.
-function escapeServiceRegex(value: string): string {
-  return value.replaceAll(".", "[.]");
-}
-
-function promServiceMatcher(name: string): string {
-  return `${escapeServiceRegex(name)}([.].*)?`;
-}
-
-function traceServiceShort(name: string): string {
-  const parts = name.split(".").filter(Boolean);
-  return parts[parts.length - 1] ?? name;
+function serviceLabel(name: string): string {
+  return name.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 // ── APM Service Catalog (/services) ──────────────────────────────────────────
@@ -43,7 +30,10 @@ function ServiceCatalog() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [partitionFilter, setPartitionFilter] = useState("");
+  const [intentFilter, setIntentFilter] = useState("");
+  const [includeAssets, setIncludeAssets] = useState(false);
   const [partitions, setPartitions] = useState<string[]>([]);
+  const [intents, setIntents] = useState<string[]>([]);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -52,6 +42,7 @@ function ServiceCatalog() {
     const params = new URLSearchParams({
       tenant: config.default_tenant,
       window: range,
+      include_assets: String(includeAssets),
     });
     api
       .discoverServices(params)
@@ -59,27 +50,30 @@ function ServiceCatalog() {
         const svcs = r.services ?? [];
         setServices(svcs);
         const parts = [...new Set(svcs.map((s) => s.partition ?? "").filter(Boolean))].sort();
+        const its = [...new Set(svcs.map((s) => s.intent ?? "").filter(Boolean))].sort();
         setPartitions(parts);
+        setIntents(its);
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Failed to discover services");
       })
       .finally(() => setLoading(false));
-  }, [config.default_tenant, from, to]);
+  }, [config.default_tenant, from, to, includeAssets]);
 
   useEffect(() => { load(); }, [load, tr.refreshTick]);
 
-  const serviceName = (s: DiscoveredService) => s.name || s.service || "";
-
   const filtered = services.filter((s) => {
     if (partitionFilter && s.partition !== partitionFilter) return false;
+    if (intentFilter && s.intent !== intentFilter) return false;
     if (search) {
       const q = search.toLowerCase();
       return (
-        serviceName(s).toLowerCase().includes(q) ||
+        (s.name ?? "").toLowerCase().includes(q) ||
         (s.full_name ?? "").toLowerCase().includes(q) ||
+        (s.alias ?? "").toLowerCase().includes(q) ||
         (s.partition ?? "").toLowerCase().includes(q) ||
-        (s.intent ?? "").toLowerCase().includes(q)
+        (s.intent ?? "").toLowerCase().includes(q) ||
+        (s.asset ?? "").toLowerCase().includes(q)
       );
     }
     return true;
@@ -89,14 +83,14 @@ function ServiceCatalog() {
     <div className="tab-panel">
       <div className="panel-header">
         <div className="panel-header__left">
-          <h2>APM Service Catalog</h2>
-          <p>{loading ? "Loading…" : `${filtered.length} service${filtered.length !== 1 ? "s" : ""}`}</p>
+          <h2>APM Component Catalog</h2>
+          <p>{loading ? "Loading…" : `${filtered.length} component${filtered.length !== 1 ? "s" : ""}`}</p>
         </div>
         <div className="xp-toolbar">
           <input
             type="text"
             className="xp-search"
-            placeholder="Search services…"
+            placeholder="Search components…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -115,13 +109,38 @@ function ServiceCatalog() {
               </select>
             </label>
           )}
+          {intents.length > 0 && (
+            <label className="filter-label">
+              Intent
+              <select
+                className="xp-select"
+                value={intentFilter}
+                onChange={(e) => setIntentFilter(e.target.value)}
+              >
+                <option value="">All</option>
+                {intents.map((i) => (
+                  <option key={i} value={i}>{i}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="filter-label">
+            <input
+              type="checkbox"
+              checked={includeAssets}
+              onChange={(e) => setIncludeAssets(e.target.checked)}
+            />
+            Show assets
+          </label>
         </div>
       </div>
 
       <div className="panel-body">
         <div className="xp-table-header services-header">
-          <span>Service</span>
-          <span>Partition</span>
+          <span>Component</span>
+          <span>Partition / Intent</span>
+          <span>Kind</span>
+          <span>Alias</span>
           <span>Signals</span>
           <span>Traces</span>
           <span>Logs</span>
@@ -133,10 +152,10 @@ function ServiceCatalog() {
           ) : error ? (
             <div className="xp-empty">Could not discover services: {error}</div>
           ) : filtered.length === 0 ? (
-            <div className="xp-empty">No services discovered in this time range.</div>
+            <div className="xp-empty">No components discovered in this time range.</div>
           ) : (
             filtered.map((svc) => {
-              const name = serviceName(svc);
+              const name = svc.name;
               return (
                 <div
                   key={name}
@@ -144,14 +163,20 @@ function ServiceCatalog() {
                   onClick={() => navigate(`/services/${encodeURIComponent(name)}`)}
                   style={{ cursor: "pointer" }}
                 >
-                  <span className="services-row__name">
-                    {name}
+                  <span className="services-row__name" title={svc.full_name || name}>
+                    {svc.asset || name}
                     {svc.truncated && <span className="signal-badge signal-badge--truncated" title="Name truncated by X-Ray">T</span>}
                   </span>
                   <span className="services-row__partition">
                     {svc.partition ?? "—"}
                     {svc.intent ? <small>{svc.intent}</small> : null}
                   </span>
+                  <span className="services-row__kind">
+                    <span className={`signal-badge signal-badge--kind-${svc.kind === "asset" ? "asset" : "runtime"}`}>
+                      {svc.kind === "asset" ? (svc.asset_type ?? "asset") : "runtime"}
+                    </span>
+                  </span>
+                  <span className="services-row__alias">{svc.alias ?? "—"}</span>
                   <span className="services-row__signals">
                     {svc.has_metrics && <span className="signal-badge signal-badge--m" title="Metrics">M</span>}
                     {svc.has_traces && <span className="signal-badge signal-badge--t" title="Traces">T</span>}
@@ -187,9 +212,7 @@ function ServiceCatalog() {
 function ServiceDetail({ name }: { name: string }) {
   const navigate = useNavigate();
   const { config } = useConfig();
-  const promSvc = promServiceMatcher(name);
-  const traceSvc = name;
-  const traceSvcShort = traceServiceShort(name);
+  const svc = serviceLabel(name);
 
   return (
     <div className="tab-panel">
@@ -217,7 +240,7 @@ function ServiceDetail({ name }: { name: string }) {
             className="xp-live-btn"
             onClick={() =>
               navigate(
-                `/metrics?query=${encodeURIComponent(`{service=~"${promSvc}"}`)}&tenant=${encodeURIComponent(config.default_tenant)}`
+                `/metrics?query=${encodeURIComponent(`{service="${svc}"}`)}&tenant=${encodeURIComponent(config.default_tenant)}`
               )
             }
           >
@@ -230,29 +253,25 @@ function ServiceDetail({ name }: { name: string }) {
         <div className="service-detail__red">
           <REDCard
             label="Request Rate"
-            expr={`sum(rate(http_server_request_duration_count{service=~"${promSvc}"}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}"}[$__rate_interval]))`}
-            traceqlExpr={`{resource.service.name="${traceSvc}"} | rate()`}
-            traceqlExprShort={`{resource.service.name="${traceSvcShort}"} | rate()`}
+            expr={`sum(rate(http_server_request_duration_count{service="${svc}"}[$__rate_interval])) or sum(rate(http_requests_total{service="${svc}"}[$__rate_interval]))`}
+            traceqlExpr={`{resource.service.name="${svc}"} | rate()`}
             traceqlAgg="sum"
             unit="reqps"
             tenant={config.default_tenant}
           />
           <REDCard
             label="Error Rate"
-            expr={`(sum(rate(http_server_request_duration_count{service=~"${promSvc}",http_response_status_code=~"5.."}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}",status_code=~"5.."}[$__rate_interval]))) / (sum(rate(http_server_request_duration_count{service=~"${promSvc}"}[$__rate_interval])) or sum(rate(http_requests_total{service=~"${promSvc}"}[$__rate_interval]))) * 100`}
-            traceqlExpr={`{resource.service.name="${traceSvc}" && status = error} | rate()`}
-            traceqlExprShort={`{resource.service.name="${traceSvcShort}" && status = error} | rate()`}
-            traceqlDenominator={`{resource.service.name="${traceSvc}"} | rate()`}
-            traceqlDenominatorShort={`{resource.service.name="${traceSvcShort}"} | rate()`}
+            expr={`(sum(rate(http_server_request_duration_count{service="${svc}",http_response_status_code=~"5.."}[$__rate_interval])) or sum(rate(http_requests_total{service="${svc}",status_code=~"5.."}[$__rate_interval]))) / (sum(rate(http_server_request_duration_count{service="${svc}"}[$__rate_interval])) or sum(rate(http_requests_total{service="${svc}"}[$__rate_interval]))) * 100`}
+            traceqlExpr={`{resource.service.name="${svc}" && status = error} | rate()`}
+            traceqlDenominator={`{resource.service.name="${svc}"} | rate()`}
             traceqlAgg="ratio"
             unit="%"
             tenant={config.default_tenant}
           />
           <REDCard
             label="P95 Latency"
-            expr={`histogram_quantile(0.95, sum(rate(http_server_request_duration_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000`}
-            traceqlExpr={`{resource.service.name="${traceSvc}"} | quantile_over_time(duration, 0.95)`}
-            traceqlExprShort={`{resource.service.name="${traceSvcShort}"} | quantile_over_time(duration, 0.95)`}
+            expr={`histogram_quantile(0.95, sum(rate(http_server_request_duration_bucket{service="${svc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service="${svc}"}[$__rate_interval])) by (le)) * 1000`}
+            traceqlExpr={`{resource.service.name="${svc}"} | quantile_over_time(duration, 0.95)`}
             traceqlAgg="max"
             traceqlScale={1e-6}
             unit="ms"
@@ -260,9 +279,8 @@ function ServiceDetail({ name }: { name: string }) {
           />
           <REDCard
             label="P99 Latency"
-            expr={`histogram_quantile(0.99, sum(rate(http_server_request_duration_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service=~"${promSvc}"}[$__rate_interval])) by (le)) * 1000`}
-            traceqlExpr={`{resource.service.name="${traceSvc}"} | quantile_over_time(duration, 0.99)`}
-            traceqlExprShort={`{resource.service.name="${traceSvcShort}"} | quantile_over_time(duration, 0.99)`}
+            expr={`histogram_quantile(0.99, sum(rate(http_server_request_duration_bucket{service="${svc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service="${svc}"}[$__rate_interval])) by (le)) * 1000`}
+            traceqlExpr={`{resource.service.name="${svc}"} | quantile_over_time(duration, 0.99)`}
             traceqlAgg="max"
             traceqlScale={1e-6}
             unit="ms"
@@ -289,9 +307,7 @@ interface REDCardProps {
   label: string;
   expr: string;
   traceqlExpr?: string;
-  traceqlExprShort?: string;
   traceqlDenominator?: string;
-  traceqlDenominatorShort?: string;
   traceqlAgg?: "sum" | "max" | "ratio";
   traceqlScale?: number;
   unit: string;
@@ -302,9 +318,7 @@ function REDCard({
   label,
   expr,
   traceqlExpr,
-  traceqlExprShort,
   traceqlDenominator,
-  traceqlDenominatorShort,
   traceqlAgg = "sum",
   traceqlScale = 1,
   unit,
@@ -353,13 +367,9 @@ function REDCard({
       });
     };
 
-    const traceValue = async (primary?: string, alternate?: string): Promise<number | null> => {
-      if (primary) {
-        const value = await traceMetrics(primary);
-        if (value != null) return value;
-      }
-      if (alternate && alternate !== primary) return traceMetrics(alternate);
-      return null;
+    const traceValue = async (expression?: string): Promise<number | null> => {
+      if (!expression) return null;
+      return traceMetrics(expression);
     };
 
     const traceRatio = async (numExpr?: string, denExpr?: string): Promise<number | null> => {
@@ -372,21 +382,14 @@ function REDCard({
 
     const fallback = () => {
       if (traceqlAgg === "ratio" && traceqlDenominator) {
-        traceRatio(traceqlExprShort, traceqlDenominatorShort)
+        traceRatio(traceqlExpr, traceqlDenominator)
           .then((value) => {
-            if (!active) return;
-            if (value != null) {
-              set(value);
-              return;
-            }
-            return traceRatio(traceqlExpr, traceqlDenominator).then((canonicalValue) => {
-              if (active) set(canonicalValue);
-            });
+            if (active) set(value);
           })
           .catch(() => set(null));
         return;
       }
-      traceValue(traceqlExprShort, traceqlExpr)
+      traceValue(traceqlExpr)
         .then((v) => {
           if (active) set(v);
         })
@@ -409,7 +412,7 @@ function REDCard({
       .catch(fallback);
 
     return () => { active = false; };
-  }, [expr, traceqlExpr, traceqlExprShort, traceqlDenominator, traceqlDenominatorShort, traceqlAgg, traceqlScale, unit, tenant, tr.refreshTick, from, to, tr]);
+  }, [expr, traceqlExpr, traceqlDenominator, traceqlAgg, traceqlScale, unit, tenant, tr.refreshTick, from, to, tr]);
 
   return (
     <div className="red-card">
@@ -437,7 +440,7 @@ function ProbeCards({ service }: { service: string }) {
 
   useEffect(() => {
     let active = true;
-    const matcher = promServiceMatcher(service);
+    const svc = serviceLabel(service);
     const queryValue = (expr: string): Promise<number | null> => {
       const params = new URLSearchParams({
         query: expr,
@@ -454,10 +457,10 @@ function ProbeCards({ service }: { service: string }) {
     };
 
     Promise.all([
-      queryValue(`max(guardian_probe_up{service=~"${matcher}"})`),
-      queryValue(`max(guardian_probe_duration_seconds{service=~"${matcher}"})`),
-      queryValue(`max(guardian_probe_consecutive_failures{service=~"${matcher}"})`),
-      queryValue(`time() - max(guardian_probe_last_success_timestamp_seconds{service=~"${matcher}"})`),
+      queryValue(`max(guardian_probe_up{service="${svc}"})`),
+      queryValue(`max(guardian_probe_duration_seconds{service="${svc}"})`),
+      queryValue(`max(guardian_probe_consecutive_failures{service="${svc}"})`),
+      queryValue(`time() - max(guardian_probe_last_success_timestamp_seconds{service="${svc}"})`),
     ]).then(([up, latency, failures, lastSuccessAge]) => {
       if (!active) return;
       if (up == null && latency == null && failures == null && lastSuccessAge == null) {
@@ -520,32 +523,20 @@ function RecentTraces({ service, tenant }: { service: string; tenant: string }) 
   const { from, to } = tr.resolve();
   const { open } = useInspector();
   const [traces, setTraces] = useState<Array<{ trace_id: string; span_count: number; min_time: string; duration_ms?: number }>>([]);
-  const [source, setSource] = useState(service);
-  const short = traceServiceShort(service);
 
   useEffect(() => {
     let active = true;
-    const params = (target: string) =>
-      new URLSearchParams({
-        tenant,
-        service: target,
-        from: from.toISOString(),
-        to: to.toISOString(),
-        limit: "20",
-      });
+    const params = new URLSearchParams({
+      tenant,
+      service,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      limit: "20",
+    });
     api
-      .getRecentTraces(params(short))
-      .then(async (r) => {
-        if (!active) return;
-        if ((r.traces ?? []).length > 0 || short === service) {
-          setTraces(r.traces ?? []);
-          setSource(short);
-          return;
-        }
-        const alternate = await api.getRecentTraces(params(service));
-        if (!active) return;
-        setTraces(alternate.traces ?? []);
-        setSource(service);
+      .getRecentTraces(params)
+      .then((r) => {
+        if (active) setTraces(r.traces ?? []);
       })
       .catch(() => {
         if (active) setTraces([]);
@@ -553,7 +544,7 @@ function RecentTraces({ service, tenant }: { service: string; tenant: string }) 
     return () => {
       active = false;
     };
-  }, [service, short, tenant, from, to, tr.refreshTick]);
+  }, [service, tenant, from, to, tr.refreshTick]);
 
   if (traces.length === 0)
     return <div className="xp-empty">No recent traces. Services covered only by synthetic probes have probe health above but no spans.</div>;
@@ -562,11 +553,6 @@ function RecentTraces({ service, tenant }: { service: string; tenant: string }) 
 
   return (
     <div>
-      {source !== service && (
-        <div style={{ fontSize: "0.7rem", opacity: 0.7, marginBottom: "0.25rem" }}>
-          Showing traces for <code>{source}</code> (application service name).
-        </div>
-      )}
       {traces.map((t) => (
         <div
           key={t.trace_id}
@@ -596,32 +582,20 @@ function RecentLogs({ service, tenant }: { service: string; tenant: string }) {
   const { from, to } = tr.resolve();
   const { open } = useInspector();
   const [logs, setLogs] = useState<LogRecord[]>([]);
-  const [source, setSource] = useState(service);
-  const short = traceServiceShort(service);
 
   useEffect(() => {
     let active = true;
-    const params = (target: string) =>
-      new URLSearchParams({
-        tenant,
-        service: target,
-        from: from.toISOString(),
-        to: to.toISOString(),
-        limit: "50",
-      });
+    const params = new URLSearchParams({
+      tenant,
+      service,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      limit: "50",
+    });
     api
-      .searchLogs(params(short))
-      .then(async (r) => {
-        if (!active) return;
-        if ((r.results ?? []).length > 0 || short === service) {
-          setLogs(r.results ?? []);
-          setSource(short);
-          return;
-        }
-        const alternate = await api.searchLogs(params(service));
-        if (!active) return;
-        setLogs(alternate.results ?? []);
-        setSource(service);
+      .searchLogs(params)
+      .then((r) => {
+        if (active) setLogs(r.results ?? []);
       })
       .catch(() => {
         if (active) setLogs([]);
@@ -629,18 +603,13 @@ function RecentLogs({ service, tenant }: { service: string; tenant: string }) {
     return () => {
       active = false;
     };
-  }, [service, short, tenant, from, to, tr.refreshTick]);
+  }, [service, tenant, from, to, tr.refreshTick]);
 
   if (logs.length === 0)
     return <div className="xp-empty">No recent logs. Synthetic probes do not emit application logs; use probe health above.</div>;
 
   return (
     <div className="dash-logs">
-      {source !== service && (
-        <div style={{ fontSize: "0.7rem", opacity: 0.7, marginBottom: "0.25rem" }}>
-          Showing logs for <code>{source}</code> (application service name).
-        </div>
-      )}
       {logs.slice(0, 50).map((log, i) => (
         <div
           key={i}

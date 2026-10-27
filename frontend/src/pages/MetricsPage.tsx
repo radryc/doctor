@@ -324,6 +324,7 @@ export default function MetricsPage() {
   );
   const [step, setStep] = useState(searchParams.get("step") ?? "30s");
   const [mode, setMode] = useState<QueryMode>((searchParams.get("mode") as QueryMode) || "range");
+  const [queryTimeout, setQueryTimeout] = useState(searchParams.get("timeout") ?? "");
   const [view, setView] = useState<ViewMode>("graph");
   const [chartExpanded, setChartExpanded] = useState(false);
   const [response, setResponse] = useState<PrometheusQueryResponse | null>(null);
@@ -416,8 +417,9 @@ export default function MetricsPage() {
     if (toISO) next.set("to", toISO);
     if (step) next.set("step", step);
     next.set("mode", mode);
+    if (queryTimeout) next.set("timeout", queryTimeout);
     if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
-  }, [tenant, partition, selectedMetric, query, from, to, step, mode, searchParams, setSearchParams]);
+  }, [tenant, partition, selectedMetric, query, from, to, step, mode, queryTimeout, searchParams, setSearchParams]);
 
   const execute = useCallback(
     async (
@@ -447,6 +449,7 @@ export default function MetricsPage() {
 
       const params = new URLSearchParams({ tenant: nextTenant, query: expr });
       if (nextPartition) params.set("partition", nextPartition);
+      if (queryTimeout) params.set("timeout", queryTimeout);
       let url = "/api/v1/query";
       if (nextMode === "range") {
         const fromISO = toISOStringOrEmpty(nextFrom);
@@ -462,7 +465,11 @@ export default function MetricsPage() {
 
       setRequestUrl(`${url}?${params}`);
       setStatusKind("loading");
-      setStatusMsg("Executing PromQL query…");
+      setStatusMsg(
+        queryTimeout
+          ? `Executing PromQL query with a ${queryTimeout} timeout…`
+          : "Executing PromQL query…"
+      );
       if (nextMode === "instant") setView("table");
 
       try {
@@ -482,10 +489,14 @@ export default function MetricsPage() {
         const message = err instanceof Error ? err.message : "Query failed";
         setRawJson(JSON.stringify({ error: message }, null, 2));
         setStatusKind("error");
-        setStatusMsg(message);
+        setStatusMsg(
+          /deadline exceeded|timed out|timeout/i.test(message)
+            ? `${message} — choose a longer Timeout and run again.`
+            : message
+        );
       }
     },
-    [mode, tenant, partition, from, to, step]
+    [mode, tenant, partition, from, to, step, queryTimeout]
   );
 
   // If the page was opened from a dashboard link with a query/metric, run it
@@ -780,6 +791,22 @@ export default function MetricsPage() {
                   PromQL expression
                 </label>
                 <div className="flex items-center gap-2">
+                  <label
+                    className="filter-label"
+                    title="Default queries stop after 15 seconds. Choose a longer timeout for expensive range queries."
+                  >
+                    Timeout
+                    <select
+                      className="xp-select"
+                      value={queryTimeout}
+                      onChange={(event) => setQueryTimeout(event.target.value)}
+                    >
+                      <option value="">15s</option>
+                      <option value="60s">1m</option>
+                      <option value="120s">2m</option>
+                      <option value="300s">5m</option>
+                    </select>
+                  </label>
                   <button
                     type="button"
                     className="xp-live-btn"

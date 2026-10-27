@@ -201,7 +201,7 @@ they go straight to the logengine.
 | Endpoint | Notes |
 | --- | --- |
 | `GET /v1/spans/search` | span search by service/trace/from/to |
-| `GET /v1/traces/recent` | recent traces (span discovery cap 5000) |
+| `GET /v1/traces/recent` | recent traces; cursor-paginated (`limit` + `cursor`, returns `has_more` / `next_cursor`), each page scans bounded span batches |
 | `GET /v1/traces/{traceID}` | trace lookup; `latest*` magic IDs supported |
 | `GET /v1/logs/services` | services with logs |
 | `GET /v1/logs/search` | LogQL-style pushdown |

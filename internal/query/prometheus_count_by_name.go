@@ -207,7 +207,8 @@ func (s *Service) loadSeriesPresence(ctx context.Context, tenant, partition stri
 	}
 	groups := make(map[string]map[string]*seriesPresence)
 	seriesCount := 0
-	err := s.logEngine.StreamMetricSeries(ctx, tenant, query, start, end, func(meta segment.MetricSeriesMeta) error {
+	emit := func(meta segment.MetricSeriesMeta) error {
+
 		labelSet := metricSeriesLabels(meta)
 		if !matchersMatch(matchers, labelSet) {
 			return nil
@@ -238,11 +239,79 @@ func (s *Service) loadSeriesPresence(ctx context.Context, tenant, partition stri
 			presence.max = maxTime
 		}
 		return nil
-	})
-	if err != nil {
+	}
+	stream := func(q segment.MetricQuery) error {
+		return s.logEngine.StreamMetricSeries(ctx, tenant, q, start, end, emit)
+	}
+	if err := stream(query); err != nil {
 		return nil, translateMetricLoadError(err)
 	}
+
+	// Resource attributes such as guardian.pusher reach the stored series index
+	// with their original dotted names (guardian.pusher), while PromQL matchers
+	// use the normalized underscore form (guardian_pusher). Pushing the
+	// underscore matcher into storage therefore finds no series even though the
+	// samples carry the label. Retry with the dotted spelling so the matcher can
+	// use the series index instead of scanning samples.
+	if len(groups) == 0 && len(query.LabelMatchers) > 0 {
+		dotted := query
+		dotted.LabelMatchers = segmentMetricMatchers(dottedMetricMatchers(plan.matchers))
+		if len(dotted.LabelMatchers) > 0 {
+			if err := stream(dotted); err != nil {
+				return nil, translateMetricLoadError(err)
+			}
+		}
+	}
+
+	// Last resort: drop label pushdown and apply the matchers to the normalized
+	// labels client-side. The series index is metadata-only, so this stays
+	// bounded even when the selector is broad.
+	if len(groups) == 0 && len(query.LabelMatchers) > 0 {
+		query.LabelMatchers = nil
+		if err := stream(query); err != nil {
+			return nil, translateMetricLoadError(err)
+		}
+	}
 	return groups, nil
+}
+
+// dottedMetricMatchers rewrites normalized PromQL label names to the dotted
+// resource-attribute spelling stored in the series index. The canonical
+// labels exposed to PromQL use underscores, but the ingest path preserves the
+// original OTel names (guardian.pusher, k8s.cluster.name).
+func dottedMetricMatchers(matchers []*promlabels.Matcher) []*promlabels.Matcher {
+	out := make([]*promlabels.Matcher, 0, len(matchers))
+	for _, matcher := range matchers {
+		if matcher == nil {
+			continue
+		}
+		out = append(out, promlabels.MustNewMatcher(
+			matcher.Type,
+			dottedLabelName(matcher.Name),
+			matcher.Value,
+		))
+	}
+	return out
+}
+
+// dottedLabelName maps a normalized PromQL/API label name to the dotted
+// resource-attribute spelling used by the metric series index.
+func dottedLabelName(name string) string {
+	switch name {
+	case promlabels.MetricName, "service", "tenant":
+		// Stored as first-class fields, not label-map entries.
+		return name
+	case "partition":
+		return "guardian.partition"
+	case "intent":
+		return "guardian.intent"
+	case "asset":
+		return "guardian.asset"
+	}
+	if strings.Contains(name, "_") {
+		return strings.ReplaceAll(name, "_", ".")
+	}
+	return name
 }
 
 // metricSeriesLabels reconstructs the Prometheus label set of a series index

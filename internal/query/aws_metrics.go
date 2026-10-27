@@ -113,7 +113,7 @@ func (s *Service) execPrometheusInstant(ctx context.Context, tenant, partition, 
 		}
 	}
 
-	engine := newDoctorPrometheusEngine()
+	engine := newDoctorPrometheusEngine(prometheusEngineTimeout(ctx))
 	defer func() { _ = engine.Close() }()
 
 	query, err := engine.NewInstantQuery(
@@ -153,7 +153,7 @@ func (s *Service) execPrometheusRange(ctx context.Context, tenant, partition, qu
 		}
 	}
 
-	engine := newDoctorPrometheusEngine()
+	engine := newDoctorPrometheusEngine(prometheusEngineTimeout(ctx))
 	defer func() { _ = engine.Close() }()
 
 	query, err := engine.NewRangeQuery(
