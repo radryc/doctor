@@ -297,13 +297,26 @@ func (q *doctorPromQuerier) discoverLabelValues(ctx context.Context, name string
 	return out, nil
 }
 
-// forEachSeriesLabels streams matching metric records and invokes yield once for
-// every distinct series label set. It deliberately does not build the sample
-// index used by query execution: discovery endpoints only need series metadata,
-// so memory stays proportional to the number of series instead of the (much
-// larger) number of samples. This is what protects /api/v1/labels and
-// /api/v1/series from OOMing on high-frequency metrics.
+// forEachSeriesLabels prefers the per-chunk series index, which carries the
+// same projected label set as a sample but avoids decoding every point. It falls
+// back to the legacy sample scan when the store has no series index (for
+// example, chunks written before the index existed).
 func (q *doctorPromQuerier) forEachSeriesLabels(ctx context.Context, matchers []*promlabels.Matcher, yield func(promlabels.Labels)) error {
+	indexed, err := q.forEachSeriesLabelsFromIndex(ctx, matchers, yield)
+	if err != nil {
+		return err
+	}
+	if indexed > 0 {
+		return nil
+	}
+	return q.forEachSeriesLabelsFromSamples(ctx, matchers, yield)
+}
+
+// forEachSeriesLabelsFromSamples is the legacy fallback: it streams metric
+// samples and deduplicates their projected label sets. It is bounded by
+// maxDiscoveryScannedRecords, so it is only appropriate for stores without a
+// series index.
+func (q *doctorPromQuerier) forEachSeriesLabelsFromSamples(ctx context.Context, matchers []*promlabels.Matcher, yield func(promlabels.Labels)) error {
 	metricQuery := metricQueryFromMatchers(matchers)
 	requestedMetricName := exactPromMetricNameMatcher(matchers)
 	from := timeFromPromMillis(q.mint)
@@ -1293,7 +1306,11 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 			for _, selectorSet := range selectorSets {
 				labelMaps, seriesErr := doctorQuerier.seriesLabelMaps(r.Context(), selectorSet)
 				if seriesErr != nil && !hasAWS && !awsEnabled {
-					writePrometheusError(w, http.StatusInternalServerError, "internal", seriesErr.Error())
+					if errors.Is(seriesErr, errMetricQueryTooBroad) {
+						writePrometheusExecutionError(w, translateMetricLoadError(seriesErr))
+					} else {
+						writePrometheusError(w, http.StatusInternalServerError, "internal", seriesErr.Error())
+					}
 					return
 				}
 				for _, labels := range labelMaps {
