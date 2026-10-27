@@ -22,7 +22,6 @@ import (
 	"github.com/rydzu/ainfra/doctor/internal/federation"
 	"github.com/rydzu/ainfra/doctor/internal/proxy"
 	"github.com/rydzu/ainfra/doctor/internal/segment"
-	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
 	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
 )
 
@@ -1594,6 +1593,11 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 	from := parseTime(r.URL.Query().Get("from"))
 	to := parseTime(r.URL.Query().Get("to"))
 	limit := parseLimit(r.URL.Query().Get("limit"), 100, 500)
+	cursor, err := decodeTraceCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if from.IsZero() {
 		from = time.Now().UTC().Add(-1 * time.Hour)
@@ -1602,121 +1606,18 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 		to = time.Now().UTC()
 	}
 
-	// Bound the scan: limit 0 means "no limit" in the log engine, and loading
-	// every span in the window blows up doctor-query memory on busy tenants.
-	// traceDiscoverySpanLimit still covers the trace summaries the UI needs.
-	spans, err := s.logEngine.QueryTraces(r.Context(), tenant, "", service, from, to, traceDiscoverySpanLimit)
+	summaries, next, hasMore, err := s.recentTracePage(r.Context(), tenant, service, partition, from, to, limit, cursor)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if partition != "" {
-		filtered := spans[:0]
-		for _, span := range spans {
-			spanPartition, _, _ := traceIdentityLabels(span)
-			if spanPartition == partition {
-				filtered = append(filtered, span)
-			}
-		}
-		spans = filtered
-	}
-
-	type TraceSummary struct {
-		TraceID   string    `json:"trace_id"`
-		Service   string    `json:"service"`
-		Partition string    `json:"partition,omitempty"`
-		Intent    string    `json:"intent,omitempty"`
-		Asset     string    `json:"asset,omitempty"`
-		MinTime   time.Time `json:"min_time"`
-		MaxTime   time.Time `json:"max_time"`
-		SpanCount int       `json:"span_count"`
-	}
-
-	traceMap := make(map[string]*TraceSummary)
-	for _, span := range spans {
-		if span.TraceID == "" {
-			continue
-		}
-		partition, intent, asset := traceIdentityLabels(span)
-		t, ok := traceMap[span.TraceID]
-		if !ok {
-			t = &TraceSummary{
-				TraceID:   span.TraceID,
-				Service:   span.Service,
-				Partition: partition,
-				Intent:    intent,
-				Asset:     asset,
-				MinTime:   span.StartTime,
-				MaxTime:   span.EndTime,
-			}
-			traceMap[span.TraceID] = t
-		}
-		t.SpanCount++
-		if span.StartTime.Before(t.MinTime) {
-			t.MinTime = span.StartTime
-		}
-		if span.EndTime.After(t.MaxTime) {
-			t.MaxTime = span.EndTime
-		}
-	}
-
-	if s.awsReady() {
-		awsSummaries, awsErr := s.aws.QueryTraces(r.Context(), awsstore.TraceQuery{
-			Service: service,
-			From:    from,
-			To:      to,
-			Limit:   limit,
-		})
-		if awsErr == nil {
-			for _, summary := range awsSummaries {
-				if summary.TraceID == "" {
-					continue
-				}
-				if _, exists := traceMap[summary.TraceID]; exists {
-					continue
-				}
-				currentPartition := summary.Partition
-				if currentPartition == "" {
-					currentPartition = awsPartition(summary.Region, summary.Account)
-				}
-				summaryPartition, allowed := s.policyPartitionAllowed(r.Context(), summary.Account, summary.Region,
-					currentPartition, policy.SignalTraces)
-				if !allowed {
-					continue
-				}
-				if partition != "" && summaryPartition != partition {
-					continue
-				}
-				spanCount := summary.SpanCount
-				if spanCount <= 0 {
-					spanCount = 1
-				}
-				traceMap[summary.TraceID] = &TraceSummary{
-					TraceID:   summary.TraceID,
-					Service:   firstNonEmpty(summary.Service, awsSourceLabel),
-					Partition: summaryPartition,
-					MinTime:   summary.StartTime,
-					MaxTime:   summary.EndTime,
-					SpanCount: spanCount,
-				}
-			}
-		}
-	}
-
-	summaries := make([]TraceSummary, 0, len(traceMap))
-	for _, t := range traceMap {
-		summaries = append(summaries, *t)
-	}
-	sort.Slice(summaries, func(i, j int) bool {
-		return summaries[i].MaxTime.After(summaries[j].MaxTime)
-	})
-	if len(summaries) > limit {
-		summaries = summaries[:limit]
-	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"returned": len(summaries),
-		"traces":   summaries,
+		"returned":    len(summaries),
+		"traces":      summaries,
+		"has_more":    hasMore,
+		"next_cursor": encodeTraceCursor(next),
+		"page_size":   limit,
 	})
 }
 

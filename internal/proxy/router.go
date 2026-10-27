@@ -523,7 +523,7 @@ func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, 
 				return
 			}
 
-			callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+			callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
 			defer cancel()
 			records, err := target.upstream.QueryLogs(callCtx, tenant, pushdown, from, to, limit)
 			results[i] = result{index: i, records: records, err: err}
@@ -731,7 +731,7 @@ func (r *Router) metricsQuery(
 					return
 				}
 
-				callCtx, cancel := context.WithTimeout(ctx, r.backendTimeout(target.backend))
+				callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
 				defer cancel()
 				data, err := exec(callCtx, target.upstream, target.query)
 				results[i] = result{target: target, data: data, err: err}
@@ -1153,6 +1153,19 @@ func (r *Router) backendTimeout(backend Backend) time.Duration {
 		return backend.Timeout
 	}
 	return r.cfg.BackendTimeout
+}
+
+// backendCallTimeout bounds one upstream call. A caller that explicitly
+// requests a longer deadline (for example a PromQL ?timeout=2m query) must not
+// be clamped back to the default short backend timeout.
+func (r *Router) backendCallTimeout(ctx context.Context, backend Backend) time.Duration {
+	timeout := r.backendTimeout(backend)
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > timeout {
+			return remaining
+		}
+	}
+	return timeout
 }
 
 func sourceForKind(kind string) string {

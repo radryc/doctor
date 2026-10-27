@@ -30,7 +30,11 @@ import (
 const (
 	doctorPrometheusLookback = 5 * time.Minute
 	doctorPrometheusTimeout  = 30 * time.Second
-	doctorDiscoveryWindow    = 24 * time.Hour
+	// maxPrometheusQueryTimeout caps the opt-in ?timeout= value. Normal queries
+	// keep the router's short backend timeout; callers that know a query is
+	// expensive can request up to this limit for one request.
+	maxPrometheusQueryTimeout = 5 * time.Minute
+	doctorDiscoveryWindow     = 24 * time.Hour
 	// doctorDiscoveryScanWindow caps how far back label/series discovery scans.
 	// The label vocabulary is stable, so a short recent window yields the same
 	// names while keeping the scan (and its memory) small even when Grafana asks
@@ -216,15 +220,33 @@ func (q *doctorPromQuerier) LabelValues(ctx context.Context, name string, _ *pro
 		return q.discoverMetricNames(ctx)
 	}
 
-	if values, err := q.discoverLabelValues(ctx, name, matchers); err == nil && len(values) > 0 {
-		return values, nil, nil
+	discovered, err := q.discoverLabelValues(ctx, name, matchers)
+	if err == nil {
+		// Manifest-backed discovery sees the stored label spelling. Resource
+		// attributes keep their dotted OTel names (guardian.pusher) while the
+		// PromQL/API label name is normalized (guardian_pusher); query both so
+		// local and federated values are both returned.
+		if dotted := dottedLabelName(name); dotted != name {
+			if more, dottedErr := q.discoverLabelValues(ctx, dotted, matchers); dottedErr == nil {
+				discovered = append(discovered, more...)
+			}
+		}
+		if len(discovered) > 0 {
+			set := make(map[string]struct{}, len(discovered))
+			for _, value := range discovered {
+				if value != "" {
+					set[value] = struct{}{}
+				}
+			}
+			return sortedStrings(set), nil, nil
+		}
 	}
 
 	// Manifest-backed discovery only sees metric attributes. Resource-derived
 	// labels such as service and guardian_partition can legitimately return an
 	// empty set there, so fall back to scanning series labels.
 	values := make(map[string]struct{})
-	err := q.forEachSeriesLabels(ctx, matchers, func(labelSet promlabels.Labels) {
+	err = q.forEachSeriesLabels(ctx, matchers, func(labelSet promlabels.Labels) {
 		if value := labelSet.Get(name); value != "" {
 			values[value] = struct{}{}
 		}
@@ -920,12 +942,39 @@ func hasPromMatchers(matchers []*promlabels.Matcher) bool {
 	return false
 }
 
+// requestPrometheusContext applies the optional Prometheus-compatible
+// ?timeout= duration. The default remains the router's short backend timeout;
+// callers opt into a longer context explicitly for expensive queries.
+func requestPrometheusContext(r *http.Request) (context.Context, context.CancelFunc, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("timeout"))
+	if raw == "" {
+		return r.Context(), func() {}, nil
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout <= 0 {
+		return nil, nil, fmt.Errorf("invalid timeout %q: use a duration such as 30s or 2m", raw)
+	}
+	if timeout > maxPrometheusQueryTimeout {
+		timeout = maxPrometheusQueryTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	return ctx, cancel, nil
+}
+
 func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) {
 	queryString := requestParam(r, "query")
 	if queryString == "" {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", "query is required")
 		return
 	}
+
+	ctx, cancel, timeoutErr := requestPrometheusContext(r)
+	if timeoutErr != nil {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", timeoutErr.Error())
+		return
+	}
+	defer cancel()
+	r = r.WithContext(ctx)
 
 	evaluationTime, err := parsePrometheusTime(requestParam(r, "time"), time.Now().UTC())
 	if err != nil {
@@ -983,6 +1032,14 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", "query is required")
 		return
 	}
+
+	ctx, cancel, timeoutErr := requestPrometheusContext(r)
+	if timeoutErr != nil {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", timeoutErr.Error())
+		return
+	}
+	defer cancel()
+	r = r.WithContext(ctx)
 
 	end, err := parsePrometheusTime(requestParam(r, "end"), time.Now().UTC())
 	if err != nil {
@@ -1344,13 +1401,26 @@ func prometheusDiscoveryRange(r *http.Request) (time.Time, time.Time) {
 	return clampDiscoveryWindow(start, end)
 }
 
-func newDoctorPrometheusEngine() *promql.Engine {
+func prometheusEngineTimeout(ctx context.Context) time.Duration {
+	timeout := doctorPrometheusTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > timeout {
+			timeout = remaining
+		}
+	}
+	return timeout
+}
+
+func newDoctorPrometheusEngine(timeout time.Duration) *promql.Engine {
+	if timeout <= 0 {
+		timeout = doctorPrometheusTimeout
+	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return promql.NewEngine(promql.EngineOpts{
 		Logger:        logger,
 		Reg:           promclient.NewRegistry(),
 		MaxSamples:    1_000_000,
-		Timeout:       doctorPrometheusTimeout,
+		Timeout:       timeout,
 		LookbackDelta: doctorPrometheusLookback,
 		NoStepSubqueryIntervalFn: func(rangeMillis int64) int64 {
 			if rangeMillis <= 0 {

@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	defaultServiceName    = "doctor"
+	defaultServiceName    = "doctor.invalid.unconfigured"
 	defaultMetricInterval = 15 * time.Second
 )
 

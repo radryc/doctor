@@ -23,6 +23,34 @@ func TestRedactJWT(t *testing.T) {
 	}
 }
 
+// TestCanonicalServiceNamesAreNotRedacted ensures a three-segment canonical
+// identity is not mistaken for a JWT. This previously redacted
+// guardian-configs.guardian.guardiand and made guardiand disappear from logs,
+// traces, and the APM service catalog.
+func TestCanonicalServiceNamesAreNotRedacted(t *testing.T) {
+	engine, _ := New("test-key")
+	names := []string{
+		"guardian-configs.guardian.guardiand",
+		"monofs.monofs-storage.router-a",
+		"doctor.ingest.ingest",
+		"monitoring.grafana.grafana",
+	}
+	for _, name := range names {
+		attrs := engine.SanitizeAttributes(map[string]string{
+			"service.name":       name,
+			"guardian.partition": "guardian-configs",
+			"guardian.intent":    "guardian",
+			"guardian.asset":     "guardiand",
+		})
+		if attrs["service.name"] != name {
+			t.Errorf("service.name %q was redacted to %q", name, attrs["service.name"])
+		}
+		if attrs["guardian.partition"] != "guardian-configs" {
+			t.Errorf("guardian.partition was redacted to %q", attrs["guardian.partition"])
+		}
+	}
+}
+
 // TestRedactLongSecretKeys ensures secret-looking strings are redacted.
 func TestRedactLongSecretKeys(t *testing.T) {
 	engine, _ := New("test-key")
@@ -138,5 +166,14 @@ func TestNewEngineRejectsEmptyKey(t *testing.T) {
 	_, err = New("   ")
 	if err == nil {
 		t.Fatal("expected error for whitespace-only key")
+	}
+}
+
+func TestCommonComponentNamesAreNotSecrets(t *testing.T) {
+	engine, _ := New("test-key")
+	for _, value := range []string{"api-gateway", "secret-manager", "tokio-runtime", "guardian-configs"} {
+		if got := engine.SanitizeText(value); got != value {
+			t.Errorf("service-like name %q was redacted to %q", value, got)
+		}
 	}
 }

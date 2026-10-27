@@ -248,6 +248,10 @@ func TagScopesFromNames(names []string) []TagScope {
 			strings.HasPrefix(name, "k8s.") || strings.HasPrefix(name, "host.") ||
 			strings.HasPrefix(name, "container.") || strings.HasPrefix(name, "cloud.") ||
 			strings.HasPrefix(name, "guardian.") || strings.HasPrefix(name, "aws."):
+			if strings.HasPrefix(name, "guardian.target.") {
+				span[name] = struct{}{}
+				continue
+			}
 			resource[name] = struct{}{}
 		default:
 			span[name] = struct{}{}

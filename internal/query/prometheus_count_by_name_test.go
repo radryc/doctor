@@ -239,3 +239,47 @@ func TestCountByNameFastPathRespectsLabelMatchers(t *testing.T) {
 		t.Fatalf("count = %v, want 1", got)
 	}
 }
+
+// Resource attributes are stored with their original dotted names
+// (guardian.pusher) while PromQL uses the normalized underscore form
+// (guardian_pusher). The storage matcher cannot see through that difference,
+// so the fast path must retry without label pushdown instead of returning an
+// empty result.
+func TestCountByNameFastPathRetriesResourceLabelMatchers(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	backend := &fakeLogEngineBackend{metrics: []segment.MetricPointRecord{
+		{MetricName: "up", Service: "a", HasValue: true, Value: 1, Timestamp: base, ResourceAttributes: map[string]string{"guardian.pusher": "k8s-main"}},
+		{MetricName: "up", Service: "b", HasValue: true, Value: 1, Timestamp: base, ResourceAttributes: map[string]string{"guardian.pusher": "aws-div"}},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	params := url.Values{}
+	params.Set("query", `count by (__name__) ({guardian_pusher="k8s-main"})`)
+	params.Set("time", base.Format(time.RFC3339Nano))
+
+	rec := doRequest(t, svc.handlePrometheusQuery, "/api/v1/query?"+params.Encode())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Data struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric map[string]string `json:"metric"`
+				Value  []any             `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if response.Data.ResultType != "vector" || len(response.Data.Result) != 1 {
+		t.Fatalf("response = %s", rec.Body.String())
+	}
+	if got := response.Data.Result[0].Value[1]; got != "1" {
+		t.Fatalf("count = %v, want 1", got)
+	}
+	if got := response.Data.Result[0].Metric["__name__"]; got != "up" {
+		t.Fatalf("metric name = %q, want up", got)
+	}
+}

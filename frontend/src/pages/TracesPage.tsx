@@ -7,6 +7,18 @@ import { copyText } from "../lib/clipboard";
 import TraceDetails, { fmtTime } from "../components/charts/TraceDetails";
 import type { TraceSummary, TraceRecord } from "../types/api";
 
+// Accepts the two formats Doctor emits and returns the canonical 32-hex form:
+//   W3C:  4bf92f3577b34da6a3ce929d0e0e4736
+//   X-Ray: 1-4bf92f35-77b34da6a3ce929d0e0e4736
+function canonicalTraceId(raw: string): string {
+  const value = raw.trim().toLowerCase();
+  if (/^[0-9a-f]{32}$/.test(value)) {
+    return /[1-9a-f]/.test(value) ? value : "";
+  }
+  const match = /^1-([0-9a-f]{8})-([0-9a-f]{24})$/.exec(value);
+  return match ? match[1] + match[2] : "";
+}
+
 interface TraceRowProps {
   trace: TraceSummary;
   tenant: string;
@@ -170,6 +182,24 @@ export default function TracesPage() {
   const [status, setStatus] = useState("Searching…");
   const [copiedView, setCopiedView] = useState(false);
   const [inputVal, setInputVal] = useState("");
+  const [page, setPage] = useState(1);
+  // pageCursors[page - 1] is the opaque cursor that produced that page.
+  // Page 1 has no cursor; the array is reset whenever a server-side filter
+  // or the time range changes.
+  const [pageCursors, setPageCursors] = useState<Array<string | null>>([null]);
+  const [nextCursor, setNextCursor] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const [loadError, setLoadError] = useState("");
+
+  const pageCursor = page > 1 ? pageCursors[page - 1] ?? "" : "";
+
+  const resetPagination = () => {
+    setPage(1);
+    setPageCursors([null]);
+    setNextCursor("");
+    setHasMore(false);
+    setLoadError("");
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -184,14 +214,21 @@ export default function TracesPage() {
       });
       if (service) params.set("service", service);
       if (partitionFilter) params.set("partition", partitionFilter);
+      if (pageCursor) params.set("cursor", pageCursor);
       const data = await api.getRecentTraces(params);
       setTraces(data.traces ?? []);
+      setHasMore(Boolean(data.has_more));
+      setNextCursor(data.next_cursor ?? "");
+      setLoadError("");
     } catch (err) {
-      setStatus("Error: " + (err instanceof Error ? err.message : "unknown"));
+      setTraces([]);
+      setHasMore(false);
+      setNextCursor("");
+      setLoadError(err instanceof Error ? err.message : "unknown");
     } finally {
       setLoading(false);
     }
-  }, [config.default_tenant, minutes, service, partitionFilter]);
+  }, [config.default_tenant, minutes, service, partitionFilter, pageCursor]);
 
   // Load the service list for the selected partition (and the full partition
   // list seen in telemetry).
@@ -233,24 +270,36 @@ export default function TracesPage() {
     if ([15, 60, 360, 1440].includes(range)) setMinutes(range);
     setPartitionFilter(searchParams.get("partition") ?? "");
     setService(searchParams.get("service") ?? "");
+    setPage(1);
+    setPageCursors([null]);
+    setNextCursor("");
+    setHasMore(false);
+    setLoadError("");
   }, [paramKey]);
 
   useEffect(() => {
+    if (focusedTraceId) return;
     void load();
-  }, [load]);
+  }, [load, focusedTraceId]);
 
   // Live refresh
   useEffect(() => {
-    if (!liveOn) return;
+    if (!liveOn || focusedTraceId) return;
     const t = setInterval(() => void load(), 30000);
     return () => clearInterval(t);
-  }, [liveOn, load]);
+  }, [liveOn, load, focusedTraceId]);
 
   // Debounce text filter
   useEffect(() => {
     const t = setTimeout(() => setTextFilter(inputVal.trim()), 280);
     return () => clearTimeout(t);
   }, [inputVal]);
+
+  // A complete trace ID is an exact lookup, not a filter over the newest page
+  // of summaries. The recent-trace scan is bounded (and very busy tenants can
+  // fill it within seconds), so filtering locally would hide older traces even
+  // though /v1/traces/{id} can still resolve them.
+  const directTraceId = canonicalTraceId(inputVal);
 
   // Derived filtered list
   const tf = textFilter.toLowerCase();
@@ -268,15 +317,37 @@ export default function TracesPage() {
   useEffect(() => {
     if (loading) {
       setStatus("Searching…");
-    } else if (filtered.length === 0) {
-      setStatus(`0 traces — last ${rangeLabel}`);
+    } else if (loadError) {
+      setStatus("Error: " + loadError);
     } else {
-      setStatus(`${filtered.length} traces — last ${rangeLabel}`);
+      const more = hasMore ? " · more available" : "";
+      setStatus(`${filtered.length} traces on page ${page} — last ${rangeLabel}${more}`);
     }
-  }, [loading, filtered.length, rangeLabel]);
+  }, [loading, loadError, filtered.length, rangeLabel, page, hasMore]);
+
+  const goToNextPage = () => {
+    if (loading || !hasMore || !nextCursor) return;
+    setPageCursors((prev) => {
+      const next = [...prev];
+      next[page] = nextCursor;
+      return next;
+    });
+    setPage(page + 1);
+  };
+
+  const goToPreviousPage = () => {
+    if (loading || page <= 1) return;
+    setPage(page - 1);
+  };
 
   const openTrace = (traceId: string) => {
     navigate("/traces?trace_id=" + encodeURIComponent(traceId));
+  };
+
+  const openTraceFromInput = () => {
+    if (!directTraceId) return;
+    setInputVal("");
+    openTrace(directTraceId);
   };
 
   const copyViewLink = () => {
@@ -318,7 +389,10 @@ export default function TracesPage() {
               <button
                 key={m}
                 className={"xp-preset" + (minutes === m ? " xp-active" : "")}
-                onClick={() => setMinutes(m)}
+                onClick={() => {
+                  setMinutes(m);
+                  resetPagination();
+                }}
               >
                 {m < 60 ? `${m}m` : `${m / 60}h`}
               </button>
@@ -329,7 +403,10 @@ export default function TracesPage() {
             <select
               className="xp-select"
               value={partitionFilter}
-              onChange={(e) => setPartitionFilter(e.target.value)}
+              onChange={(e) => {
+                setPartitionFilter(e.target.value);
+                resetPagination();
+              }}
             >
               <option value="">All</option>
               {partitions.map((partition) => (
@@ -340,7 +417,10 @@ export default function TracesPage() {
           <select
             className="xp-select"
             value={service}
-            onChange={(e) => setService(e.target.value)}
+            onChange={(e) => {
+              setService(e.target.value);
+              resetPagination();
+            }}
           >
             <option value="">All services</option>
             {serviceOptions.map((s) => (
@@ -352,10 +432,33 @@ export default function TracesPage() {
           <input
             type="text"
             className="xp-search"
-            placeholder="Filter trace ID or partition…"
+            placeholder="Filter this page or open trace ID…"
             value={inputVal}
             onChange={(e) => setInputVal(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && directTraceId) {
+                e.preventDefault();
+                openTraceFromInput();
+              }
+            }}
+            onPaste={(e) => {
+              const pasted = canonicalTraceId(e.clipboardData.getData("text"));
+              if (!pasted) return;
+              e.preventDefault();
+              setInputVal("");
+              openTrace(pasted);
+            }}
           />
+          {directTraceId && (
+            <button
+              type="button"
+              className="xp-live-btn"
+              onClick={openTraceFromInput}
+              title="Open this trace directly"
+            >
+              Open trace
+            </button>
+          )}
           <button
             className={"xp-live-btn" + (liveOn ? " xp-live-on" : "")}
             onClick={() => setLiveOn((v) => !v)}
@@ -386,7 +489,7 @@ export default function TracesPage() {
               <div className="xp-empty">
                 {traces.length === 0
                   ? "No traces found for this time range."
-                  : "No traces match the current filters."}
+                  : "No traces match the current filters. Paste a full trace ID and press Enter to open it directly."}
               </div>
             ) : (
               filtered.map((t) => (
@@ -398,6 +501,29 @@ export default function TracesPage() {
                 />
               ))
             )}
+          </div>
+          <div className="trace-pager">
+            <span className="trace-pager__label">Page {page}</span>
+            <div className="trace-pager__actions">
+              <button
+                type="button"
+                className="xp-live-btn"
+                onClick={goToPreviousPage}
+                disabled={loading || page <= 1}
+                title="Newer traces"
+              >
+                ← Previous
+              </button>
+              <button
+                type="button"
+                className="xp-live-btn"
+                onClick={goToNextPage}
+                disabled={loading || !hasMore || !nextCursor}
+                title="Older traces"
+              >
+                Next →
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -143,7 +143,7 @@ export default function ProbesPage() {
               <option value="">All</option>
               <option value="passing">Passing</option>
               <option value="failing">Failing</option>
-              <option value="stale">Stale / pusher down</option>
+              <option value="stale">Stale / not connected</option>
             </select>
           </label>
           <button className="xp-live-btn" onClick={load} disabled={loading}>
@@ -167,10 +167,27 @@ export default function ProbesPage() {
           <ProbeStat icon={<CheckCircle2 size={14} />} label="Passing" value={passing} tone="ok" />
           <ProbeStat icon={<XCircle size={14} />} label="Failing" value={failing} tone="err" />
           <ProbeStat icon={<TriangleAlert size={14} />} label="Stale" value={stale} tone="warn" />
-          <ProbeStat icon={<CheckCircle2 size={14} />} label="Pushers available" value={pusherStats.available} tone="ok" />
-          <ProbeStat icon={<XCircle size={14} />} label="Pushers down" value={pusherStats.down} tone="err" />
+          <ProbeStat
+            icon={<CheckCircle2 size={14} />}
+            label="Pushers connected"
+            value={pusherStats.available}
+            tone="ok"
+            title="At least one synthetic probe result in the last 3 minutes"
+          />
+          <ProbeStat
+            icon={<XCircle size={14} />}
+            label="Pushers not connected"
+            value={pusherStats.down}
+            tone="err"
+            title="No synthetic probe result in the last 3 minutes. The pusher process may still be running."
+          />
           <ProbeStat icon={<TriangleAlert size={14} />} label="Avg latency" value={`${avgDuration}ms`} />
         </div>
+        <p className="probe-note">
+          “Not connected” means no synthetic probe result in the last{" "}
+          {PROBE_STALE_AFTER_MS / 60_000} minutes. The pusher process may still be
+          running; check <strong>Federation</strong> for read-API reachability.
+        </p>
 
         {error ? (
           <div className="dash-error">{error}</div>
@@ -197,14 +214,16 @@ export default function ProbesPage() {
               const pusherDown =
                 status === "stale" && downPushers.has(probe.pusher || "unknown");
               const statusLabel =
-                status === "passing" ? "Up" : status === "failing" ? "Down" : pusherDown ? "Pusher down" : "Stale";
+                status === "passing" ? "Up" : status === "failing" ? "Down" : pusherDown ? "Not connected" : "Stale";
               return (
                 <div key={probe.probeID} className={`probe-row probe-row--${status}`}>
                   <span
                     className="probe-row__status"
                     title={
                       status === "stale"
-                        ? `No fresh probe result in the last ${PROBE_STALE_AFTER_MS / 60_000} minutes`
+                        ? pusherDown
+                          ? `No fresh probe result in the last ${PROBE_STALE_AFTER_MS / 60_000} minutes. The pusher process may still be running.`
+                          : `No fresh probe result in the last ${PROBE_STALE_AFTER_MS / 60_000} minutes`
                         : undefined
                     }
                   >
@@ -279,14 +298,16 @@ function ProbeStat({
   label,
   value,
   tone,
+  title,
 }: {
   icon: React.ReactNode;
   label: string;
   value: number | string;
   tone?: "ok" | "err" | "warn";
+  title?: string;
 }) {
   return (
-    <div className={`probe-stat${tone ? ` probe-stat--${tone}` : ""}`}>
+    <div className={`probe-stat${tone ? ` probe-stat--${tone}` : ""}`} title={title}>
       <span className="probe-stat__icon">{icon}</span>
       <span className="probe-stat__value">{value}</span>
       <span className="probe-stat__label">{label}</span>

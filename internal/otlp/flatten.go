@@ -28,6 +28,7 @@ func FlattenTraces(req *coltracepb.ExportTraceServiceRequest, tenant string, eng
 	for _, resourceSpans := range req.GetResourceSpans() {
 		resourceAttrs := attributesMap(resourceSpans.GetResource().GetAttributes(), engine)
 		service, partition, intent, asset := telemetryIdentity(resourceAttrs)
+		service, partition, intent, asset = canonicalizeResourceIdentity(service, partition, intent, asset, resourceAttrs)
 		for _, scopeSpans := range resourceSpans.GetScopeSpans() {
 			for _, span := range scopeSpans.GetSpans() {
 				record := segment.TraceRecord{
@@ -70,6 +71,7 @@ func FlattenLogs(req *collogspb.ExportLogsServiceRequest, tenant string, engine 
 	for _, resourceLogs := range req.GetResourceLogs() {
 		resourceAttrs := attributesMap(resourceLogs.GetResource().GetAttributes(), engine)
 		service, partition, intent, asset := telemetryIdentity(resourceAttrs)
+		service, partition, intent, asset = canonicalizeResourceIdentity(service, partition, intent, asset, resourceAttrs)
 		for _, scopeLogs := range resourceLogs.GetScopeLogs() {
 			for _, record := range scopeLogs.GetLogRecords() {
 				out = append(out, segment.LogRecord{
@@ -200,6 +202,30 @@ func telemetryIdentity(resourceAttrs map[string]string) (service, partition, int
 	return service, partition, intent, asset
 }
 
+// canonicalizeResourceIdentity applies the canonical producer identity to logs
+// and traces at ingest. Only explicit Guardian coordinates or an already
+// canonical service name are promoted; a short application name without
+// Guardian metadata is left alone (an external or not-yet-instrumented
+// producer) so Doctor never invents an identity from a pod name.
+func canonicalizeResourceIdentity(service, partition, intent, asset string, attrs map[string]string) (string, string, string, string) {
+	explicitPartition := firstNonEmpty(attrs["guardian.partition"], attrs["guardian_partition"])
+	explicitIntent := firstNonEmpty(attrs["guardian.intent"], attrs["guardian_intent"])
+	explicitAsset := firstNonEmpty(attrs["guardian.asset"], attrs["guardian_asset"])
+	if explicitPartition != "" && explicitIntent != "" && explicitAsset != "" {
+		canonical := identity.CanonicalServiceName(explicitPartition, explicitIntent, explicitAsset)
+		if canonical != "" {
+			if service != "" && service != canonical && attrs["service.alias"] == "" {
+				attrs["service.alias"] = service
+			}
+			return canonical, explicitPartition, explicitIntent, explicitAsset
+		}
+	}
+	if sp, si, sa, ok := identity.SplitServiceName(service); ok {
+		return service, sp, si, sa
+	}
+	return service, partition, intent, asset
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -225,35 +251,166 @@ func normalizeMetricRecord(record segment.MetricPointRecord) segment.MetricPoint
 	return record
 }
 
+// normalizeMetricRecordInPlace resolves the two identities carried by a metric
+// record:
+//
+//   - the producer identity on the OTLP resource, and
+//   - the subject identity on the data point, if the metric is about another
+//     component (probe, asset observation, control-plane task, flow metrics).
+//
+// Resource identity always wins. Point labels may only become the producer
+// identity when the resource has none (the Prometheus scrape path). This keeps
+// a control-plane metric from being renamed to the component it operates on.
 func normalizeMetricRecordInPlace(record *segment.MetricPointRecord) {
 	if record == nil {
 		return
 	}
-	attrs := mergeStringMaps(record.ResourceAttributes, record.Attributes)
-	partition := firstNonEmpty(
-		attrs["guardian.partition"],
-		attrs["guardian_partition"],
-		attrs["partition"],
-		record.Partition,
-		attrs["k8s.namespace.name"],
-		attrs["namespace"],
+	resource := record.ResourceAttributes
+	point := record.Attributes
+
+	resService := firstNonEmpty(resource["service.name"], record.Service)
+	resPartition := firstNonEmpty(resource["guardian.partition"], record.Partition)
+	resIntent := firstNonEmpty(resource["guardian.intent"], record.Intent)
+	resAsset := firstNonEmpty(resource["guardian.asset"], record.Asset)
+	resCanonical, resPartition, resIntent, resAsset := producerIdentity(
+		resService, resPartition, resIntent, resAsset,
 	)
-	intent := firstNonEmpty(
-		attrs["guardian.intent"],
-		attrs["guardian_intent"],
-		attrs["intent"],
-		record.Intent,
-		attrs["app.kubernetes.io/component"],
+
+	pointService := firstNonEmpty(point["service"], point["service.name"])
+	subjectService := firstNonEmpty(
+		point["guardian.target.service"],
+		point["guardian_target_service"],
+		pointService,
 	)
-	asset := firstNonEmpty(
-		attrs["guardian.asset"],
-		attrs["guardian_asset"],
-		attrs["asset"],
-		record.Asset,
-		attrs["k8s.pod.name"],
-		attrs["k8s.container.name"],
-		attrs["app.kubernetes.io/instance"],
+	pointCanonical, pointPartition, pointIntent, pointAsset := pointIdentity(point, pointService)
+	producerPointCanonical, producerPointPartition, producerPointIntent, producerPointAsset := legacyPointIdentity(point)
+
+	// Subject metrics: an explicit point service different from a known
+	// producer. Asset observation is the main example: guardiand produces the
+	// series, but the series describes agent.secrets.deepseek-api-key.
+	// A bare guardian.partition/intent/asset label set is not enough: k8s-top
+	// attaches those labels to pod metrics to describe the pod, not to rename
+	// the k8s-top producer.
+	if resCanonical != "" && pointCanonical != "" && pointCanonical != resCanonical &&
+		identity.IsCanonicalServiceName(subjectService) {
+		applySubjectIdentity(record, resCanonical, pointCanonical, pointPartition, pointIntent, pointAsset)
+		return
+	}
+
+	// Producer metrics: the resource is authoritative. Preserve a different
+	// point identity as target labels instead of consuming it.
+	if resCanonical != "" {
+		if record.Service != "" && record.Service != resCanonical {
+			setRecordAttr(record, "service.alias", record.Service)
+		}
+		record.Service = resCanonical
+		record.Partition = resPartition
+		record.Intent = resIntent
+		record.Asset = resAsset
+		relabelPointIdentityAsTarget(record, resource, point)
+		return
+	}
+
+	// Prometheus scrapes carry no resource identity. The scrape relabeling puts
+	// the producer identity on guardian_partition/guardian_intent/guardian_asset;
+	// an explicit point service or guardian_target_* labels describe the subject.
+	if pointCanonical != "" && identity.IsCanonicalServiceName(pointService) {
+		applySubjectIdentity(record, producerPointCanonical, pointCanonical, pointPartition, pointIntent, pointAsset)
+		return
+	}
+	if producerPointCanonical != "" {
+		if record.Service != "" && record.Service != producerPointCanonical {
+			setRecordAttr(record, "service.alias", record.Service)
+		}
+		record.Service = producerPointCanonical
+		record.Partition = producerPointPartition
+		record.Intent = producerPointIntent
+		record.Asset = producerPointAsset
+		return
+	}
+	if pointCanonical != "" {
+		if record.Service != "" && record.Service != pointCanonical {
+			setRecordAttr(record, "service.alias", record.Service)
+		}
+		record.Service = pointCanonical
+		record.Partition = pointPartition
+		record.Intent = pointIntent
+		record.Asset = pointAsset
+	}
+}
+
+func legacyPointIdentity(point map[string]string) (canonical, p, i, a string) {
+	p = firstNonEmpty(point["guardian.partition"], point["guardian_partition"], point["partition"])
+	i = firstNonEmpty(point["guardian.intent"], point["guardian_intent"], point["intent"])
+	a = firstNonEmpty(point["guardian.asset"], point["guardian_asset"], point["asset"])
+	if p != "" && i != "" && a != "" {
+		return identity.CanonicalServiceName(p, i, a), p, i, a
+	}
+	return "", p, i, a
+}
+
+func producerIdentity(service, partition, intent, asset string) (canonical, p, i, a string) {
+	if sp, si, sa, ok := identity.SplitServiceName(service); ok {
+		return service, sp, si, sa
+	}
+	if partition != "" && intent != "" && asset != "" {
+		return identity.CanonicalServiceName(partition, intent, asset), partition, intent, asset
+	}
+	return "", partition, intent, asset
+}
+
+func pointIdentity(point map[string]string, service string) (canonical, p, i, a string) {
+	p = firstNonEmpty(
+		point["guardian.target.partition"],
+		point["guardian_target_partition"],
+		point["guardian.partition"],
+		point["guardian_partition"],
+		point["partition"],
 	)
+	i = firstNonEmpty(
+		point["guardian.target.intent"],
+		point["guardian_target_intent"],
+		point["guardian.intent"],
+		point["guardian_intent"],
+		point["intent"],
+	)
+	a = firstNonEmpty(
+		point["guardian.target.asset"],
+		point["guardian_target_asset"],
+		point["guardian.asset"],
+		point["guardian_asset"],
+		point["asset"],
+	)
+	if sp, si, sa, ok := identity.SplitServiceName(service); ok {
+		if p == "" {
+			p = sp
+		}
+		if i == "" {
+			i = si
+		}
+		if a == "" {
+			a = sa
+		}
+		return service, p, i, a
+	}
+	if p != "" && i != "" && a != "" {
+		return identity.CanonicalServiceName(p, i, a), p, i, a
+	}
+	return "", p, i, a
+}
+
+func applySubjectIdentity(record *segment.MetricPointRecord, producerService, subjectService, partition, intent, asset string) {
+	if producerService != "" {
+		setRecordAttr(record, "guardian.producer.service", producerService)
+	}
+	if alias := record.ResourceAttributes["service.alias"]; alias != "" {
+		setRecordAttr(record, "guardian.producer.alias", alias)
+		delete(record.ResourceAttributes, "service.alias")
+	}
+	if subjectService == "" {
+		return
+	}
+	record.Service = subjectService
 	if partition != "" {
 		record.Partition = partition
 	}
@@ -263,22 +420,75 @@ func normalizeMetricRecordInPlace(record *segment.MetricPointRecord) {
 	if asset != "" {
 		record.Asset = asset
 	}
-	if partition == "" || intent == "" || asset == "" {
+	// Make the subject explicit for query projections even when the producer
+	// used short legacy label names.
+	setPointAttr(record, "guardian.target.partition", partition)
+	setPointAttr(record, "guardian.target.intent", intent)
+	setPointAttr(record, "guardian.target.asset", asset)
+	setPointAttr(record, "guardian.target.service", subjectService)
+}
+
+// relabelPointIdentityAsTarget turns point-level guardian.* identity labels
+// into guardian.target.* when the resource already identifies the producer.
+// It also removes the legacy keys so a later query projection cannot use them
+// to overwrite service.name.
+func relabelPointIdentityAsTarget(record *segment.MetricPointRecord, resource, point map[string]string) {
+	producerPartition := firstNonEmpty(resource["guardian.partition"], record.Partition)
+	producerIntent := firstNonEmpty(resource["guardian.intent"], record.Intent)
+	producerAsset := firstNonEmpty(resource["guardian.asset"], record.Asset)
+
+	targets := []struct {
+		legacyKeys []string
+		targetKey  string
+		producer   string
+	}{
+		{[]string{"guardian.partition", "guardian_partition", "partition"}, "guardian.target.partition", producerPartition},
+		{[]string{"guardian.intent", "guardian_intent", "intent"}, "guardian.target.intent", producerIntent},
+		{[]string{"guardian.asset", "guardian_asset", "asset"}, "guardian.target.asset", producerAsset},
+		{[]string{"guardian.asset.type", "guardian_asset_type"}, "guardian.target.asset.type", ""},
+	}
+	for _, target := range targets {
+		value := firstNonEmpty(pointValues(point, target.legacyKeys)...)
+		if value == "" {
+			continue
+		}
+		if target.producer == "" || value != target.producer {
+			setPointAttr(record, target.targetKey, value)
+		}
+		for _, key := range target.legacyKeys {
+			delete(record.Attributes, key)
+		}
+	}
+}
+
+func pointValues(point map[string]string, keys []string) []string {
+	values := make([]string, 0, len(keys))
+	for _, key := range keys {
+		values = append(values, point[key])
+	}
+	return values
+}
+
+func setRecordAttr(record *segment.MetricPointRecord, key, value string) {
+	if value == "" {
 		return
 	}
-	canonical := identity.CanonicalServiceName(partition, intent, asset)
-	if canonical == "" {
+	if record.Attributes == nil {
+		record.Attributes = make(map[string]string)
+	}
+	if _, exists := record.Attributes[key]; !exists {
+		record.Attributes[key] = value
+	}
+}
+
+func setPointAttr(record *segment.MetricPointRecord, key, value string) {
+	if value == "" {
 		return
 	}
-	if record.Service != "" && record.Service != canonical {
-		if record.Attributes == nil {
-			record.Attributes = make(map[string]string)
-		}
-		if _, exists := record.Attributes["service.alias"]; !exists {
-			record.Attributes["service.alias"] = record.Service
-		}
+	if record.Attributes == nil {
+		record.Attributes = make(map[string]string)
 	}
-	record.Service = canonical
+	record.Attributes[key] = value
 }
 
 func mergeStringMaps(maps ...map[string]string) map[string]string {
