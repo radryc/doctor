@@ -1140,7 +1140,7 @@ func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request)
 			if len(selectorSets) == 0 {
 				values, _, labelErr := querier.LabelNames(r.Context(), nil)
 				if labelErr != nil {
-					writePrometheusError(w, http.StatusInternalServerError, "internal", labelErr.Error())
+					writePrometheusDiscoveryError(w, labelErr)
 					return
 				}
 				for _, value := range values {
@@ -1150,7 +1150,7 @@ func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request)
 				for _, selectorSet := range selectorSets {
 					values, _, labelErr := querier.LabelNames(r.Context(), nil, selectorSet...)
 					if labelErr != nil {
-						writePrometheusError(w, http.StatusInternalServerError, "internal", labelErr.Error())
+						writePrometheusDiscoveryError(w, labelErr)
 						return
 					}
 					for _, value := range values {
@@ -1222,7 +1222,7 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 			if len(selectorSets) == 0 {
 				results, _, labelErr := querier.LabelValues(r.Context(), labelName, nil)
 				if labelErr != nil {
-					writePrometheusError(w, http.StatusInternalServerError, "internal", labelErr.Error())
+					writePrometheusDiscoveryError(w, labelErr)
 					return
 				}
 				for _, value := range results {
@@ -1232,7 +1232,7 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 				for _, selectorSet := range selectorSets {
 					results, _, labelErr := querier.LabelValues(r.Context(), labelName, nil, selectorSet...)
 					if labelErr != nil {
-						writePrometheusError(w, http.StatusInternalServerError, "internal", labelErr.Error())
+						writePrometheusDiscoveryError(w, labelErr)
 						return
 					}
 					for _, value := range results {
@@ -1629,6 +1629,14 @@ func writePrometheusError(w http.ResponseWriter, statusCode int, errorType, mess
 		"errorType": errorType,
 		"error":     message,
 	})
+}
+
+func writePrometheusDiscoveryError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errMetricQueryTooBroad) {
+		writePrometheusExecutionError(w, translateMetricLoadError(err))
+		return
+	}
+	writePrometheusError(w, http.StatusInternalServerError, "internal", err.Error())
 }
 
 func writePrometheusExecutionError(w http.ResponseWriter, err error) {
