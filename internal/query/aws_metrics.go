@@ -143,13 +143,17 @@ func (s *Service) execPrometheusInstant(ctx context.Context, tenant, partition, 
 func (s *Service) execPrometheusRange(ctx context.Context, tenant, partition, queryString string, start, end time.Time, step time.Duration) (map[string]any, error, bool) {
 	// Presence aggregations (count by (__name__)) are answered from the chunk
 	// series index instead of scanning samples.
-	if expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString); parseErr == nil {
+	expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString)
+	if parseErr == nil {
 		if plan, ok := countByNamePlanFor(expr); ok {
 			data, fastErr := s.execCountByNameRange(ctx, tenant, partition, plan, start, end, step)
 			if fastErr != nil {
 				return nil, fastErr, false
 			}
 			return data, nil, false
+		}
+		if err := rejectBroadRangeSelector(expr, start, end); err != nil {
+			return nil, err, false
 		}
 	}
 
