@@ -16,23 +16,57 @@ const maxBroadSelectorRange = 15 * time.Minute
 
 var errBroadRangeSelector = errors.New("selector matches all metric series")
 
-// rejectBroadRangeSelector rejects a bare {__name__=~".+"}-style range query
-// before the PromQL engine starts loading samples. Aggregations handled by the
-// count fast path (count and count by (__name__)) are intentionally allowed.
+// rejectBroadRangeSelector rejects a range query that reads every series (for
+// example {__name__=~".+"}, including the same selector wrapped in rate/sum)
+// before the PromQL engine starts loading samples. Count presence aggregations
+// are handled by the series-index fast path before this guard runs.
 func rejectBroadRangeSelector(expr promparser.Expr, start, end time.Time) error {
 	if end.Sub(start) <= maxBroadSelectorRange {
 		return nil
 	}
-	selector, ok := expr.(*promparser.VectorSelector)
-	if !ok || len(selector.LabelMatchers) != 1 {
-		return nil
-	}
-	matcher := selector.LabelMatchers[0]
-	if matcher == nil || matcher.Name != promlabels.MetricName || !matcherMatchesAllMetricNames(matcher) {
+	if findBroadSelector(expr) == nil {
 		return nil
 	}
 	return fmt.Errorf("%w: {__name__=~\".+\"} selects every series over %s; narrow the range to %s or less, use the metric picker, or aggregate with count by (__name__)",
 		errBroadRangeSelector, end.Sub(start), maxBroadSelectorRange)
+}
+
+func findBroadSelector(expr promparser.Expr) promparser.Expr {
+	switch typed := expr.(type) {
+	case *promparser.VectorSelector:
+		if len(typed.LabelMatchers) != 1 {
+			return nil
+		}
+		matcher := typed.LabelMatchers[0]
+		if matcher == nil || matcher.Name != promlabels.MetricName || !matcherMatchesAllMetricNames(matcher) {
+			return nil
+		}
+		return typed
+	case *promparser.AggregateExpr:
+		return findBroadSelector(typed.Expr)
+	case *promparser.Call:
+		for _, arg := range typed.Args {
+			if found := findBroadSelector(arg); found != nil {
+				return found
+			}
+		}
+	case *promparser.MatrixSelector:
+		return findBroadSelector(typed.VectorSelector)
+	case *promparser.SubqueryExpr:
+		return findBroadSelector(typed.Expr)
+	case *promparser.ParenExpr:
+		return findBroadSelector(typed.Expr)
+	case *promparser.UnaryExpr:
+		return findBroadSelector(typed.Expr)
+	case *promparser.StepInvariantExpr:
+		return findBroadSelector(typed.Expr)
+	case *promparser.BinaryExpr:
+		if found := findBroadSelector(typed.LHS); found != nil {
+			return found
+		}
+		return findBroadSelector(typed.RHS)
+	}
+	return nil
 }
 
 func matcherMatchesAllMetricNames(matcher *promlabels.Matcher) bool {
