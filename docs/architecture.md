@@ -225,6 +225,12 @@ falling back to partition summaries when no events are in the window.
 - Exemplars come from stored per-point `TraceID`/`SpanID` (caps: 100/series,
   500 series, 5000 total).
 - `count by (__name__)` fast path served from the chunk series index.
+- `/api/v1/series`, labels, and label values use `StreamMetricSeries` (chunk
+  series metadata) before falling back to sample scans for pre-index chunks.
+  Discovery is capped at 200k series and returns 422 when exceeded.
+- Bare or wrapped `{__name__=~".+"}` range queries longer than 15 minutes are
+  rejected before the engine starts, with a hint to use the metric picker or
+  `count by (__name__)`.
 - Budgets: `DOCTOR_PROM_MAX_SAMPLES` (4M), `DOCTOR_PROM_MAX_SERIES` (100k),
   global `DOCTOR_PROM_GLOBAL_MAX_SAMPLES` (8M); exceeding → 422.
 - Bare range queries over `guardian_pusher_task_executions`/`guardian_results_executions`
