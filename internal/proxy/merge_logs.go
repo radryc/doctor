@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // LogRemote is one backend's log query result. Source is the provenance label

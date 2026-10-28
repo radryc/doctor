@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // TraceRemote is one backend's trace lookup result.

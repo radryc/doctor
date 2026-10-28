@@ -23,8 +23,8 @@ import (
 	promparser "github.com/prometheus/prometheus/promql/parser"
 	promstorage "github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/annotations"
-	"github.com/rydzu/ainfra/doctor/internal/buildinfo"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/buildinfo"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 const (

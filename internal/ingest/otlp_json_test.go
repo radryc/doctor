@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 type otlpJSONCaptureWriter struct {

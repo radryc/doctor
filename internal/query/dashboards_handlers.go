@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/dashboards"
+	"github.com/radryc/doctor/internal/dashboards"
 	"sigs.k8s.io/yaml"
 )
 

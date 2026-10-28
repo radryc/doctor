@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
+	"github.com/radryc/doctor/internal/proxy"
+	awsstore "github.com/radryc/doctor/internal/store/aws"
 )
 
 type sequenceAWSClient struct {

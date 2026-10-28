@@ -2,8 +2,8 @@ package query
 
 import (
 	promlabels "github.com/prometheus/prometheus/model/labels"
-	"github.com/rydzu/ainfra/doctor/internal/identity"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/identity"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // This file defines the canonical label vocabulary shared by the metrics

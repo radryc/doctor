@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/rydzu/ainfra/doctor/internal/federation"
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/federation"
+	"github.com/radryc/doctor/internal/proxy"
 )
 
 // warningResponseWriter injects partial-failure headers from the request

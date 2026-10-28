@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/pkg/authz"
-	"github.com/rydzu/ainfra/doctor/internal/access"
+	"github.com/radryc/doctor/internal/access"
 )
 
 func accessContext(subject string) context.Context {

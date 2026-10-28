@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/segment"
+	awsstore "github.com/radryc/doctor/internal/store/aws"
 )
 
 // Options configures the federation manager.

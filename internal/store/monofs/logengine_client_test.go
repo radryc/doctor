@@ -8,7 +8,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"

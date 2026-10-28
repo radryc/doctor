@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // seriesIndexBackend fails if discovery touches sample data. It is used to pin

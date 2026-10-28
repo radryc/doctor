@@ -8,10 +8,10 @@ import (
 	"time"
 
 	promstorage "github.com/prometheus/prometheus/storage"
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	"github.com/rydzu/ainfra/doctor/internal/tempo"
-	"github.com/rydzu/ainfra/doctor/internal/tracecontext"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/tempo"
+	"github.com/radryc/doctor/internal/tracecontext"
 )
 
 // SetProxyRouter installs the multi-backend router. When nil, handlers use the

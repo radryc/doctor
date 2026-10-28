@@ -1,4 +1,4 @@
-module github.com/rydzu/ainfra/doctor
+module github.com/radryc/doctor
 
 go 1.26.4
 

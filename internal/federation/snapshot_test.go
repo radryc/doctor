@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rydzu/ainfra/doctor/internal/ruler"
-	"github.com/rydzu/ainfra/doctor/internal/store"
+	"github.com/radryc/doctor/internal/ruler"
+	"github.com/radryc/doctor/internal/store"
 )
 
 func testSnapshot(version string) Snapshot {

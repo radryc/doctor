@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/federation"
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/ruler"
+	"github.com/radryc/doctor/internal/federation"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/ruler"
 )
 
 func loadtestEnabled(t *testing.T) bool {

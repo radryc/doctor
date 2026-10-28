@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
+	"github.com/radryc/doctor/internal/proxy"
+	awsstore "github.com/radryc/doctor/internal/store/aws"
 )
 
 var errTargetCircuitOpen = errors.New("target circuit breaker open")

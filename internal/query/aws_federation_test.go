@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
+	"github.com/radryc/doctor/internal/segment"
+	awsstore "github.com/radryc/doctor/internal/store/aws"
 )
 
 type fakeAWSBackend struct {

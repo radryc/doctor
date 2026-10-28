@@ -3,7 +3,7 @@ package query
 import (
 	"context"
 
-	"github.com/rydzu/ainfra/doctor/internal/federation"
+	"github.com/radryc/doctor/internal/federation"
 )
 
 // checkAWSLogScope rejects a live AWS log query before the router fans it out

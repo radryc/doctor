@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/config"
-	"github.com/rydzu/ainfra/doctor/internal/ruler"
-	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
+	"github.com/radryc/doctor/internal/config"
+	"github.com/radryc/doctor/internal/ruler"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
 
 func main() {

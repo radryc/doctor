@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/rydzu/ainfra/doctor/internal/federation"
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/federation"
+	"github.com/radryc/doctor/internal/proxy"
 )
 
 func TestWarningHeadersFromContext(t *testing.T) {

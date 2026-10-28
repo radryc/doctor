@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // This file pins the Grafana datasource contract: the exact endpoints and query

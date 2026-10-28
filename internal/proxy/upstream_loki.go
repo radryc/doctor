@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // LokiHTTPUpstream queries a remote Loki-compatible HTTP API.

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy/translate"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/proxy/translate"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // ApplyTraceQL parses the supported TraceQL subset and folds it into the

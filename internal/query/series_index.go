@@ -4,7 +4,7 @@ import (
 	"context"
 
 	promlabels "github.com/prometheus/prometheus/model/labels"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // maxDiscoverySeries bounds how many distinct series a metadata discovery call

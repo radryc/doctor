@@ -9,7 +9,7 @@ import (
 
 	"github.com/prometheus/prometheus/promql"
 	promparser "github.com/prometheus/prometheus/promql/parser"
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/proxy"
 )
 
 // This file federates CloudWatch metrics into the Prometheus API using

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/rydzu/ainfra/doctor/internal/config"
+	"github.com/radryc/doctor/internal/config"
 )
 
 func TestLoadFederationCatalogInlineJSON(t *testing.T) {

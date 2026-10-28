@@ -15,9 +15,9 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/rydzu/ainfra/doctor/internal/identity"
-	"github.com/rydzu/ainfra/doctor/internal/privacy"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/identity"
+	"github.com/radryc/doctor/internal/privacy"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 func FlattenTraces(req *coltracepb.ExportTraceServiceRequest, tenant string, engine *privacy.Engine) []segment.TraceRecord {

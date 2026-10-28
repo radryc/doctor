@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // This file implements the LogQL subset Doctor needs to serve Grafana correctly.

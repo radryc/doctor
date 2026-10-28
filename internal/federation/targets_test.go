@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/proxy"
 )
 
 func TestTargetsPagePaginatesAndFilters(t *testing.T) {

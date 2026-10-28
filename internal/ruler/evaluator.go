@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // Querier executes instant PromQL queries through doctor-query. partial is true

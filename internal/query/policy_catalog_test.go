@@ -14,8 +14,8 @@ import (
 
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
-	"github.com/rydzu/ainfra/doctor/internal/access"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/access"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 const catalogPolicyYAML = `

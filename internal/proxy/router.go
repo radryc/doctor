@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/pkg/authz"
-	"github.com/rydzu/ainfra/doctor/internal/access"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/access"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // Warning reports a non-fatal backend failure. Partial results are returned

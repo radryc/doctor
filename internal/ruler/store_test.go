@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/store"
+	"github.com/radryc/doctor/internal/store"
 )
 
 func TestStorePutGetListDelete(t *testing.T) {

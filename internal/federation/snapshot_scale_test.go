@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/ruler"
+	"github.com/radryc/doctor/internal/ruler"
 )
 
 type countingFileStore struct {

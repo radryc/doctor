@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rydzu/ainfra/doctor/internal/dashboards"
-	"github.com/rydzu/ainfra/doctor/internal/ruler"
+	"github.com/radryc/doctor/internal/dashboards"
+	"github.com/radryc/doctor/internal/ruler"
 )
 
 func newDashboardTestService() *Service {
