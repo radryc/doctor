@@ -44,7 +44,7 @@ out as siblings:
 replace github.com/radryc/monofs => ../monofs
 ```
 
-Go 1.26.4 and Node 22 (for the frontend) are required.
+Go 1.26.10 and Node 22 (for the frontend) are required.
 
 ## Running locally
 
