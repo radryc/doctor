@@ -157,7 +157,7 @@ func emitLogRecord(ctx context.Context, scope string, severity apilog.Severity, 
 	record.SetTimestamp(time.Now().UTC())
 	record.SetSeverity(severity)
 	record.SetSeverityText(severityText(severity))
-	record.SetBody(apilog.StringValue(message))
+	record.SetBody(attribute.StringValue(message))
 	addTraceSpanAttrs(ctx, &record)
 	logger.Emit(ctx, record)
 }
@@ -168,8 +168,8 @@ func addTraceSpanAttrs(ctx context.Context, record *apilog.Record) {
 		return
 	}
 	record.AddAttributes(
-		apilog.KeyValue{Key: "trace_id", Value: apilog.StringValue(spanCtx.TraceID().String())},
-		apilog.KeyValue{Key: "span_id", Value: apilog.StringValue(spanCtx.SpanID().String())},
+		attribute.KeyValue{Key: "trace_id", Value: attribute.StringValue(spanCtx.TraceID().String())},
+		attribute.KeyValue{Key: "span_id", Value: attribute.StringValue(spanCtx.SpanID().String())},
 	)
 }
 

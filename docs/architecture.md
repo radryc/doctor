@@ -362,7 +362,7 @@ protobuf; everything else is JSON.
 
 ## 10. Deployment and Operations
 
-- **Dockerfile**: multi-stage (Node 22 frontend, Go 1.26.4 service selected by
+- **Dockerfile**: multi-stage (Node 22 frontend, Go 1.26.10 service selected by
   `DOCTOR_SERVICE`), ldflags-injected buildinfo, distroless runtime. The
   MonoFS source is copied in via the `monofs` build context because of the
   go.mod replace directive.
