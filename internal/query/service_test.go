@@ -437,9 +437,26 @@ func TestHandleLogServicesFiltersServicesByPartition(t *testing.T) {
 }
 
 func TestLogSearchPushdownUsesAWSLogGroup(t *testing.T) {
-	pushdown := logSearchPushdown("", "", "guardian/123/us-east-1/demo-build/web")
+	pushdown := logSearchPushdown("", "", "guardian/123/us-east-1/demo-build/web", signalIdentity{})
 	if !strings.Contains(pushdown.Selector, `source="aws"`) || !strings.Contains(pushdown.Selector, `aws_log_group="guardian/123/us-east-1/demo-build/web"`) {
 		t.Fatalf("selector = %q", pushdown.Selector)
+	}
+}
+
+func TestLogSearchPushdownIncludesCanonicalIdentity(t *testing.T) {
+	pushdown := logSearchPushdown("", "", "", signalIdentity{
+		Partition: "monofs",
+		Intent:    "monofs-storage",
+		Asset:     "node-a",
+	})
+	for _, want := range []string{
+		`guardian_partition="monofs"`,
+		`guardian_intent="monofs-storage"`,
+		`guardian_asset="node-a"`,
+	} {
+		if !strings.Contains(pushdown.Selector, want) {
+			t.Fatalf("selector = %q, want %q", pushdown.Selector, want)
+		}
 	}
 }
 
@@ -464,6 +481,132 @@ func TestHandleLogSearchFiltersByPartition(t *testing.T) {
 	}
 	if len(resp.Results) != 1 || resp.Results[0].Service != "doctor.query" {
 		t.Fatalf("results = %+v, want only doctor log", resp.Results)
+	}
+}
+
+func TestHandleLogSearchFiltersByPartitionAttribute(t *testing.T) {
+	base := time.Now().UTC()
+	backend := &fakeLogEngineBackend{logs: []segment.LogRecord{
+		{
+			Tenant:    "default",
+			Service:   "monofs.monofs-storage.node-a",
+			Timestamp: base,
+			Body:      "read: metadata not found",
+			Attributes: map[string]string{
+				"guardian.partition": "monofs",
+			},
+		},
+		{
+			Tenant:    "default",
+			Service:   "guardian.pusher.k8s-main",
+			Timestamp: base,
+			Body:      "no drift detected",
+			Attributes: map[string]string{
+				"guardian.partition": "guardian",
+			},
+		},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/search?tenant=default&partition=monofs&from="+url.QueryEscape(base.Add(-time.Hour).Format(time.RFC3339))+"&to="+url.QueryEscape(base.Add(time.Minute).Format(time.RFC3339)), nil)
+	rec := httptest.NewRecorder()
+	svc.handleLogSearch(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Results []segment.LogRecord `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Service != "monofs.monofs-storage.node-a" {
+		t.Fatalf("results = %+v, want only the monofs log", resp.Results)
+	}
+}
+
+func TestHandleLogSearchFiltersByIdentity(t *testing.T) {
+	base := time.Now().UTC()
+	backend := &fakeLogEngineBackend{logs: []segment.LogRecord{
+		{
+			Tenant:    "default",
+			Service:   "monofs.monofs-storage.node-a",
+			Timestamp: base,
+			Body:      "read: metadata not found",
+			Attributes: map[string]string{
+				"guardian.partition": "monofs",
+				"guardian.intent":    "monofs-storage",
+				"guardian.asset":     "node-a",
+			},
+		},
+		{
+			Tenant:    "default",
+			Service:   "monofs.monofs-storage.node-b",
+			Timestamp: base,
+			Body:      "read: metadata not found",
+			Attributes: map[string]string{
+				"guardian.partition": "monofs",
+				"guardian.intent":    "monofs-storage",
+				"guardian.asset":     "node-b",
+			},
+		},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/search?tenant=default&partition=monofs&intent=monofs-storage&asset=node-a&from="+url.QueryEscape(base.Add(-time.Hour).Format(time.RFC3339))+"&to="+url.QueryEscape(base.Add(time.Minute).Format(time.RFC3339)), nil)
+	rec := httptest.NewRecorder()
+	svc.handleLogSearch(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Results []segment.LogRecord `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Service != "monofs.monofs-storage.node-a" {
+		t.Fatalf("results = %+v, want only node-a", resp.Results)
+	}
+}
+
+func TestHandleLogServicesReturnsCanonicalIdentities(t *testing.T) {
+	base := time.Now().UTC()
+	backend := &fakeLogEngineBackend{logs: []segment.LogRecord{
+		{
+			Tenant:    "default",
+			Service:   "monofs.monofs-storage.node-a",
+			Timestamp: base,
+			Body:      "ready",
+			Attributes: map[string]string{
+				"guardian.partition": "monofs",
+				"guardian.intent":    "monofs-storage",
+				"guardian.asset":     "node-a",
+			},
+		},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/services?tenant=default", nil)
+	rec := httptest.NewRecorder()
+	svc.handleLogServices(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Identities []struct {
+			Partition string `json:"partition"`
+			Intent    string `json:"intent"`
+			Asset     string `json:"asset"`
+			Service   string `json:"service"`
+		} `json:"identities"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Identities) != 1 {
+		t.Fatalf("identities = %+v, want one", resp.Identities)
+	}
+	got := resp.Identities[0]
+	if got.Partition != "monofs" || got.Intent != "monofs-storage" || got.Asset != "node-a" {
+		t.Fatalf("identity = %+v, want monofs/monofs-storage/node-a", got)
 	}
 }
 

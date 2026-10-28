@@ -6,9 +6,10 @@ import { useConfig } from "../context/ConfigContext";
 import { useTimeRange } from "../context/TimeRangeContext";
 import { copyText } from "../lib/clipboard";
 import { downloadJSON } from "../lib/download";
+import { logAsset, logIdentity, logIntent, logPartition, logService, splitServiceIdentity } from "../lib/logs";
 import LogHistogram from "../components/charts/LogHistogram";
 import LogFacetSidebar from "../components/logs/LogFacetSidebar";
-import type { LogRecord } from "../types/api";
+import type { LogIdentityInfo, LogRecord } from "../types/api";
 
 type SevKey = "ERR" | "WARN" | "INFO" | "DBG";
 
@@ -36,16 +37,6 @@ function badgeClass(k: SevKey): string {
   return { ERR: "badge-err", WARN: "badge-warn", INFO: "badge-info", DBG: "badge-dbg" }[k];
 }
 
-function logPartition(record: LogRecord): string {
-  return (
-    record.partition ||
-    record.resource_attributes?.["guardian_partition"] ||
-    record.resource_attributes?.["guardian.partition"] ||
-    record.resource_attributes?.["partition"] ||
-    ""
-  );
-}
-
 interface LogRowProps {
   record: LogRecord;
   onOpenTrace: (id: string) => void;
@@ -54,15 +45,14 @@ interface LogRowProps {
 function LogRow({ record, onOpenTrace }: LogRowProps) {
   const [expanded, setExpanded] = useState(false);
   const k = sevKey(record.severity_text ?? "");
-  const comp =
-    record.resource_attributes?.["guardian.component"] ?? record.service ?? "";
+  const comp = logService(record);
 
   const kv: Record<string, string> = {
     timestamp: new Date(record.timestamp).toLocaleString(),
-    service: record.service ?? "",
+    service: logService(record),
     partition: logPartition(record),
-    intent: record.intent ?? "",
-    asset: record.asset ?? "",
+    intent: logIntent(record),
+    asset: logAsset(record),
     severity: record.severity_text ?? "",
   };
   if (record.trace_id) {
@@ -163,8 +153,18 @@ export default function LogsPage() {
   const tr = useTimeRange();
   const [searchParams] = useSearchParams();
 
-  const [componentFilter, setComponentFilter] = useState(searchParams.get("service") ?? "");
-  const [partitionFilter, setPartitionFilter] = useState(searchParams.get("partition") ?? "");
+  const initialService = searchParams.get("service") ?? "";
+  const initialIdentity = splitServiceIdentity(initialService);
+  const [componentFilter, setComponentFilter] = useState(initialIdentity ? "" : initialService);
+  const [partitionFilter, setPartitionFilter] = useState(
+    searchParams.get("partition") ?? initialIdentity?.partition ?? ""
+  );
+  const [intentFilter, setIntentFilter] = useState(
+    searchParams.get("intent") ?? initialIdentity?.intent ?? ""
+  );
+  const [assetFilter, setAssetFilter] = useState(
+    searchParams.get("asset") ?? initialIdentity?.asset ?? ""
+  );
   const [logGroup, setLogGroup] = useState(searchParams.get("logGroup") ?? "");
   const [sevActive, setSevActive] = useState<Record<SevKey, boolean>>(() =>
     parseSevParam(searchParams.get("sev"))
@@ -176,7 +176,7 @@ export default function LogsPage() {
   const [showHelp, setShowHelp] = useState(false);
   const [liveOn, setLiveOn] = useState(false);
   const [allRecords, setAllRecords] = useState<LogRecord[]>([]);
-  const [services, setServices] = useState<string[]>([]);
+  const [identities, setIdentities] = useState<LogIdentityInfo[]>([]);
   const [partitions, setPartitions] = useState<string[]>([]);
   const [logGroups, setLogGroups] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -189,29 +189,47 @@ export default function LogsPage() {
     api
       .getLogServices(config.default_tenant, partitionFilter, false, true)
       .then((d) => {
-        setServices(d.services ?? []);
+        const nextIdentities = d.identities ?? (d.services ?? [])
+          .map(splitServiceIdentity)
+          .filter((identity): identity is NonNullable<typeof identity> => identity !== null)
+          .map((identity) => ({ ...identity, service: "" }));
+        setIdentities(nextIdentities);
         setLogGroups(d.log_groups ?? []);
         setPartitions((prev) => [...new Set([...prev, ...(d.partitions ?? [])])].sort());
       })
       .catch(() => {});
   }, [config.default_tenant, partitionFilter]);
 
-  useEffect(() => {
-    const service = searchParams.get("service");
-    if (service) setComponentFilter(service);
-  }, [searchParams]);
-
   // Keep an explicitly requested service/log group even when the telemetry
   // scan does not list it (the catalog only covers the recent window). Clearing
   // it here silently turns a canonical link such as
   // /logs?service=div-a-orders.app.DivAOrdersStack into the global firehose,
   // which shows unrelated partitions instead of "no matches".
-  const serviceOptions = componentFilter && !services.includes(componentFilter)
-    ? [componentFilter, ...services]
-    : services;
   const logGroupOptions = logGroup && !logGroups.includes(logGroup)
     ? [logGroup, ...logGroups]
     : logGroups;
+  const partitionOptions = [...new Set([...partitions, partitionFilter].filter(Boolean))].sort();
+
+  const intentOptions = (() => {
+    const values = new Set<string>();
+    if (intentFilter) values.add(intentFilter);
+    for (const identity of identities) {
+      if (partitionFilter && identity.partition !== partitionFilter) continue;
+      if (identity.intent) values.add(identity.intent);
+    }
+    return [...values].sort();
+  })();
+
+  const assetOptions = (() => {
+    const values = new Set<string>();
+    if (assetFilter) values.add(assetFilter);
+    for (const identity of identities) {
+      if (partitionFilter && identity.partition !== partitionFilter) continue;
+      if (intentFilter && identity.intent !== intentFilter) continue;
+      if (identity.asset) values.add(identity.asset);
+    }
+    return [...values].sort();
+  })();
 
   useEffect(() => {
     autoAwsTried.current = false;
@@ -240,9 +258,14 @@ export default function LogsPage() {
   const paramKey = searchParams.toString();
   useEffect(() => {
     const nextQuery = searchParams.get("q") ?? "";
+    const service = searchParams.get("service") ?? "";
+    const identity = splitServiceIdentity(service);
     setQueryInput(nextQuery);
     setQueryApplied(nextQuery);
-    setPartitionFilter(searchParams.get("partition") ?? "");
+    setComponentFilter(identity ? "" : service);
+    setPartitionFilter(searchParams.get("partition") ?? identity?.partition ?? "");
+    setIntentFilter(searchParams.get("intent") ?? identity?.intent ?? "");
+    setAssetFilter(searchParams.get("asset") ?? identity?.asset ?? "");
     setLogGroup(searchParams.get("logGroup") ?? "");
     setSevActive(parseSevParam(searchParams.get("sev")));
   }, [paramKey]);
@@ -262,6 +285,8 @@ export default function LogsPage() {
       // first page of the tenant-wide firehose.
       if (componentFilter) params.set("service", componentFilter);
       if (partitionFilter) params.set("partition", partitionFilter);
+      if (intentFilter) params.set("intent", intentFilter);
+      if (assetFilter) params.set("asset", assetFilter);
       if (logGroup) params.set("logGroup", logGroup);
       const data = await api.searchLogs(params);
       setAllRecords(data.results ?? []);
@@ -270,7 +295,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [config.default_tenant, tr, queryApplied, componentFilter, partitionFilter, logGroup]);
+  }, [config.default_tenant, tr, queryApplied, componentFilter, partitionFilter, intentFilter, assetFilter, logGroup]);
 
   useEffect(() => {
     void load();
@@ -290,18 +315,19 @@ export default function LogsPage() {
 
   // Filtered records
   const tf = textFilter.toLowerCase();
-  const selectedPartition = partitionFilter.trim();
   const filtered = allRecords.filter((r) => {
     const k = sevKey(r.severity_text ?? "");
     if (!sevActive[k]) return false;
-    const comp =
-      r.resource_attributes?.["guardian.component"] ?? r.service ?? "";
+    const comp = logService(r);
     if (componentFilter && comp !== componentFilter) return false;
-    if (selectedPartition && logPartition(r) !== selectedPartition) return false;
+    const identity = logIdentity(r);
+    if (partitionFilter && identity.partition !== partitionFilter) return false;
+    if (intentFilter && identity.intent !== intentFilter) return false;
+    if (assetFilter && identity.asset !== assetFilter) return false;
     if (tf) {
       if (
         !(r.body ?? "").toLowerCase().includes(tf) &&
-        !(r.service ?? "").toLowerCase().includes(tf) &&
+        !logService(r).toLowerCase().includes(tf) &&
         !comp.toLowerCase().includes(tf)
       )
         return false;
@@ -334,6 +360,8 @@ export default function LogsPage() {
     const params = new URLSearchParams();
     if (componentFilter) params.set("service", componentFilter);
     if (partitionFilter) params.set("partition", partitionFilter);
+    if (intentFilter) params.set("intent", intentFilter);
+    if (assetFilter) params.set("asset", assetFilter);
     if (logGroup) params.set("logGroup", logGroup);
     if (queryApplied) params.set("q", queryApplied);
     const active = (Object.keys(sevActive) as SevKey[]).filter((key) => sevActive[key]);
@@ -356,6 +384,32 @@ export default function LogsPage() {
     setQueryApplied((q) => q ? `${q} AND NOT ${field}="${value}"` : `NOT ${field}="${value}"`);
   };
 
+  const changePartitionFilter = (next: string) => {
+    setPartitionFilter(next);
+    if (intentFilter && !identities.some((identity) =>
+      (!next || identity.partition === next) && identity.intent === intentFilter)) {
+      setIntentFilter("");
+      setAssetFilter("");
+      return;
+    }
+    if (assetFilter && !identities.some((identity) =>
+      (!next || identity.partition === next) &&
+      (!intentFilter || identity.intent === intentFilter) &&
+      identity.asset === assetFilter)) {
+      setAssetFilter("");
+    }
+  };
+
+  const changeIntentFilter = (next: string) => {
+    setIntentFilter(next);
+    if (assetFilter && !identities.some((identity) =>
+      (!partitionFilter || identity.partition === partitionFilter) &&
+      (!next || identity.intent === next) &&
+      identity.asset === assetFilter)) {
+      setAssetFilter("");
+    }
+  };
+
   return (
     <div className="tab-panel">
       <div className="panel-header">
@@ -369,24 +423,46 @@ export default function LogsPage() {
             <select
               className="xp-select"
               value={partitionFilter}
-              onChange={(e) => setPartitionFilter(e.target.value)}
+              onChange={(e) => changePartitionFilter(e.target.value)}
             >
               <option value="">All</option>
-              {partitions.map((partition) => (
+              {partitionOptions.map((partition) => (
                 <option key={partition} value={partition}>{partition}</option>
               ))}
             </select>
           </label>
-          <select
-            className="xp-select"
-            value={componentFilter}
-            onChange={(e) => setComponentFilter(e.target.value)}
-          >
-            <option value="">All services</option>
-            {serviceOptions.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
+          <label className="filter-label">
+            Intent
+            <select
+              className="xp-select"
+              value={intentFilter}
+              onChange={(e) => changeIntentFilter(e.target.value)}
+            >
+              <option value="">All</option>
+              {intentOptions.map((intent) => (
+                <option key={intent} value={intent}>{intent}</option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-label">
+            Asset
+            <select
+              className="xp-select"
+              value={assetFilter}
+              onChange={(e) => setAssetFilter(e.target.value)}
+            >
+              <option value="">All</option>
+              {assetOptions.map((asset) => (
+                <option key={asset} value={asset}>{asset}</option>
+              ))}
+            </select>
+          </label>
+          {componentFilter && (
+            <span className="facet-chip">
+              service: {componentFilter}
+              <button type="button" onClick={() => setComponentFilter("")} title="Clear service filter">×</button>
+            </span>
+          )}
           {(logGroupOptions.length > 0 || logGroup) && (
             <label className="filter-label">
               CloudWatch log group
@@ -597,10 +673,10 @@ function getFieldValue(r: LogRecord, field: string): string {
     if (s.includes("DEBUG") || s.includes("TRACE")) return "DEBUG";
     return "INFO";
   }
-  if (field === "service") return r.service ?? "";
-  if (field === "partition") return logPartition(r);
-  if (field === "intent") return r.intent ?? "";
-  if (field === "asset") return r.asset ?? "";
+  if (field === "service") return logService(r);
+  if (field === "partition") return logIdentity(r).partition;
+  if (field === "intent") return logIdentity(r).intent;
+  if (field === "asset") return logIdentity(r).asset;
   if (field.startsWith("attr.")) return r.attributes?.[field.slice(5)] ?? "";
   if (field.startsWith("res.")) return r.resource_attributes?.[field.slice(4)] ?? "";
   return "";

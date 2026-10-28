@@ -206,6 +206,67 @@ func TestRecentTracesPaginationFillsPageAfterPartitionFilter(t *testing.T) {
 	}
 }
 
+func TestRecentTracesFiltersByIdentity(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	from := base.Add(-time.Hour)
+	to := base.Add(time.Minute)
+
+	backend := &fakeLogEngineBackend{traces: []segment.TraceRecord{
+		{
+			TraceID:   "trace-a",
+			SpanID:    "span-a",
+			Service:   "monofs.monofs-storage.node-a",
+			Partition: "monofs",
+			Intent:    "monofs-storage",
+			Asset:     "node-a",
+			StartTime: base,
+			EndTime:   base.Add(time.Second),
+		},
+		{
+			TraceID:   "trace-b",
+			SpanID:    "span-b",
+			Service:   "monofs.monofs-storage.node-b",
+			Partition: "monofs",
+			Intent:    "monofs-storage",
+			Asset:     "node-b",
+			StartTime: base.Add(-time.Minute),
+			EndTime:   base.Add(-time.Minute + time.Second),
+		},
+		{
+			TraceID:   "trace-c",
+			SpanID:    "span-c",
+			Service:   "doctor.query.query",
+			Partition: "doctor",
+			Intent:    "query",
+			Asset:     "query",
+			StartTime: base.Add(-2 * time.Minute),
+			EndTime:   base.Add(-2*time.Minute + time.Second),
+		},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	query := url.Values{}
+	query.Set("tenant", "default")
+	query.Set("partition", "monofs")
+	query.Set("intent", "monofs-storage")
+	query.Set("asset", "node-a")
+	query.Set("from", from.Format(time.RFC3339Nano))
+	query.Set("to", to.Format(time.RFC3339Nano))
+	req := httptest.NewRequest(http.MethodGet, "/v1/traces/recent?"+query.Encode(), nil)
+	rec := httptest.NewRecorder()
+	svc.handleRecentTraces(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp recentTracePageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Traces) != 1 || resp.Traces[0].TraceID != "trace-a" {
+		t.Fatalf("traces = %+v, want only trace-a", resp.Traces)
+	}
+}
+
 func TestMergeTracePagesDeduplicatesW3CAndXRayIDs(t *testing.T) {
 	at := time.Date(2026, 10, 26, 13, 30, 0, 0, time.UTC)
 	local := []traceSummary{{

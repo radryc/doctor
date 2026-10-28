@@ -117,7 +117,8 @@ func copyTraceSummarySlice(summaries []*traceSummary, limit int) []traceSummary 
 // only when the scan watermark has moved below its earliest span start.
 func (s *Service) queryLocalTracePage(
 	ctx context.Context,
-	tenant, service, partition string,
+	tenant, service string,
+	identity signalIdentity,
 	from, to time.Time,
 	limit int,
 	cursor *tracePageCursor,
@@ -162,7 +163,7 @@ func (s *Service) queryLocalTracePage(
 				continue
 			}
 			spanPartition, intent, asset := traceIdentityLabels(span)
-			if partition != "" && spanPartition != partition {
+			if !identity.matches(spanPartition, intent, asset) {
 				continue
 			}
 			summary := traceMap[span.TraceID]
@@ -249,7 +250,8 @@ func (s *Service) queryLocalTracePage(
 // partition rules as local traces.
 func (s *Service) queryAWSTracePage(
 	ctx context.Context,
-	service, partition string,
+	service string,
+	identity signalIdentity,
 	from, to time.Time,
 	limit int,
 	cursor *tracePageCursor,
@@ -289,7 +291,11 @@ func (s *Service) queryAWSTracePage(
 		if !allowed {
 			continue
 		}
-		if partition != "" && summaryPartition != partition {
+		intent, asset := "", ""
+		if summary.Attributes != nil {
+			_, intent, asset = identityFromAttributes(summary.Attributes)
+		}
+		if !identity.matches(summaryPartition, intent, asset) {
 			continue
 		}
 		spanCount := summary.SpanCount
@@ -394,16 +400,17 @@ func mergeTracePages(local []traceSummary, aws []traceSummary, limit int, cursor
 // requested window into memory or shipping it to the browser.
 func (s *Service) recentTracePage(
 	ctx context.Context,
-	tenant, service, partition string,
+	tenant, service string,
+	identity signalIdentity,
 	from, to time.Time,
 	limit int,
 	cursor *tracePageCursor,
 ) ([]traceSummary, *tracePageCursor, bool, error) {
-	local, localNext, localHasMore, err := s.queryLocalTracePage(ctx, tenant, service, partition, from, to, limit, cursor)
+	local, localNext, localHasMore, err := s.queryLocalTracePage(ctx, tenant, service, identity, from, to, limit, cursor)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	aws, awsHasMore := s.queryAWSTracePage(ctx, service, partition, from, to, limit, cursor)
+	aws, awsHasMore := s.queryAWSTracePage(ctx, service, identity, from, to, limit, cursor)
 	merged, mergedHasMore := mergeTracePages(local, aws, limit, cursor)
 	hasMore := localHasMore || awsHasMore || mergedHasMore
 	var next *tracePageCursor

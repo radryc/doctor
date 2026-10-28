@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { useTimeRange } from "../context/TimeRangeContext";
 import { copyText } from "../lib/clipboard";
 import MetricLineChart from "../components/charts/MetricLineChart";
 import ChartExpandModal from "../components/charts/ChartExpandModal";
@@ -123,16 +124,12 @@ const TONE_CLASS: Record<string, string> = {
   emerald: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
 };
 
-const RANGE_PRESETS = [15, 60, 360, 1440] as const;
+const RANGE_PRESETS = [5, 15, 60, 360, 1440] as const;
 
 function formatDateTimeLocal(date: Date): string {
   if (Number.isNaN(date.getTime())) return formatDateTimeLocal(new Date());
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function localNow(offsetMinutes: number): string {
-  return formatDateTimeLocal(new Date(Date.now() + offsetMinutes * 60_000));
 }
 
 function toISOStringOrEmpty(value: string): string {
@@ -302,13 +299,19 @@ function rangeLabel(from: string, to: string): string {
 
 export default function MetricsPage() {
   const { config, loaded } = useConfig();
+  const tr = useTimeRange();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialized = useRef(false);
   const bootstrapped = useRef(false);
   const autoRan = useRef("");
+  const lastGlobalRange = useRef("");
 
   const [tenant, setTenant] = useState(searchParams.get("tenant") ?? config.default_tenant ?? "default");
   const [partition, setPartition] = useState(searchParams.get("partition") ?? "");
+  const [metricIntent, setMetricIntent] = useState(searchParams.get("intent") ?? "");
+  const [metricAsset, setMetricAsset] = useState(searchParams.get("asset") ?? "");
+  const [intentValues, setIntentValues] = useState<string[]>([]);
+  const [assetValues, setAssetValues] = useState<string[]>([]);
   const [partitions, setPartitions] = useState<string[]>([]);
   const [metricNames, setMetricNames] = useState<string[]>([]);
   const [metricLoading, setMetricLoading] = useState(true);
@@ -316,11 +319,15 @@ export default function MetricsPage() {
   const [metricFilter, setMetricFilter] = useState("");
   const [selectedMetric, setSelectedMetric] = useState(searchParams.get("metric") ?? "");
   const [query, setQuery] = useState(searchParams.get("query") ?? searchParams.get("metric") ?? "");
-  const [from, setFrom] = useState(
-    searchParams.get("from") ? formatDateTimeLocal(new Date(searchParams.get("from") || "")) : localNow(-60)
+  const [from, setFrom] = useState(() =>
+    searchParams.get("from")
+      ? formatDateTimeLocal(new Date(searchParams.get("from") || ""))
+      : formatDateTimeLocal(tr.resolve().from)
   );
-  const [to, setTo] = useState(
-    searchParams.get("to") ? formatDateTimeLocal(new Date(searchParams.get("to") || "")) : localNow(0)
+  const [to, setTo] = useState(() =>
+    searchParams.get("to")
+      ? formatDateTimeLocal(new Date(searchParams.get("to") || ""))
+      : formatDateTimeLocal(tr.resolve().to)
   );
   const [step, setStep] = useState(searchParams.get("step") ?? "30s");
   const [mode, setMode] = useState<QueryMode>((searchParams.get("mode") as QueryMode) || "range");
@@ -334,6 +341,21 @@ export default function MetricsPage() {
   const [statusMsg, setStatusMsg] = useState("Choose a quick start, a metric, or write a PromQL expression.");
   const [copiedQuery, setCopiedQuery] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Follow the global time picker. The page used to keep an isolated
+  // 60-minute window, so selecting 5m in the top bar still queried one hour.
+  useEffect(() => {
+    const { from: globalFrom, to: globalTo } = tr.resolve();
+    const key = `${globalFrom.getTime()}-${globalTo.getTime()}`;
+    if (!lastGlobalRange.current) {
+      lastGlobalRange.current = key;
+      return;
+    }
+    if (lastGlobalRange.current === key) return;
+    lastGlobalRange.current = key;
+    setFrom(formatDateTimeLocal(globalFrom));
+    setTo(formatDateTimeLocal(globalTo));
+  }, [tr]);
 
   const loadMetricNames = useCallback(async (
     targetTenant = tenant,
@@ -393,6 +415,24 @@ export default function MetricsPage() {
     void loadMetricNames(tenant, partition, from, to);
   }, [tenant, partition, from, to, loadMetricNames]);
 
+  // Canonical identity filters are label dimensions on metric series.
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams({ tenant });
+    if (partition) params.set("partition", partition);
+    void Promise.all([
+      api.getMetricLabelValues("guardian_intent", params).then((r) => r.data ?? []).catch(() => []),
+      api.getMetricLabelValues("guardian_asset", params).then((r) => r.data ?? []).catch(() => []),
+    ]).then(([intents, assets]) => {
+      if (cancelled) return;
+      setIntentValues(intents);
+      setAssetValues(assets);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenant, partition]);
+
   // Augment the Guardian-derived partition list with partitions that actually
   // appear in telemetry, so the metrics picker works even when Guardian is not
   // reachable.
@@ -409,6 +449,8 @@ export default function MetricsPage() {
     const next = new URLSearchParams();
     if (tenant) next.set("tenant", tenant);
     if (partition) next.set("partition", partition);
+    if (metricIntent) next.set("intent", metricIntent);
+    if (metricAsset) next.set("asset", metricAsset);
     if (selectedMetric) next.set("metric", selectedMetric);
     if (query) next.set("query", query);
     const fromISO = toISOStringOrEmpty(from);
@@ -419,7 +461,7 @@ export default function MetricsPage() {
     next.set("mode", mode);
     if (queryTimeout) next.set("timeout", queryTimeout);
     if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
-  }, [tenant, partition, selectedMetric, query, from, to, step, mode, queryTimeout, searchParams, setSearchParams]);
+  }, [tenant, partition, metricIntent, metricAsset, selectedMetric, query, from, to, step, mode, queryTimeout, searchParams, setSearchParams]);
 
   const execute = useCallback(
     async (
@@ -428,6 +470,8 @@ export default function MetricsPage() {
         mode?: QueryMode;
         tenant?: string;
         partition?: string;
+        intent?: string;
+        asset?: string;
         from?: string;
         to?: string;
         step?: string;
@@ -443,12 +487,16 @@ export default function MetricsPage() {
       const nextMode = options?.mode ?? mode;
       const nextTenant = options?.tenant ?? tenant;
       const nextPartition = options?.partition ?? partition;
+      const nextIntent = options?.intent ?? metricIntent;
+      const nextAsset = options?.asset ?? metricAsset;
       const nextFrom = options?.from ?? from;
       const nextTo = options?.to ?? to;
       const nextStep = options?.step ?? step;
 
       const params = new URLSearchParams({ tenant: nextTenant, query: expr });
       if (nextPartition) params.set("partition", nextPartition);
+      if (nextIntent) params.set("intent", nextIntent);
+      if (nextAsset) params.set("asset", nextAsset);
       if (queryTimeout) params.set("timeout", queryTimeout);
       let url = "/api/v1/query";
       if (nextMode === "range") {
@@ -496,7 +544,7 @@ export default function MetricsPage() {
         );
       }
     },
-    [mode, tenant, partition, from, to, step, queryTimeout]
+    [mode, tenant, partition, metricIntent, metricAsset, from, to, step, queryTimeout]
   );
 
   // If the page was opened from a dashboard link with a query/metric, run it
@@ -555,6 +603,12 @@ export default function MetricsPage() {
   const activeDescription = selectedMetric
     ? metricHint(selectedMetric)
     : "Custom PromQL expression. Hover the chart for values and click a legend item to hide or show a series.";
+  const intentOptions = metricIntent && !intentValues.includes(metricIntent)
+    ? [metricIntent, ...intentValues]
+    : intentValues;
+  const assetOptions = metricAsset && !assetValues.includes(metricAsset)
+    ? [metricAsset, ...assetValues]
+    : assetValues;
 
   const chooseMetric = (metricName: string) => {
     setSelectedMetric(metricName);
@@ -564,8 +618,20 @@ export default function MetricsPage() {
 
   const changePartition = (nextPartition: string) => {
     setPartition(nextPartition);
+    setMetricIntent("");
+    setMetricAsset("");
     autoRan.current = "";
-    if (query.trim()) void execute(query.trim(), { partition: nextPartition });
+    if (query.trim()) void execute(query.trim(), { partition: nextPartition, intent: "", asset: "" });
+  };
+
+  const changeIntent = (nextIntent: string) => {
+    setMetricIntent(nextIntent);
+    if (query.trim()) void execute(query.trim(), { intent: nextIntent });
+  };
+
+  const changeAsset = (nextAsset: string) => {
+    setMetricAsset(nextAsset);
+    if (query.trim()) void execute(query.trim(), { asset: nextAsset });
   };
 
   const changeMode = (nextMode: QueryMode) => {
@@ -574,8 +640,12 @@ export default function MetricsPage() {
   };
 
   const setQuickRange = (minutes: number) => {
-    const nextFrom = localNow(-minutes);
-    const nextTo = localNow(0);
+    tr.setRelative(minutes < 60 ? `${minutes}m` : `${minutes / 60}h`);
+    // Derive both ends from one timestamp so the window is exactly `minutes`
+    // even when the click lands on a minute boundary.
+    const now = new Date();
+    const nextFrom = formatDateTimeLocal(new Date(now.getTime() - minutes * 60_000));
+    const nextTo = formatDateTimeLocal(now);
     setFrom(nextFrom);
     setTo(nextTo);
     if (query.trim()) void execute(query.trim(), { from: nextFrom, to: nextTo });
@@ -625,6 +695,32 @@ export default function MetricsPage() {
               <option value="">All partitions</option>
               {partitions.map((name) => (
                 <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-label">
+            Intent
+            <select
+              className="xp-select"
+              value={metricIntent}
+              onChange={(event) => changeIntent(event.target.value)}
+            >
+              <option value="">All</option>
+              {intentOptions.map((intent) => (
+                <option key={intent} value={intent}>{intent}</option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-label">
+            Asset
+            <select
+              className="xp-select"
+              value={metricAsset}
+              onChange={(event) => changeAsset(event.target.value)}
+            >
+              <option value="">All</option>
+              {assetOptions.map((asset) => (
+                <option key={asset} value={asset}>{asset}</option>
               ))}
             </select>
           </label>
@@ -864,13 +960,41 @@ export default function MetricsPage() {
                     <input
                       type="datetime-local"
                       value={from}
-                      onChange={(event) => setFrom(event.target.value)}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setFrom(value);
+                        const nextFrom = new Date(value);
+                        const currentTo = new Date(to);
+                        if (
+                          !Number.isNaN(nextFrom.getTime()) &&
+                          !Number.isNaN(currentTo.getTime()) &&
+                          nextFrom < currentTo
+                        ) {
+                          tr.setAbsolute(nextFrom, currentTo);
+                        }
+                      }}
                       disabled={mode === "instant"}
                     />
                   </label>
                   <label className="filter-label">
                     To
-                    <input type="datetime-local" value={to} onChange={(event) => setTo(event.target.value)} />
+                    <input
+                      type="datetime-local"
+                      value={to}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setTo(value);
+                        const currentFrom = new Date(from);
+                        const nextTo = new Date(value);
+                        if (
+                          !Number.isNaN(currentFrom.getTime()) &&
+                          !Number.isNaN(nextTo.getTime()) &&
+                          currentFrom < nextTo
+                        ) {
+                          tr.setAbsolute(currentFrom, nextTo);
+                        }
+                      }}
+                    />
                   </label>
                   <label className="filter-label">
                     Step

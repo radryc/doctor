@@ -868,7 +868,8 @@ func (s *Service) handleSpanSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
-	partition := partitionFromRequest(r)
+	identity := identityFromRequest(r)
+	partition := identity.Partition
 	service := strings.TrimSpace(r.URL.Query().Get("service"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	logGroup := strings.TrimSpace(r.URL.Query().Get("logGroup"))
@@ -902,7 +903,7 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 
 	var results []segment.LogRecord
 	if s.proxyRouter != nil {
-		records, warnings, err := s.proxyRouter.Logs(r.Context(), tenant, logSearchPushdown(service, query, logGroup), from, to, limit)
+		records, warnings, err := s.proxyRouter.Logs(r.Context(), tenant, logSearchPushdown(service, query, logGroup, identity), from, to, limit)
 		if err != nil {
 			if isAccessDenied(err) {
 				http.Error(w, err.Error(), http.StatusForbidden)
@@ -939,29 +940,31 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 		results = nil
 	} else {
 		var err error
-		results, err = s.logEngine.QueryLogs(r.Context(), tenant, query, service, from, to, limit)
+		if raw, ok := s.logEngine.(rawLogQueryBackend); ok {
+			selector := identity.logSelector(service)
+			if query != "" {
+				selector += " |= " + strconv.Quote(query)
+			}
+			results, err = raw.QueryLogsRaw(r.Context(), tenant, selector, from, to, limit)
+		} else {
+			results, err = s.logEngine.QueryLogs(r.Context(), tenant, query, service, from, to, limit)
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
-	if service != "" {
+	if service != "" || identity.active() {
 		filtered := results[:0]
 		for _, result := range results {
-			if result.Service == service {
-				filtered = append(filtered, result)
+			if service != "" && result.Service != service {
+				continue
 			}
-		}
-		results = filtered
-	}
-	if partition != "" {
-		filtered := results[:0]
-		for _, result := range results {
-			attrs := mergeStringMaps(result.ResourceAttributes, result.Attributes)
-			resultPartition := firstNonEmpty(result.Partition, attrs[attrGuardianPartition], attrs[labelPartition])
-			if resultPartition == partition {
-				filtered = append(filtered, result)
+			resultPartition, resultIntent, resultAsset := logIdentity(result)
+			if !identity.matches(resultPartition, resultIntent, resultAsset) {
+				continue
 			}
+			filtered = append(filtered, result)
 		}
 		results = filtered
 	}
@@ -971,6 +974,8 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 		"service":   service,
 		"query":     query,
 		"partition": partition,
+		"intent":    identity.Intent,
+		"asset":     identity.Asset,
 		"returned":  len(results),
 		"results":   results,
 	})
@@ -1588,7 +1593,7 @@ func writeJSON(w http.ResponseWriter, statusCode int, value any) {
 
 func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
-	partition := partitionFromRequest(r)
+	identity := identityFromRequest(r)
 	service := strings.TrimSpace(r.URL.Query().Get("service"))
 	from := parseTime(r.URL.Query().Get("from"))
 	to := parseTime(r.URL.Query().Get("to"))
@@ -1606,7 +1611,7 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 		to = time.Now().UTC()
 	}
 
-	summaries, next, hasMore, err := s.recentTracePage(r.Context(), tenant, service, partition, from, to, limit, cursor)
+	summaries, next, hasMore, err := s.recentTracePage(r.Context(), tenant, service, identity, from, to, limit, cursor)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1634,11 +1639,29 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 
 	seen := map[string]bool{}
 	seenParts := map[string]bool{}
+	seenIdentities := map[string]bool{}
 	var components []string
 	var partitions []string
+	var identities []logIdentityInfo
+	addIdentity := func(part, intent, asset, service string) {
+		if part == "" && intent == "" && asset == "" {
+			return
+		}
+		key := part + "\x00" + intent + "\x00" + asset
+		if seenIdentities[key] {
+			return
+		}
+		seenIdentities[key] = true
+		identities = append(identities, logIdentityInfo{
+			Partition: part,
+			Intent:    intent,
+			Asset:     asset,
+			Service:   service,
+		})
+	}
 	for _, rec := range results {
 		attrs := mergeStringMaps(rec.ResourceAttributes, rec.Attributes)
-		part := firstNonEmpty(rec.Partition, attrs[attrGuardianPartition], attrs[labelPartition])
+		part, intent, asset := logIdentity(rec)
 		if part != "" && !seenParts[part] {
 			seenParts[part] = true
 			partitions = append(partitions, part)
@@ -1651,6 +1674,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 			seen[comp] = true
 			components = append(components, comp)
 		}
+		addIdentity(part, intent, asset, comp)
 	}
 
 	// Trace services may have no log records in the scan window. Include them
@@ -1660,7 +1684,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(include, "traces") {
 		if spans, spanErr := s.logEngine.QueryTraces(r.Context(), tenant, "", "", from, to, traceDiscoverySpanLimit); spanErr == nil {
 			for _, span := range spans {
-				part, _, _ := traceIdentityLabels(span)
+				part, intent, asset := traceIdentityLabels(span)
 				if part != "" && !seenParts[part] {
 					seenParts[part] = true
 					partitions = append(partitions, part)
@@ -1672,6 +1696,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 					seen[span.Service] = true
 					components = append(components, span.Service)
 				}
+				addIdentity(part, intent, asset, span.Service)
 			}
 		}
 	}
@@ -1695,6 +1720,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 			seen[svc.Name] = true
 			components = append(components, svc.Name)
 		}
+		addIdentity(part, "", "", svc.Name)
 	}
 	logGroups := make([]string, 0)
 	if strings.Contains(include, "aws") && s.awsReady() {
@@ -1715,13 +1741,34 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(components)
 	sort.Strings(partitions)
 	sort.Strings(logGroups)
+	sort.Slice(identities, func(i, j int) bool {
+		left, right := identities[i], identities[j]
+		if left.Partition != right.Partition {
+			return left.Partition < right.Partition
+		}
+		if left.Intent != right.Intent {
+			return left.Intent < right.Intent
+		}
+		if left.Asset != right.Asset {
+			return left.Asset < right.Asset
+		}
+		return left.Service < right.Service
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant":     tenant,
 		"services":   components,
 		"partitions": partitions,
+		"identities": identities,
 		"log_groups": logGroups,
 	})
+}
+
+type logIdentityInfo struct {
+	Partition string `json:"partition,omitempty"`
+	Intent    string `json:"intent,omitempty"`
+	Asset     string `json:"asset,omitempty"`
+	Service   string `json:"service,omitempty"`
 }
 
 type svcInfo struct {
