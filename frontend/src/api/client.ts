@@ -115,6 +115,13 @@ export const api = {
     );
   },
 
+  getMetricLabelValues: (label: string, params?: URLSearchParams) => {
+    const query = params?.toString();
+    return fetchJSON<PrometheusLabelValuesResponse>(
+      `/api/v1/label/${encodeURIComponent(label)}/values${query ? `?${query}` : ""}`
+    );
+  },
+
   queryPrometheus: (params: URLSearchParams) =>
     fetchJSON<PrometheusQueryResponse>(`/api/v1/query?${params}`),
 

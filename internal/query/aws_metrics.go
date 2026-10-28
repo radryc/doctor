@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -51,25 +52,13 @@ func filterPrometheusDataByPartition(data map[string]any, partition string) map[
 		if !ok {
 			continue
 		}
-		value, source := "", ""
-		switch metric := entry["metric"].(type) {
-		case map[string]string:
-			value = firstNonEmpty(
-				metric["guardian_partition"],
-				metric["@aws.tag.guardian.io/partition"],
-				metric["@aws.tag.strata.io/partition"],
-				metric["partition"],
-			)
-			source = metric["source"]
-		case map[string]any:
-			for _, key := range []string{"guardian_partition", "@aws.tag.guardian.io/partition", "@aws.tag.strata.io/partition", "partition"} {
-				if candidate, ok := metric[key].(string); ok && candidate != "" {
-					value = candidate
-					break
-				}
-			}
-			source, _ = metric["source"].(string)
-		}
+		labels, source := prometheusSeriesLabels(entry)
+		value := firstNonEmpty(
+			labels["guardian_partition"],
+			labels["@aws.tag.guardian.io/partition"],
+			labels["@aws.tag.strata.io/partition"],
+			labels["partition"],
+		)
 		// Dimension-only AWS series may not carry a partition tag. The AWS
 		// backend is account-scoped, so keep them instead of silently dropping
 		// every CloudWatch metric when a partition filter is active.
@@ -79,6 +68,68 @@ func filterPrometheusDataByPartition(data map[string]any, partition string) map[
 	}
 	data["result"] = filtered
 	return data
+}
+
+// filterPrometheusDataByLabel keeps only series matching one canonical
+// identity label (intent or asset). Unlike partition, AWS dimension-only
+// series are not exempt: if they carry no identity they cannot match.
+func filterPrometheusDataByLabel(data map[string]any, value string, keys ...string) map[string]any {
+	value = strings.TrimSpace(value)
+	if data == nil || value == "" {
+		return data
+	}
+	result := proxy.PrometheusResultSlice(data)
+	filtered := make([]any, 0, len(result))
+	for _, item := range result {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		labels, _ := prometheusSeriesLabels(entry)
+		for _, key := range keys {
+			if labels[key] == value {
+				filtered = append(filtered, item)
+				break
+			}
+		}
+	}
+	data["result"] = filtered
+	return data
+}
+
+var (
+	prometheusIntentLabels = []string{"guardian_intent", "@aws.tag.guardian.io/intent", "@aws.tag.strata.io/intent", "intent"}
+	prometheusAssetLabels  = []string{"guardian_asset", "@aws.tag.guardian.io/asset", "@aws.tag.strata.io/asset", "asset"}
+)
+
+// filterPrometheusDataByIdentity applies the UI's partition/intent/asset
+// filters to a merged Prometheus result. It runs for local, federated, and
+// router-backed queries so every signal uses the same identity fields.
+func filterPrometheusDataByIdentity(r *http.Request, data map[string]any) map[string]any {
+	identity := identityFromRequest(r)
+	data = filterPrometheusDataByPartition(data, identity.Partition)
+	data = filterPrometheusDataByLabel(data, identity.Intent, prometheusIntentLabels...)
+	data = filterPrometheusDataByLabel(data, identity.Asset, prometheusAssetLabels...)
+	return data
+}
+
+// prometheusSeriesLabels normalizes the two result-map shapes produced by the
+// local engine and federated backends.
+func prometheusSeriesLabels(entry map[string]any) (map[string]string, string) {
+	switch metric := entry["metric"].(type) {
+	case map[string]string:
+		return metric, metric["source"]
+	case map[string]any:
+		labels := make(map[string]string, len(metric))
+		for key, candidate := range metric {
+			if value, ok := candidate.(string); ok {
+				labels[key] = value
+			}
+		}
+		return labels, labels["source"]
+	default:
+		return map[string]string{}, ""
+	}
 }
 
 func extractPrometheusData(response map[string]any) map[string]any {

@@ -89,9 +89,17 @@ export interface LogSearchResponse {
   results: LogRecord[];
 }
 
+export interface LogIdentityInfo {
+  partition?: string;
+  intent?: string;
+  asset?: string;
+  service?: string;
+}
+
 export interface LogServicesResponse {
   services: string[];
   partitions: string[];
+  identities?: LogIdentityInfo[];
   log_groups?: string[];
 }
 

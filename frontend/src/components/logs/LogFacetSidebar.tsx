@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { logAsset, logIntent, logPartition, logService } from "../../lib/logs";
 import type { LogRecord } from "../../types/api";
 
 interface FacetValue {
@@ -34,10 +35,10 @@ export default function LogFacetSidebar({ records, activeFilters, onInclude, onE
 
     for (const r of records) {
       bump("severity_text", normalizeSeverity(r.severity_text));
-      bump("service", r.service ?? "");
-      bump("partition", r.partition ?? r.resource_attributes?.["guardian_partition"] ?? r.resource_attributes?.["guardian.partition"] ?? "");
-      bump("intent", r.intent ?? "");
-      bump("asset", r.asset ?? "");
+      bump("service", logService(r));
+      bump("partition", logPartition(r));
+      bump("intent", logIntent(r));
+      bump("asset", logAsset(r));
 
       // Extracted JSON fields from attributes
       if (r.attributes) {

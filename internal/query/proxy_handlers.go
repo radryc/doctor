@@ -28,7 +28,7 @@ func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.
 		return
 	}
 	writeProxyWarnings(w, warnings)
-	writePrometheusSuccess(w, data)
+	writePrometheusSuccess(w, filterPrometheusDataByIdentity(r, data))
 }
 
 // handlePrometheusQueryRangeViaRouter executes a range query through the
@@ -47,7 +47,7 @@ func (s *Service) handlePrometheusQueryRangeViaRouter(w http.ResponseWriter, r *
 		return
 	}
 	writeProxyWarnings(w, warnings)
-	writePrometheusSuccess(w, data)
+	writePrometheusSuccess(w, filterPrometheusDataByIdentity(r, data))
 }
 
 // handleProxyEndpoints lists the configured backends, fleet summary, and their health.
@@ -145,13 +145,22 @@ func isAccessDenied(err error) bool {
 
 // logSearchPushdown converts the native log-search parameters into the reduced
 // LogQL form used by proxy upstreams.
-func logSearchPushdown(service, text, logGroup string) proxy.LogPushdown {
-	selector := `{service=~".+"}`
+func logSearchPushdown(service, text, logGroup string, identity signalIdentity) proxy.LogPushdown {
+	selector := identity.logSelector(service)
 	switch {
 	case strings.TrimSpace(logGroup) != "":
+		// CloudWatch log groups are not labelled with Doctor identity. Filter
+		// the fetched records after the upstream returns them.
 		selector = `{source="aws", aws_log_group="` + escapeLogQL(strings.TrimSpace(logGroup)) + `"}`
-	case service != "":
-		selector = `{service="` + escapeLogQL(service) + `"}`
+	default:
+		if _, mode := proxy.AWSQueryMode(text); mode != proxy.AWSQueryNone {
+			// An AWS/X-Ray upstream may not carry guardian_* labels, so keep
+			// the selector broad and apply identity filters to the result.
+			selector = `{service=~".+"}`
+			if service != "" {
+				selector = `{service="` + escapeLogQL(service) + `"}`
+			}
+		}
 	}
 	pushdown := proxy.LogPushdown{Selector: selector}
 	if text != "" {

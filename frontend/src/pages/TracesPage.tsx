@@ -4,8 +4,9 @@ import { Check, Copy, FileText, Link2 } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import { copyText } from "../lib/clipboard";
+import { splitServiceIdentity } from "../lib/logs";
 import TraceDetails, { fmtTime } from "../components/charts/TraceDetails";
-import type { TraceSummary, TraceRecord } from "../types/api";
+import type { LogIdentityInfo, TraceSummary, TraceRecord } from "../types/api";
 
 // Accepts the two formats Doctor emits and returns the canonical 32-hex form:
 //   W3C:  4bf92f3577b34da6a3ce929d0e0e4736
@@ -170,13 +171,23 @@ export default function TracesPage() {
   const focusedTraceId = searchParams.get("trace_id") ?? "";
   const initialRange = Number(searchParams.get("range"));
 
+  const initialService = searchParams.get("service") ?? "";
+  const initialIdentity = splitServiceIdentity(initialService);
   const [minutes, setMinutes] = useState([15, 60, 360, 1440].includes(initialRange) ? initialRange : 60);
-  const [service, setService] = useState(searchParams.get("service") ?? "");
-  const [partitionFilter, setPartitionFilter] = useState(searchParams.get("partition") ?? "");
+  const [service, setService] = useState(initialIdentity ? "" : initialService);
+  const [partitionFilter, setPartitionFilter] = useState(
+    searchParams.get("partition") ?? initialIdentity?.partition ?? ""
+  );
+  const [intentFilter, setIntentFilter] = useState(
+    searchParams.get("intent") ?? initialIdentity?.intent ?? ""
+  );
+  const [assetFilter, setAssetFilter] = useState(
+    searchParams.get("asset") ?? initialIdentity?.asset ?? ""
+  );
   const [textFilter, setTextFilter] = useState("");
   const [liveOn, setLiveOn] = useState(false);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
-  const [services, setServices] = useState<string[]>([]);
+  const [identities, setIdentities] = useState<LogIdentityInfo[]>([]);
   const [partitions, setPartitions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("Searching…");
@@ -214,6 +225,8 @@ export default function TracesPage() {
       });
       if (service) params.set("service", service);
       if (partitionFilter) params.set("partition", partitionFilter);
+      if (intentFilter) params.set("intent", intentFilter);
+      if (assetFilter) params.set("asset", assetFilter);
       if (pageCursor) params.set("cursor", pageCursor);
       const data = await api.getRecentTraces(params);
       setTraces(data.traces ?? []);
@@ -228,7 +241,7 @@ export default function TracesPage() {
     } finally {
       setLoading(false);
     }
-  }, [config.default_tenant, minutes, service, partitionFilter, pageCursor]);
+  }, [config.default_tenant, minutes, service, partitionFilter, intentFilter, assetFilter, pageCursor]);
 
   // Load the service list for the selected partition (and the full partition
   // list seen in telemetry).
@@ -236,7 +249,11 @@ export default function TracesPage() {
     api
       .getLogServices(config.default_tenant, partitionFilter, true)
       .then((d) => {
-        setServices(d.services ?? []);
+        const nextIdentities = d.identities ?? (d.services ?? [])
+          .map(splitServiceIdentity)
+          .filter((identity): identity is NonNullable<typeof identity> => identity !== null)
+          .map((identity) => ({ ...identity, service: "" }));
+        setIdentities(nextIdentities);
         setPartitions((prev) => [...new Set([...prev, ...(d.partitions ?? [])])].sort());
       })
       .catch(() => {});
@@ -245,9 +262,35 @@ export default function TracesPage() {
   // Keep an explicitly requested service even when it is absent from the
   // recent-window catalog. Clearing it silently replaces a canonical trace
   // link with every trace in the tenant, including unrelated partitions.
-  const serviceOptions = service && !services.includes(service)
-    ? [service, ...services]
-    : services;
+  const partitionOptions = [...new Set([...partitions, partitionFilter].filter(Boolean))].sort();
+  const intentOptions = (() => {
+    const values = new Set<string>();
+    if (intentFilter) values.add(intentFilter);
+    for (const identity of identities) {
+      if (partitionFilter && identity.partition !== partitionFilter) continue;
+      if (identity.intent) values.add(identity.intent);
+    }
+    for (const trace of traces) {
+      if (partitionFilter && trace.partition !== partitionFilter) continue;
+      if (trace.intent) values.add(trace.intent);
+    }
+    return [...values].sort();
+  })();
+  const assetOptions = (() => {
+    const values = new Set<string>();
+    if (assetFilter) values.add(assetFilter);
+    for (const identity of identities) {
+      if (partitionFilter && identity.partition !== partitionFilter) continue;
+      if (intentFilter && identity.intent !== intentFilter) continue;
+      if (identity.asset) values.add(identity.asset);
+    }
+    for (const trace of traces) {
+      if (partitionFilter && trace.partition !== partitionFilter) continue;
+      if (intentFilter && trace.intent !== intentFilter) continue;
+      if (trace.asset) values.add(trace.asset);
+    }
+    return [...values].sort();
+  })();
 
   // Keep the partition picker aligned with the traces currently loaded. This
   // covers partitions that have traces but no log records in the scan window.
@@ -268,8 +311,12 @@ export default function TracesPage() {
   useEffect(() => {
     const range = Number(searchParams.get("range"));
     if ([15, 60, 360, 1440].includes(range)) setMinutes(range);
-    setPartitionFilter(searchParams.get("partition") ?? "");
-    setService(searchParams.get("service") ?? "");
+    const nextService = searchParams.get("service") ?? "";
+    const identity = splitServiceIdentity(nextService);
+    setPartitionFilter(searchParams.get("partition") ?? identity?.partition ?? "");
+    setIntentFilter(searchParams.get("intent") ?? identity?.intent ?? "");
+    setAssetFilter(searchParams.get("asset") ?? identity?.asset ?? "");
+    setService(identity ? "" : nextService);
     setPage(1);
     setPageCursors([null]);
     setNextCursor("");
@@ -307,6 +354,8 @@ export default function TracesPage() {
   const filtered = traces.filter((t) => {
     if (service && t.service !== service) return false;
     if (selectedPartition && t.partition !== selectedPartition) return false;
+    if (intentFilter && t.intent !== intentFilter) return false;
+    if (assetFilter && t.asset !== assetFilter) return false;
     if (tf && !t.trace_id.toLowerCase().includes(tf) && !(t.service ?? "").toLowerCase().includes(tf))
       return false;
     return true;
@@ -355,6 +404,8 @@ export default function TracesPage() {
     params.set("range", String(minutes));
     if (service) params.set("service", service);
     if (partitionFilter) params.set("partition", partitionFilter);
+    if (intentFilter) params.set("intent", intentFilter);
+    if (assetFilter) params.set("asset", assetFilter);
     const base = window.location.href.split("#")[0];
     void copyText(`${base}#/traces?${params.toString()}`).then((ok) => {
       if (!ok) return;
@@ -375,6 +426,32 @@ export default function TracesPage() {
   }
 
   const presets = [15, 60, 360, 1440];
+
+  const changePartitionFilter = (next: string) => {
+    setPartitionFilter(next);
+    if (intentFilter && !identities.some((identity) =>
+      (!next || identity.partition === next) && identity.intent === intentFilter)) {
+      setIntentFilter("");
+      setAssetFilter("");
+    } else if (assetFilter && !identities.some((identity) =>
+      (!next || identity.partition === next) &&
+      (!intentFilter || identity.intent === intentFilter) &&
+      identity.asset === assetFilter)) {
+      setAssetFilter("");
+    }
+    resetPagination();
+  };
+
+  const changeIntentFilter = (next: string) => {
+    setIntentFilter(next);
+    if (assetFilter && !identities.some((identity) =>
+      (!partitionFilter || identity.partition === partitionFilter) &&
+      (!next || identity.intent === next) &&
+      identity.asset === assetFilter)) {
+      setAssetFilter("");
+    }
+    resetPagination();
+  };
 
   return (
     <div className="tab-panel">
@@ -403,32 +480,49 @@ export default function TracesPage() {
             <select
               className="xp-select"
               value={partitionFilter}
-              onChange={(e) => {
-                setPartitionFilter(e.target.value);
-                resetPagination();
-              }}
+              onChange={(e) => changePartitionFilter(e.target.value)}
             >
               <option value="">All</option>
-              {partitions.map((partition) => (
+              {partitionOptions.map((partition) => (
                 <option key={partition} value={partition}>{partition}</option>
               ))}
             </select>
           </label>
-          <select
-            className="xp-select"
-            value={service}
-            onChange={(e) => {
-              setService(e.target.value);
-              resetPagination();
-            }}
-          >
-            <option value="">All services</option>
-            {serviceOptions.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
+          <label className="filter-label">
+            Intent
+            <select
+              className="xp-select"
+              value={intentFilter}
+              onChange={(e) => changeIntentFilter(e.target.value)}
+            >
+              <option value="">All</option>
+              {intentOptions.map((intent) => (
+                <option key={intent} value={intent}>{intent}</option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-label">
+            Asset
+            <select
+              className="xp-select"
+              value={assetFilter}
+              onChange={(e) => {
+                setAssetFilter(e.target.value);
+                resetPagination();
+              }}
+            >
+              <option value="">All</option>
+              {assetOptions.map((asset) => (
+                <option key={asset} value={asset}>{asset}</option>
+              ))}
+            </select>
+          </label>
+          {service && (
+            <span className="facet-chip">
+              service: {service}
+              <button type="button" onClick={() => { setService(""); resetPagination(); }} title="Clear service filter">×</button>
+            </span>
+          )}
           <input
             type="text"
             className="xp-search"
