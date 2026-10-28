@@ -7,7 +7,7 @@ RUN npm ci
 COPY frontend/ .
 RUN npm run build
 
-FROM golang:1.26.4 AS build
+FROM golang:1.26.10 AS build
 
 ARG DOCTOR_SERVICE=doctor-ingest
 ARG BUILD_VERSION=dev
@@ -20,7 +20,7 @@ COPY --from=monofs go.mod /monofs/go.mod
 RUN go mod download
 
 # v1.0.1 fixes otelc pinning the pre-rename module path (see monofs/Dockerfile).
-ARG OTELC_VERSION=v1.0.1
+ARG OTELC_VERSION=v1.2.0
 RUN GOBIN=/usr/local/bin go install go.opentelemetry.io/otelc/tool/cmd/otelc@${OTELC_VERSION}
 
 COPY . .

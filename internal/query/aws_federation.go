@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
+	"github.com/radryc/monofs/pkg/authz/policy"
 )
 
 // awsSourceLabel marks federated CloudWatch/X-Ray records.
@@ -26,6 +26,25 @@ const (
 // awsReady reports whether the AWS federation backend is configured and enabled.
 func (s *Service) awsReady() bool {
 	return s.aws != nil && s.aws.Enabled()
+}
+
+type awsHealthProber interface {
+	Health(context.Context) error
+}
+
+// awsDiscoveryReady probes the AWS backend before expensive metric discovery.
+// Providers that cannot be probed cheaply keep the legacy behaviour.
+func (s *Service) awsDiscoveryReady(ctx context.Context) bool {
+	if !s.awsReady() {
+		return false
+	}
+	if prober, ok := s.aws.(awsHealthProber); ok {
+		if err := prober.Health(ctx); err != nil {
+			proxy.AddWarning(ctx, proxy.Warning{Backend: "aws", Signal: proxy.SignalMetrics, Message: err.Error()})
+			return false
+		}
+	}
+	return true
 }
 
 // awsPartition derives a partition identifier from an AWS region and account so
@@ -85,10 +104,12 @@ func (s *Service) awsPartitionVisible(ctx context.Context, partition string) boo
 
 // awsServiceInfos returns X-Ray services with their AWS partition metadata.
 func (s *Service) awsServiceInfos(ctx context.Context) []awsstore.ServiceInfo {
-	if !s.awsReady() {
+	if !s.awsDiscoveryReady(ctx) {
 		return nil
 	}
-	services, err := s.aws.ListServices(ctx)
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	services, err := s.aws.ListServices(callCtx)
 	if err != nil {
 		proxy.AddWarning(ctx, proxy.Warning{Backend: "aws", Signal: proxy.SignalTraces, Message: err.Error()})
 		return nil

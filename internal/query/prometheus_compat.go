@@ -1120,7 +1120,7 @@ func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request)
 	partition := partitionFromRequest(r)
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
-	awsEnabled := s.awsReady() && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
+	awsEnabled := s.awsDiscoveryReady(r.Context()) && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
 
 	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
 	if selErr != nil && !hasAWS && !awsEnabled {
@@ -1196,7 +1196,7 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 	partition := partitionFromRequest(r)
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
-	awsEnabled := s.awsReady() && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
+	awsEnabled := s.awsDiscoveryReady(r.Context()) && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
 
 	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
 	if selErr != nil && !hasAWS && !awsEnabled {
@@ -1245,7 +1245,9 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 
 	if awsEnabled {
 		start, end := prometheusDiscoveryRange(r)
-		if resp, awsErr := s.aws.PrometheusLabelValues(r.Context(), labelName, forwardedMatches, start, end); awsErr == nil {
+		awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if resp, awsErr := s.aws.PrometheusLabelValues(awsCtx, labelName, forwardedMatches, start, end); awsErr == nil {
 			for _, value := range extractPrometheusStringList(resp) {
 				values[value] = struct{}{}
 			}
@@ -1254,14 +1256,14 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 			// CloudWatch's PromQL API has no label-values route, so fall back to
 			// ListMetrics to populate the Grafana metric-name browser.
 			if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
-				for _, name := range s.awsMetricNames(r.Context()) {
+				for _, name := range s.awsMetricNames(awsCtx) {
 					values[name] = struct{}{}
 				}
 			}
 		} else if len(forwardedMatches) > 0 {
 			// Derive label values from series when a metric selector is
 			// available; CloudWatch's /series requires a __name__ matcher.
-			if resp, seriesErr := s.aws.PrometheusSeries(r.Context(), forwardedMatches, start, end); seriesErr == nil {
+			if resp, seriesErr := s.aws.PrometheusSeries(awsCtx, forwardedMatches, start, end); seriesErr == nil {
 				for _, labels := range extractPrometheusSeries(resp) {
 					if value := labels[labelName]; value != "" {
 						values[value] = struct{}{}
@@ -1282,7 +1284,7 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 	}
 	partition := partitionFromRequest(r)
 	hasAWS, forwardedMatches := awsMatches(matchValues)
-	awsEnabled := s.awsReady() && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
+	awsEnabled := s.awsDiscoveryReady(r.Context()) && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
 	selectorSets, err := parsePrometheusSelectorSets(matchValues)
 	if err != nil && !hasAWS && !awsEnabled {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
@@ -1322,7 +1324,9 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 
 	if awsEnabled {
 		start, end := prometheusDiscoveryRange(r)
-		if resp, awsErr := s.aws.PrometheusSeries(r.Context(), forwardedMatches, start, end); awsErr == nil {
+		awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if resp, awsErr := s.aws.PrometheusSeries(awsCtx, forwardedMatches, start, end); awsErr == nil {
 			for _, labels := range extractPrometheusSeries(resp) {
 				seen[metricLabelMapString(labels)] = labels
 			}
@@ -1351,9 +1355,13 @@ func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
-		for _, name := range s.awsMetricNames(r.Context()) {
-			metricNames[name] = struct{}{}
+	if s.awsDiscoveryReady(r.Context()) {
+		if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
+			awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			defer cancel()
+			for _, name := range s.awsMetricNames(awsCtx) {
+				metricNames[name] = struct{}{}
+			}
 		}
 	}
 

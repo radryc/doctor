@@ -2313,12 +2313,10 @@ pre {
 .fed-pill__dot--degraded { background: var(--ui-amber); }
 .fed-pill__dot--offline { background: var(--ui-red); }
 .fed-pill__popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 120;
-  width: min(560px, 92vw);
-  max-height: 360px;
+  position: fixed;
+  z-index: 320;
+  width: min(560px, calc(100vw - 24px));
+  max-height: min(360px, calc(100vh - 64px));
   overflow: auto;
   padding: 0.7rem;
   border: 1px solid var(--ui-border-strong);

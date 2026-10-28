@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "../../api/client";
 import type {
   ProxyEndpointInfo,
@@ -65,6 +66,26 @@ export default function FederationStatusPill() {
   const [open, setOpen] = useState(false);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [popoverStyle, setPopoverStyle] = useState<{
+    top: number;
+    right: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
+
+  const updatePopoverPosition = useCallback(() => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const top = rect.bottom + 6;
+    setPopoverStyle({
+      top,
+      right: Math.max(12, window.innerWidth - rect.right),
+      width: Math.min(560, window.innerWidth - 24),
+      maxHeight: Math.max(180, window.innerHeight - top - 16),
+    });
+  }, []);
 
   const loadSummary = () => {
     api
@@ -94,11 +115,23 @@ export default function FederationStatusPill() {
   useEffect(() => {
     if (!open) return;
     loadDetails();
-  }, [open]);
+    updatePopoverPosition();
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("scroll", updatePopoverPosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("scroll", updatePopoverPosition, true);
+    };
+  }, [open, updatePopoverPosition]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        ref.current &&
+        !ref.current.contains(target) &&
+        !popoverRef.current?.contains(target)
+      ) {
         setOpen(false);
       }
     };
@@ -111,16 +144,29 @@ export default function FederationStatusPill() {
   return (
     <div className="fed-pill" ref={ref}>
       <button
+        ref={buttonRef}
+        type="button"
         className={`fed-pill__btn fed-pill__btn--${health}`}
         onClick={() => setOpen((o) => !o)}
         title="Federated backends health"
+        aria-expanded={open}
+        aria-haspopup="true"
       >
         <span className={`fed-pill__dot ${healthClass(health)}`} />
         <span className="fed-pill__label">{healthLabel(summary, endpoints)}</span>
       </button>
 
-      {open && (
-        <div className="fed-pill__popover">
+      {open && popoverStyle && createPortal(
+        <div
+          className="fed-pill__popover"
+          ref={popoverRef}
+          style={{
+            top: popoverStyle.top,
+            right: popoverStyle.right,
+            width: popoverStyle.width,
+            maxHeight: popoverStyle.maxHeight,
+          }}
+        >
           <div className="fed-pill__popover-title">
             Federated Backends
             {summary && summary.total > 0 && (
@@ -166,7 +212,8 @@ export default function FederationStatusPill() {
               </tbody>
             </table>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
