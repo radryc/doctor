@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/monofs/pkg/authz"
 )
 
 // Warning reports a non-fatal backend failure. Partial results are returned
@@ -1148,6 +1148,20 @@ func (r *Router) recordSuccess(name string) {
 	}
 }
 
+// ReportBackendHealth lets an active health probe update the endpoint status
+// immediately. A nil error clears the circuit; a non-nil error opens it.
+func (r *Router) ReportBackendHealth(name string, err error) {
+	name = strings.TrimSpace(name)
+	if r == nil || name == "" {
+		return
+	}
+	if err == nil {
+		r.recordSuccess(name)
+		return
+	}
+	r.breakerFor(name).forceOpen(time.Now())
+}
+
 func (r *Router) backendTimeout(backend Backend) time.Duration {
 	if backend.Timeout > 0 {
 		return backend.Timeout
@@ -1226,6 +1240,15 @@ func (b *breaker) recordFailure(now time.Time) {
 	if b.failures >= breakerThreshold {
 		b.openUntil = now.Add(breakerCooldown)
 	}
+}
+
+// forceOpen opens the circuit immediately. Active health probes use this so
+// the status view does not wait for the retry threshold.
+func (b *breaker) forceOpen(now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failures = breakerThreshold
+	b.openUntil = now.Add(breakerCooldown)
 }
 
 func (b *breaker) recordSuccess() {

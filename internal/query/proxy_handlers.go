@@ -56,6 +56,11 @@ func (s *Service) handleProxyEndpoints(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"endpoints": []proxy.EndpointInfo{}})
 		return
 	}
+	if s.awsReady() {
+		if prober, ok := s.aws.(awsHealthProber); ok {
+			s.proxyRouter.ReportBackendHealth("aws", prober.Health(r.Context()))
+		}
+	}
 	q := r.URL.Query()
 	if q.Get("summary_only") == "1" || q.Get("summary_only") == "true" {
 		summary := s.proxyRouter.SummarizeEndpoints()

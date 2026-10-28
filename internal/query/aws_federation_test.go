@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,9 +25,16 @@ type fakeAWSBackend struct {
 	promResponse      map[string]any
 	lastPromQuery     string
 	lastLogQuery      awsstore.LogQuery
+	healthErr         error
+	healthCalls       int
 }
 
 func (f *fakeAWSBackend) Enabled() bool { return true }
+
+func (f *fakeAWSBackend) Health(context.Context) error {
+	f.healthCalls++
+	return f.healthErr
+}
 
 func (f *fakeAWSBackend) ListMetrics(context.Context, string, string) ([]awsstore.MetricDescriptor, error) {
 	return f.metricDescriptors, nil
@@ -200,6 +208,58 @@ func TestPrometheusMetricNamesIncludeAWS(t *testing.T) {
 		if !values[want] {
 			t.Fatalf("metric names = %#v, want %q", resp.Data, want)
 		}
+	}
+}
+
+func TestPrometheusMetricNamesSkipUnhealthyAWS(t *testing.T) {
+	aws := &fakeAWSBackend{
+		healthErr: errors.New("aws backend down"),
+		metricDescriptors: []awsstore.MetricDescriptor{
+			{Namespace: "AWS/EC2", MetricName: "CPUUtilization"},
+		},
+	}
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	svc := &Service{
+		defaultTenant: "default",
+		logEngine: &fakeLogEngineBackend{metrics: []segment.MetricPointRecord{{
+			MetricName: "local_metric",
+			Timestamp:  base.Add(-time.Minute),
+			HasValue:   true,
+			Value:      1,
+		}}},
+		aws: aws,
+	}
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/label/__name__/values?start="+url.QueryEscape(base.Add(-time.Hour).Format(time.RFC3339))+
+			"&end="+url.QueryEscape(base.Format(time.RFC3339)),
+		nil,
+	)
+	rec := httptest.NewRecorder()
+	svc.handlePrometheusLabelValues(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []string `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	values := make(map[string]bool)
+	for _, value := range resp.Data {
+		values[value] = true
+	}
+	if !values["local_metric"] {
+		t.Fatalf("metric names = %#v, want local_metric", resp.Data)
+	}
+	if values["CPUUtilization"] {
+		t.Fatalf("metric names = %#v, want AWS metrics skipped", resp.Data)
+	}
+	if aws.healthCalls == 0 {
+		t.Fatal("health probe was not called")
 	}
 }
 

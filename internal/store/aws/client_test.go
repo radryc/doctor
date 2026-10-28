@@ -41,6 +41,49 @@ func TestListLogGroupsAcceptsArrayAndObjectResponses(t *testing.T) {
 	}
 }
 
+func TestHealthProbesAndCaches(t *testing.T) {
+	var requests int
+	var healthy = false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		requests++
+		if !healthy {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "")
+	if err := client.Health(context.Background()); err == nil {
+		t.Fatal("Health() error = nil, want backend failure")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	// Cached failures should not repeat the probe within the TTL.
+	if err := client.Health(context.Background()); err == nil {
+		t.Fatal("cached Health() error = nil, want backend failure")
+	}
+	if requests != 1 {
+		t.Fatalf("requests after cached failure = %d, want 1", requests)
+	}
+
+	healthy = true
+	client.healthMu.Lock()
+	client.healthChecked = time.Time{}
+	client.healthMu.Unlock()
+	if err := client.Health(context.Background()); err != nil {
+		t.Fatalf("Health() after recovery error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests after recovery = %d, want 2", requests)
+	}
+}
+
 type testTokenSource struct {
 	mu          sync.Mutex
 	token       string

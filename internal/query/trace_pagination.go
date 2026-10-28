@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz/policy"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
 	"github.com/radryc/doctor/internal/tracecontext"
+	"github.com/radryc/monofs/pkg/authz/policy"
 )
 
 const (
@@ -256,7 +256,7 @@ func (s *Service) queryAWSTracePage(
 	limit int,
 	cursor *tracePageCursor,
 ) ([]traceSummary, bool) {
-	if !s.awsReady() || limit <= 0 {
+	if !s.awsDiscoveryReady(ctx) || limit <= 0 {
 		return nil, false
 	}
 	awsLimit := limit
@@ -267,7 +267,9 @@ func (s *Service) queryAWSTracePage(
 	if cursor != nil && cursor.MinTime.Before(awsTo) {
 		awsTo = cursor.MinTime
 	}
-	summaries, err := s.aws.QueryTraces(ctx, awsstore.TraceQuery{
+	awsCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	summaries, err := s.aws.QueryTraces(awsCtx, awsstore.TraceQuery{
 		Service: service,
 		From:    from,
 		To:      awsTo,
