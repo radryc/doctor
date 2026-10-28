@@ -18,11 +18,11 @@ import (
 
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
-	"github.com/rydzu/ainfra/doctor/internal/access"
-	"github.com/rydzu/ainfra/doctor/internal/federation"
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
+	"github.com/radryc/doctor/internal/access"
+	"github.com/radryc/doctor/internal/federation"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/segment"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
 
 // LogEngineBackend is the interface used for logs, metrics, and trace queries.

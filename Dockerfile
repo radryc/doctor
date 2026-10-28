@@ -30,7 +30,7 @@ COPY --from=frontend /internal/query/ui/dist ./internal/query/ui/dist
 # same flag set as the top-level build; passing -trimpath only on the command
 # line triggers a linker "fingerprint mismatch" for otelc/pkg/runtime.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-trimpath otelc go build \
-	-ldflags "-s -w -X github.com/rydzu/ainfra/doctor/internal/buildinfo.Version=${BUILD_VERSION} -X github.com/rydzu/ainfra/doctor/internal/buildinfo.Commit=${BUILD_COMMIT} -X github.com/rydzu/ainfra/doctor/internal/buildinfo.BuildTime=${BUILD_TIME}" \
+	-ldflags "-s -w -X github.com/radryc/doctor/internal/buildinfo.Version=${BUILD_VERSION} -X github.com/radryc/doctor/internal/buildinfo.Commit=${BUILD_COMMIT} -X github.com/radryc/doctor/internal/buildinfo.BuildTime=${BUILD_TIME}" \
 	-o /out/doctor ./cmd/${DOCTOR_SERVICE}
 
 FROM gcr.io/distroless/base-debian12

@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	"github.com/rydzu/ainfra/doctor/internal/wal"
+	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/wal"
 )
 
 // MetricBufferConfig controls metric buffer behavior.

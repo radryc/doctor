@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/proxy/translate"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	"github.com/rydzu/ainfra/doctor/internal/tempo"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/proxy/translate"
+	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/tempo"
 )
 
 // traceMetricsSpanLimit bounds the spans scanned per TraceQL metrics query.

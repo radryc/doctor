@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
+	"github.com/radryc/doctor/internal/segment"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
 
 // MonoFSWriter implements Flusher by forwarding all telemetry signals to the

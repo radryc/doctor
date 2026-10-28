@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // These tests pin the memory guards on the Grafana compatibility endpoints:

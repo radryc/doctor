@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy/translate"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/proxy/translate"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 const defaultBigQueryBaseURL = "https://bigquery.googleapis.com/bigquery/v2"

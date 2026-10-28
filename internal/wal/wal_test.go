@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/wal"
+	"github.com/radryc/doctor/internal/wal"
 )
 
 func TestStageAndCommit(t *testing.T) {

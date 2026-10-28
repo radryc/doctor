@@ -10,7 +10,7 @@ import (
 	"time"
 
 	promlabels "github.com/prometheus/prometheus/model/labels"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // floodBackend yields a configurable number of synthetic samples for one metric

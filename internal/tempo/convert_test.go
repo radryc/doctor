@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 func TestTraceFromRecordsGroupsByService(t *testing.T) {

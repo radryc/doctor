@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/store"
+	"github.com/radryc/doctor/internal/store"
 )
 
 // LeaderLease is a MonoFS CAS-backed controller lease. It avoids running two

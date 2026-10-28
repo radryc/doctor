@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/guardian"
+	"github.com/radryc/doctor/internal/guardian"
 )
 
 func TestAuthMiddlewareAcceptsValidToken(t *testing.T) {

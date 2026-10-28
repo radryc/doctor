@@ -13,7 +13,7 @@ import (
 	"time"
 
 	pb "github.com/radryc/monofs/api/proto"
-	"github.com/rydzu/ainfra/doctor/internal/store"
+	"github.com/radryc/doctor/internal/store"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

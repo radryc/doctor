@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 const validGroupYAML = `

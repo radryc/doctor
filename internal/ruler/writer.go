@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
+	"github.com/radryc/doctor/internal/segment"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
 
 // LogEngineWriter writes derived samples through the MonoFS logengine client.

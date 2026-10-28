@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/ruler"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/ruler"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // TestProxyEndpointsLoad exercises the fan-out router with thousands of

@@ -10,7 +10,7 @@ import (
 	promlabels "github.com/prometheus/prometheus/model/labels"
 	promparser "github.com/prometheus/prometheus/promql/parser"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // This file implements the Prometheus endpoints Grafana calls beyond the query

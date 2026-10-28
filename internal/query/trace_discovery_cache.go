@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/tempo"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/tempo"
 )
 
 const defaultTraceDiscoveryCacheTTL = 30 * time.Second

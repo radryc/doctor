@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/rydzu/ainfra/doctor/internal/ruler"
+	"github.com/radryc/doctor/internal/ruler"
 )
 
 func newTestStore() *Store {

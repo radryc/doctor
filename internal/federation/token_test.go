@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/ruler"
-	"github.com/rydzu/ainfra/doctor/internal/store"
+	"github.com/radryc/doctor/internal/ruler"
+	"github.com/radryc/doctor/internal/store"
 )
 
 func TestEnvTokenResolver(t *testing.T) {

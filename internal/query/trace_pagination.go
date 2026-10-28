@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/pkg/authz/policy"
-	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
-	"github.com/rydzu/ainfra/doctor/internal/tracecontext"
+	awsstore "github.com/radryc/doctor/internal/store/aws"
+	"github.com/radryc/doctor/internal/tracecontext"
 )
 
 const (

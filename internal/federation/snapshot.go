@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/store"
+	"github.com/radryc/doctor/internal/store"
 )
 
 // ErrSnapshotNotFound reports that no catalog manifest exists yet.

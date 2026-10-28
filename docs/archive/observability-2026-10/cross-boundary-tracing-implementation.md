@@ -176,13 +176,13 @@ Implement:
 ## Commands
 
 ```bash
-cd /home/rydzu/strata/doctor
+cd ~/strata/doctor
 go test ./...
 
-cd /home/rydzu/strata/monofs
+cd ~/strata/monofs
 go test ./internal/storage/logengine ./internal/server ./internal/router
 
-cd /home/rydzu/strata/guardian
+cd ~/strata/guardian
 go test ./internal/ui ./internal/domain/... ./internal/awsread
 ```
 

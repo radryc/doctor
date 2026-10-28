@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/proxy"
 )
 
 // Signal is one telemetry signal exposed by a federation target.

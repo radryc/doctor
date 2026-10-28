@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/rydzu/ainfra/doctor/internal/buildinfo"
+	"github.com/radryc/doctor/internal/buildinfo"
 )
 
 func TestHandlerBuildInfoReturnsStampedRelease(t *testing.T) {

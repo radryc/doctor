@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rydzu/ainfra/doctor/internal/federation"
+	"github.com/radryc/doctor/internal/federation"
 	"sigs.k8s.io/yaml"
 )
 

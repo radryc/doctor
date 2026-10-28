@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/access"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	"github.com/rydzu/ainfra/doctor/internal/tempo"
+	"github.com/radryc/doctor/internal/access"
+	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/tempo"
 )
 
 // ListServices returns the union of trace service names across backends.

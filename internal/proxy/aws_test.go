@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	awsstore "github.com/rydzu/ainfra/doctor/internal/store/aws"
+	awsstore "github.com/radryc/doctor/internal/store/aws"
 )
 
 type fakeAWSClient struct {

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	"github.com/rydzu/ainfra/doctor/internal/wal"
+	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/wal"
 )
 
 type metricBufferTestWriter struct {

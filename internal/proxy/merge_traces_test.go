@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	"github.com/rydzu/ainfra/doctor/internal/tempo"
+	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/tempo"
 )
 
 func traceSpan(traceID, spanID, service string, start time.Time) segment.TraceRecord {

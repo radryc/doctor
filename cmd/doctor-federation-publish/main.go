@@ -8,8 +8,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/rydzu/ainfra/doctor/internal/federation"
-	monofsstore "github.com/rydzu/ainfra/doctor/internal/store/monofs"
+	"github.com/radryc/doctor/internal/federation"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
 
 func main() {

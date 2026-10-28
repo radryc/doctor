@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 func TestBroadSelectorRangeIsRejected(t *testing.T) {

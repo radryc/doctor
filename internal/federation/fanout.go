@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/proxy"
 )
 
 type fanoutResult[T any] struct {

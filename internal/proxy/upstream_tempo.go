@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
-	"github.com/rydzu/ainfra/doctor/internal/tempo"
+	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/tempo"
 )
 
 // TempoHTTPUpstream queries a remote Tempo-compatible HTTP API.

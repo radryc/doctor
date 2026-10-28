@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/proxy"
 )
 
 // HTTPQuerier executes PromQL through doctor-query's Prometheus API.

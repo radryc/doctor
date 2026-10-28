@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // MetricBatch is a group of metric point records staged together in the WAL.

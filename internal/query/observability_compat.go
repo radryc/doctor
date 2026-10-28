@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/radryc/monofs/pkg/authz/policy"
-	"github.com/rydzu/ainfra/doctor/internal/proxy"
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 type rawLogQueryBackend interface {

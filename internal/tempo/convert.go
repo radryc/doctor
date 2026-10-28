@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/segment"
+	"github.com/radryc/doctor/internal/segment"
 )
 
 // TraceFromRecords converts internal span records into the OTLP-JSON trace

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rydzu/ainfra/doctor/internal/store"
+	"github.com/radryc/doctor/internal/store"
 )
 
 // MetadataFetcher retrieves discovery metadata from one pusher's read API.
