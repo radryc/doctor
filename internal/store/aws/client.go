@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -148,6 +149,10 @@ type Client struct {
 	token       string
 	tokenSource TokenSource
 	httpClient  *http.Client
+
+	healthMu      sync.Mutex
+	healthChecked time.Time
+	healthErr     error
 }
 
 // NewClient builds a client for the given base URL.
@@ -172,6 +177,49 @@ func NewClientWithTokenSource(baseURL string, source TokenSource) *Client {
 // Enabled reports whether a backend URL is configured.
 func (c *Client) Enabled() bool {
 	return c != nil && c.baseURL != ""
+}
+
+const (
+	awsHealthCacheTTL     = 10 * time.Second
+	awsHealthProbeTimeout = 2 * time.Second
+)
+
+// Health probes the pusher read API with a short timeout and caches the
+// result briefly. The federation status pill and metric discovery both use it
+// so an unreachable backend fails fast instead of waiting for the full query
+// timeout.
+func (c *Client) Health(ctx context.Context) error {
+	if !c.Enabled() {
+		return fmt.Errorf("aws backend is not configured")
+	}
+	c.healthMu.Lock()
+	if !c.healthChecked.IsZero() && time.Since(c.healthChecked) < awsHealthCacheTTL {
+		err := c.healthErr
+		c.healthMu.Unlock()
+		return err
+	}
+	c.healthMu.Unlock()
+
+	probeCtx, cancel := context.WithTimeout(ctx, awsHealthProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, c.baseURL+"/healthz", nil)
+	if err == nil {
+		var resp *http.Response
+		resp, err = c.doHTTP(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+			_ = resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				err = &HTTPError{StatusCode: resp.StatusCode, Body: "healthz"}
+			}
+		}
+	}
+
+	c.healthMu.Lock()
+	c.healthChecked = time.Now()
+	c.healthErr = err
+	c.healthMu.Unlock()
+	return err
 }
 
 // ListServices returns X-Ray services with their AWS partition metadata. It

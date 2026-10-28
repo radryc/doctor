@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -239,6 +240,47 @@ func TestEnforcedAccessDeniesNativeTraceAndLogHandlers(t *testing.T) {
 	if logRec.Code != http.StatusForbidden {
 		t.Fatalf("log status = %d, want 403 (body=%s)", logRec.Code, logRec.Body.String())
 	}
+}
+
+func TestProxyEndpointsHandlerMarksUnhealthyAWS(t *testing.T) {
+	svc := &Service{
+		defaultTenant: "default",
+		logEngine:     &fakeLogEngineBackend{},
+		aws:           &fakeAWSBackend{healthErr: errors.New("aws backend down")},
+	}
+	router := newProxyTestRouter(t, svc)
+	if err := router.Register(proxy.Backend{
+		Name:    "aws",
+		Kind:    proxy.KindAWS,
+		Signals: []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs, proxy.SignalTraces},
+		Policy:  proxy.PolicyFallback,
+	}, proxy.Upstreams{}); err != nil {
+		t.Fatalf("register aws: %v", err)
+	}
+	svc.SetProxyRouter(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/proxy/endpoints", nil)
+	rec := httptest.NewRecorder()
+	svc.handleProxyEndpoints(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var resp struct {
+		Endpoints []proxy.EndpointInfo `json:"endpoints"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, endpoint := range resp.Endpoints {
+		if endpoint.Name == "aws" {
+			if endpoint.Healthy {
+				t.Fatalf("aws endpoint healthy = true, want false")
+			}
+			return
+		}
+	}
+	t.Fatalf("aws endpoint not found in %#v", resp.Endpoints)
 }
 
 func TestProxyEndpointsHandler(t *testing.T) {

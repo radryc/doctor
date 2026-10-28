@@ -612,6 +612,10 @@ func TestHandleLogServicesReturnsCanonicalIdentities(t *testing.T) {
 
 func TestHandleLogServicesIncludesFilteredAWSLogGroups(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
 		if r.URL.Path != "/v1/aws/log-groups" {
 			http.NotFound(w, r)
 			return

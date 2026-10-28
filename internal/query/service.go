@@ -16,13 +16,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz"
-	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/federation"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
+	"github.com/radryc/monofs/pkg/authz"
+	"github.com/radryc/monofs/pkg/authz/policy"
 )
 
 // LogEngineBackend is the interface used for logs, metrics, and trace queries.
@@ -1723,8 +1723,10 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 		addIdentity(part, "", "", svc.Name)
 	}
 	logGroups := make([]string, 0)
-	if strings.Contains(include, "aws") && s.awsReady() {
-		for _, group := range proxy.AWSLogGroups(r.Context(), s.aws) {
+	if strings.Contains(include, "aws") && s.awsDiscoveryReady(r.Context()) {
+		awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		for _, group := range proxy.AWSLogGroups(awsCtx, s.aws) {
 			groupPartition := proxy.LogGroupPartition(group)
 			if groupPartition == "" {
 				continue
