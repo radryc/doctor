@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Check, Copy, FileText, Link2 } from "lucide-react";
+import { Check, Copy, FileText, Link2, Loader2 } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { useTimeRange } from "../context/TimeRangeContext";
 import { copyText } from "../lib/clipboard";
 import { splitServiceIdentity } from "../lib/logs";
 import TraceDetails, { fmtTime } from "../components/charts/TraceDetails";
@@ -167,13 +168,14 @@ export default function TracesPage() {
   const { config } = useConfig();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const tr = useTimeRange();
+  const { from, to } = tr.resolve();
+  const rangeLabel = tr.rangeString();
 
   const focusedTraceId = searchParams.get("trace_id") ?? "";
-  const initialRange = Number(searchParams.get("range"));
 
   const initialService = searchParams.get("service") ?? "";
   const initialIdentity = splitServiceIdentity(initialService);
-  const [minutes, setMinutes] = useState([15, 60, 360, 1440].includes(initialRange) ? initialRange : 60);
   const [service, setService] = useState(initialIdentity ? "" : initialService);
   const [partitionFilter, setPartitionFilter] = useState(
     searchParams.get("partition") ?? initialIdentity?.partition ?? ""
@@ -190,7 +192,7 @@ export default function TracesPage() {
   const [identities, setIdentities] = useState<LogIdentityInfo[]>([]);
   const [partitions, setPartitions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState("Searching…");
+  const [status, setStatus] = useState("Fetching traces…");
   const [copiedView, setCopiedView] = useState(false);
   const [inputVal, setInputVal] = useState("");
   const [page, setPage] = useState(1);
@@ -215,8 +217,6 @@ export default function TracesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const to = new Date();
-      const from = new Date(to.getTime() - minutes * 60000);
       const params = new URLSearchParams({
         tenant: config.default_tenant,
         from: from.toISOString(),
@@ -241,7 +241,7 @@ export default function TracesPage() {
     } finally {
       setLoading(false);
     }
-  }, [config.default_tenant, minutes, service, partitionFilter, intentFilter, assetFilter, pageCursor]);
+  }, [config.default_tenant, from, to, service, partitionFilter, intentFilter, assetFilter, pageCursor]);
 
   // Load the service list for the selected partition (and the full partition
   // list seen in telemetry).
@@ -309,8 +309,15 @@ export default function TracesPage() {
   // replace the current investigation window without a full remount.
   const paramKey = searchParams.toString();
   useEffect(() => {
-    const range = Number(searchParams.get("range"));
-    if ([15, 60, 360, 1440].includes(range)) setMinutes(range);
+    const rawRange = (searchParams.get("range") ?? "").trim();
+    if (rawRange) {
+      let preset = rawRange;
+      if (/^\d+$/.test(rawRange)) {
+        const mins = Number(rawRange);
+        preset = mins <= 5 ? "5m" : mins <= 15 ? "15m" : mins <= 60 ? "1h" : mins <= 360 ? "6h" : "24h";
+      }
+      tr.setRelative(preset);
+    }
     const nextService = searchParams.get("service") ?? "";
     const identity = splitServiceIdentity(nextService);
     setPartitionFilter(searchParams.get("partition") ?? identity?.partition ?? "");
@@ -361,11 +368,9 @@ export default function TracesPage() {
     return true;
   });
 
-  const rangeLabel = minutes < 60 ? `${minutes}m` : `${minutes / 60}h`;
-
   useEffect(() => {
     if (loading) {
-      setStatus("Searching…");
+      setStatus("Fetching traces…");
     } else if (loadError) {
       setStatus("Error: " + loadError);
     } else {
@@ -401,7 +406,7 @@ export default function TracesPage() {
 
   const copyViewLink = () => {
     const params = new URLSearchParams();
-    params.set("range", String(minutes));
+    params.set("range", rangeLabel);
     if (service) params.set("service", service);
     if (partitionFilter) params.set("partition", partitionFilter);
     if (intentFilter) params.set("intent", intentFilter);
@@ -424,8 +429,6 @@ export default function TracesPage() {
       />
     );
   }
-
-  const presets = [15, 60, 360, 1440];
 
   const changePartitionFilter = (next: string) => {
     setPartitionFilter(next);
@@ -461,20 +464,6 @@ export default function TracesPage() {
           <p>{status}</p>
         </div>
         <div className="xp-toolbar">
-          <div className="xp-presets">
-            {presets.map((m) => (
-              <button
-                key={m}
-                className={"xp-preset" + (minutes === m ? " xp-active" : "")}
-                onClick={() => {
-                  setMinutes(m);
-                  resetPagination();
-                }}
-              >
-                {m < 60 ? `${m}m` : `${m / 60}h`}
-              </button>
-            ))}
-          </div>
           <label className="filter-label">
             Partition
             <select
@@ -579,7 +568,12 @@ export default function TracesPage() {
             <span>Time</span>
           </div>
           <div className="xp-rows">
-            {filtered.length === 0 ? (
+            {loading && traces.length === 0 ? (
+              <div className="xp-empty flex items-center justify-center gap-2">
+                <Loader2 size={14} className="animate-spin" />
+                Fetching traces…
+              </div>
+            ) : filtered.length === 0 ? (
               <div className="xp-empty">
                 {traces.length === 0
                   ? "No traces found for this time range."
