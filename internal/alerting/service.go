@@ -127,6 +127,7 @@ func (s *Service) Apply(ctx context.Context, incoming Alert) (*Alert, error) {
 	if incoming.CreatedAt.IsZero() {
 		incoming.CreatedAt = now
 	}
+	incoming.UpdatedAt = now
 	previous, err := s.Store.GetAlert(ctx, incoming.Tenant, incoming.Partition, incoming.Fingerprint)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
