@@ -137,6 +137,18 @@ export interface ReceiverConfig {
   routes: Route[];
 }
 
+export interface AlertRuleGroupSummary {
+  tenant: string;
+  partition: string;
+  group: string;
+  interval: string;
+  rules: number;
+}
+
+export interface AlertRuleGroupsResponse {
+  groups: AlertRuleGroupSummary[];
+}
+
 export interface SubspaceRequest {
   tenant?: string;
   source?: string;

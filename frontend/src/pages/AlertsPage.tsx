@@ -23,11 +23,13 @@ import type {
   SourceStatus,
   AWSPolicy,
   SubspaceRequest,
+  AlertRuleGroupSummary,
 } from "../types/alerts";
 
 const TABS = [
   { key: "inbox", label: "Inbox" },
   { key: "subspace", label: "Subspace" },
+  { key: "rules", label: "Rules" },
   { key: "silences", label: "Silences" },
   { key: "sources", label: "Sources" },
   { key: "receivers", label: "Receivers" },
@@ -92,6 +94,10 @@ export default function AlertsPage() {
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [subspaceAlerts, setSubspaceAlerts] = useState<Alert[]>([]);
+  const [ruleGroups, setRuleGroups] = useState<AlertRuleGroupSummary[]>([]);
+  const [ruleSelected, setRuleSelected] = useState<AlertRuleGroupSummary | null>(null);
+  const [ruleYaml, setRuleYaml] = useState("");
+  const [ruleResult, setRuleResult] = useState("");
   const [silences, setSilences] = useState<Silence[]>([]);
   const [sources, setSources] = useState<SourceStatus[]>([]);
   const [policy, setPolicy] = useState<AWSPolicy | null>(null);
@@ -167,6 +173,10 @@ export default function AlertsPage() {
         const p = new URLSearchParams({ tenant, scope: "subspace" });
         const data = await api.getAlerts(p);
         setSubspaceAlerts(data.alerts ?? []);
+      }
+      if (tab === "rules" && partition) {
+        const data = await api.getAlertRuleGroups(tenant, partition);
+        setRuleGroups(data.groups ?? []);
       }
       if (tab === "silences") {
         const p = new URLSearchParams(params);
@@ -344,6 +354,67 @@ export default function AlertsPage() {
       await loadTab();
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not resolve subspace alert");
+    }
+  };
+
+  const openRule = async (group: AlertRuleGroupSummary) => {
+    setRuleSelected(group);
+    setRuleResult("");
+    try {
+      setRuleYaml(await api.getAlertRuleGroup(group.tenant, group.partition, group.group));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not load rule group");
+    }
+  };
+
+  const newRule = () => {
+    setRuleSelected({ tenant, partition, group: "new-group", interval: "1m", rules: 0 });
+    setRuleYaml(`version: 1
+groups:
+  - name: new-group
+    tenant: ${tenant}
+    partition: ${partition}
+    interval: 1m
+    rules:
+      - alert: ExampleAlert
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+`);
+    setRuleResult("");
+  };
+
+  const saveRule = async () => {
+    if (!ruleSelected) return;
+    try {
+      await api.putAlertRuleGroup(ruleSelected.tenant, ruleSelected.partition, ruleSelected.group, ruleYaml);
+      setNotice("Rule group saved");
+      await loadTab();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not save rule group");
+    }
+  };
+
+  const testRule = async () => {
+    if (!ruleSelected) return;
+    try {
+      const result = await api.testAlertRuleGroup(ruleSelected.tenant, ruleSelected.partition, ruleSelected.group);
+      setRuleResult(JSON.stringify(result, null, 2));
+    } catch (e) {
+      setRuleResult(e instanceof Error ? e.message : "evaluation failed");
+    }
+  };
+
+  const deleteRule = async () => {
+    if (!ruleSelected) return;
+    try {
+      await api.deleteAlertRuleGroup(ruleSelected.tenant, ruleSelected.partition, ruleSelected.group);
+      setRuleSelected(null);
+      setNotice("Rule group deleted");
+      await loadTab();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not delete rule group");
     }
   };
 
@@ -592,6 +663,51 @@ export default function AlertsPage() {
                 </table>
               </div>
             </section>
+          )}
+
+          {tab === "rules" && partition && (
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+              <section className="rounded-lg border border-slate-800 bg-slate-900/50">
+                <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+                  <div>
+                    <h2 className="text-sm font-semibold">Sentinel rules</h2>
+                    <p className="text-[11px] text-slate-500">PromQL alert rules for {partition}.</p>
+                  </div>
+                  {can(caps, "alerts.rules.write") && <button type="button" onClick={newRule} className="btn text-xs">New</button>}
+                </div>
+                <div className="divide-y divide-slate-800">
+                  {ruleGroups.map((group) => (
+                    <button key={`${group.tenant}/${group.partition}/${group.group}`} type="button" onClick={() => void openRule(group)} className={`block w-full px-4 py-3 text-left hover:bg-slate-800/60 ${ruleSelected?.group === group.group ? "bg-slate-800/70" : ""}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-slate-200">{group.group}</span>
+                        <span className="text-[10px] text-slate-500">{group.rules} rules</span>
+                      </div>
+                      <div className="mt-1 text-[10px] text-slate-500">{group.tenant} · {group.partition} · every {group.interval}</div>
+                    </button>
+                  ))}
+                  {ruleGroups.length === 0 && <div className="px-4 py-10 text-center text-xs text-slate-500">No Sentinel rules in this partition.</div>}
+                </div>
+              </section>
+              <section className="rounded-lg border border-slate-800 bg-slate-900/50">
+                {ruleSelected ? (
+                  <div className="flex h-full flex-col">
+                    <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
+                      <input value={ruleSelected.group} onChange={(e) => setRuleSelected({ ...ruleSelected, group: e.target.value })} className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs" />
+                      <span className="text-[10px] text-slate-500">{ruleSelected.tenant} · {ruleSelected.partition}</span>
+                      <div className="ml-auto flex gap-2">
+                        <button type="button" onClick={() => void testRule()} disabled={!can(caps, "alerts.rules.read")} className="btn text-xs">Test</button>
+                        <button type="button" onClick={() => void saveRule()} disabled={!can(caps, "alerts.rules.write")} className="btn btn--primary text-xs">Save</button>
+                        <button type="button" onClick={() => void deleteRule()} disabled={!can(caps, "alerts.rules.write")} className="btn text-xs text-rose-300">Delete</button>
+                      </div>
+                    </div>
+                    <textarea value={ruleYaml} onChange={(e) => setRuleYaml(e.target.value)} className="min-h-[260px] flex-1 resize-none bg-slate-950 p-4 font-mono text-[11px] text-slate-300" spellCheck={false} />
+                    {ruleResult && <pre className="max-h-48 overflow-auto border-t border-slate-800 bg-slate-950 p-3 text-[10px] text-slate-300">{ruleResult}</pre>}
+                  </div>
+                ) : (
+                  <div className="flex h-full min-h-[240px] items-center justify-center p-6 text-xs text-slate-500">Select a rule group or create a new one.</div>
+                )}
+              </section>
+            </div>
           )}
 
           {tab === "silences" && partition && (

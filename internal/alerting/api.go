@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"sigs.k8s.io/yaml"
 )
 
 // API serves the Sentinel HTTP surface.
@@ -102,6 +104,10 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleDelivery(w, r)
 	case path == "rules":
 		a.handleRules(w, r)
+	case path == "rules/preview":
+		a.handleRulePreview(w, r)
+	case path == "rules/test":
+		a.handleRuleTest(w, r)
 	case strings.HasPrefix(path, "rules/"):
 		a.handleRule(w, r, strings.TrimPrefix(path, "rules/"))
 	default:
@@ -443,12 +449,156 @@ func (a *API) handleDelivery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"delivery": filtered, "returned": len(filtered)})
 }
 
-func (a *API) handleRules(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"groups": []any{}})
+func (a *API) handleRules(w http.ResponseWriter, r *http.Request) {
+	tenant, partition := tenantPartition(r)
+	identity := IdentityFromRequest(r, a.AllowAll)
+	if !identity.Can(CapRulesRead, tenant, partition) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	refs, err := a.Store.ListRuleGroups(r.Context(), tenant)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type summary struct {
+		Tenant    string `json:"tenant"`
+		Partition string `json:"partition"`
+		Group     string `json:"group"`
+		Interval  string `json:"interval"`
+		Rules     int    `json:"rules"`
+	}
+	out := make([]summary, 0, len(refs))
+	for _, ref := range refs {
+		if partition != "" && ref.Partition != partition {
+			continue
+		}
+		interval := ""
+		rules := 0
+		if ref.File != nil && len(ref.File.Groups) > 0 {
+			interval = ref.File.Groups[0].IntervalOrDefault().String()
+			rules = len(ref.File.Groups[0].Rules)
+		}
+		out = append(out, summary{Tenant: ref.Tenant, Partition: ref.Partition, Group: ref.Group, Interval: interval, Rules: rules})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": out})
 }
 
-func (a *API) handleRule(w http.ResponseWriter, _ *http.Request, _ string) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "not implemented"})
+func (a *API) handleRule(w http.ResponseWriter, r *http.Request, rest string) {
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 3 {
+		writeError(w, http.StatusBadRequest, "path must be /v1/alerts/rules/{tenant}/{partition}/{group}")
+		return
+	}
+	tenant, partition, group := parts[0], parts[1], parts[2]
+	identity := IdentityFromRequest(r, a.AllowAll)
+	switch r.Method {
+	case http.MethodGet:
+		if !identity.Can(CapRulesRead, tenant, partition) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		file, err := a.Store.GetRuleGroup(r.Context(), tenant, partition, group)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		data, err := yaml.Marshal(file)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/yaml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	case http.MethodPut:
+		if !identity.Can(CapRulesWrite, tenant, partition) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		file, err := ParseRuleFile(body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := a.Store.PutRuleGroup(r.Context(), tenant, partition, group, file); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "tenant": tenant, "partition": partition, "group": group})
+	case http.MethodDelete:
+		if !identity.Can(CapRulesWrite, tenant, partition) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		if err := a.Store.DeleteRuleGroup(r.Context(), tenant, partition, group); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "success"})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *API) handleRulePreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if a.Service.Querier == nil {
+		writeError(w, http.StatusServiceUnavailable, "query backend is not configured")
+		return
+	}
+	var req struct {
+		Expr string `json:"expr"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	data, partial, err := a.Service.Querier.PromInstant(r.Context(), req.Expr, a.now())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": data, "partial": partial})
+}
+
+func (a *API) handleRuleTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	tenant, partition := tenantPartition(r)
+	group := strings.TrimSpace(r.URL.Query().Get("group"))
+	identity := IdentityFromRequest(r, a.AllowAll)
+	if !identity.Can(CapRulesRead, tenant, partition) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	file, err := a.Store.GetRuleGroup(r.Context(), tenant, partition, group)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	results := make([]RuleEvalResult, 0)
+	for _, spec := range file.Groups {
+		results = append(results, a.Service.EvaluateRuleGroup(r.Context(), spec)...)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+func (a *API) now() time.Time {
+	if a.Now != nil {
+		return a.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func tenantPartition(r *http.Request) (string, string) {
