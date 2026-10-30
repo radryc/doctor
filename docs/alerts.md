@@ -121,6 +121,31 @@ Capabilities are checked server-side. Unauthorized partitions return 404.
 `DOCTOR_SENTINEL_AUTH_ALLOW_ALL=true` is available but must not be used in
 production.
 
+## GoAlert receiver
+
+Create a **Generic API** integration key on the GoAlert service you want to
+receive Sentinel alerts:
+
+1. GoAlert → Service → Integration Keys → Add Key → Generic API.
+2. Copy the integration key.
+3. Add a Sentinel receiver:
+
+```yaml
+receivers:
+  - name: goalert
+    type: goalert
+    url: https://goalert.example.com/api/v2/generic/incoming
+    secretEnv: GOALERT_INTEGRATION_KEY
+routes:
+  - name: default
+    receivers: [goalert]
+```
+
+Sentinel sends `summary`, `details`, `dedup`, and the integration key as form
+parameters. Resolved alerts send `action=close` with the same `dedup` value, so
+GoAlert closes the matching alert. The integration key is read from the named
+environment variable and is never stored in MonoFS.
+
 ## Configuration
 
 ```text

@@ -11,7 +11,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -126,6 +128,8 @@ func (d *Dispatcher) send(ctx context.Context, receiver Receiver, alert Alert) e
 		return d.sendWebhook(ctx, receiver, alert)
 	case "slack":
 		return d.sendSlack(ctx, receiver, alert)
+	case "goalert":
+		return d.sendGoAlert(ctx, receiver, alert)
 	default:
 		return fmt.Errorf("alerting: unsupported receiver type %q", receiver.Type)
 	}
@@ -170,6 +174,71 @@ func (d *Dispatcher) sendSlack(ctx context.Context, receiver Receiver, alert Ale
 		req.Header.Set(key, value)
 	}
 	return d.do(req)
+}
+
+func (d *Dispatcher) sendGoAlert(ctx context.Context, receiver Receiver, alert Alert) error {
+	values := urlValues{
+		"summary": {goAlertSummary(alert)},
+		"details": {goAlertDetails(alert)},
+		"dedup":   {alert.Fingerprint},
+	}
+	if alert.Status == StatusResolved {
+		values["action"] = []string{"close"}
+	}
+	if token := receiverSecret(receiver); token != "" {
+		values["token"] = []string{token}
+	}
+	body := values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, receiver.URL, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "doctor-sentinel")
+	for key, value := range receiver.Headers {
+		req.Header.Set(key, value)
+	}
+	return d.do(req)
+}
+
+// urlValues is a small alias to keep the GoAlert payload readable.
+type urlValues map[string][]string
+
+func (v urlValues) Encode() string {
+	values := make(url.Values, len(v))
+	for key, items := range v {
+		values[key] = append([]string(nil), items...)
+	}
+	return values.Encode()
+}
+
+func goAlertSummary(alert Alert) string {
+	name := firstNonEmpty(alert.Labels["alertname"], "Alert")
+	if summary := alert.Annotations["summary"]; summary != "" {
+		return fmt.Sprintf("[%s] %s: %s", strings.ToUpper(alert.Severity), name, summary)
+	}
+	return fmt.Sprintf("[%s] %s", strings.ToUpper(alert.Severity), name)
+}
+
+func goAlertDetails(alert Alert) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Source:** %s\n\n", alert.Source)
+	fmt.Fprintf(&b, "**Partition:** %s\n\n", alert.Partition)
+	fmt.Fprintf(&b, "**State:** %s\n\n", alert.Status)
+	fmt.Fprintf(&b, "**Severity:** %s\n\n", alert.Severity)
+	if summary := alert.Annotations["summary"]; summary != "" {
+		fmt.Fprintf(&b, "%s\n\n", summary)
+	}
+	b.WriteString("**Labels**\n\n")
+	keys := make([]string, 0, len(alert.Labels))
+	for key := range alert.Labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(&b, "- `%s=%s`\n", key, alert.Labels[key])
+	}
+	return b.String()
 }
 
 func (d *Dispatcher) do(req *http.Request) error {
