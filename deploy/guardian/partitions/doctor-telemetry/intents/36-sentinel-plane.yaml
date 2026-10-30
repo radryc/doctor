@@ -1,0 +1,39 @@
+apiVersion: guardian/v1alpha1
+kind: Intent
+metadata:
+  name: sentinel-plane
+spec:
+  intentType: standard
+  joins:
+    - query-plane
+  targetPusher: docker-main
+  target:
+    cluster: docker-main
+  locked: false
+  assets:
+    - type: Compute
+      name: doctor-sentinel
+      properties:
+        image: doctor-sentinel:latest
+        env:
+          DOCTOR_SENTINEL_ENABLED: "true"
+          DOCTOR_SENTINEL_HTTP_ADDR: :18082
+          DOCTOR_SENTINEL_QUERY_URL: http://doctor-query:18080
+          DOCTOR_SENTINEL_RULER_ID: doctor-sentinel
+          DOCTOR_SENTINEL_EVAL_SHARDS: "1"
+          DOCTOR_SENTINEL_SHARD_INDEX: "0"
+          DOCTOR_SENTINEL_LEASE_TTL: 30s
+          DOCTOR_SENTINEL_LEASE_RENEW: 10s
+          DOCTOR_SENTINEL_DELIVERY_ENABLED: "true"
+          DOCTOR_SENTINEL_AUTH_ALLOW_ALL: "true"
+          DOCTOR_SENTINEL_STORE_ROOT: /doctor/v1/alerts
+          DOCTOR_SENTINEL_DEFAULT_TENANT: default
+          DOCTOR_MONOFS_LOGENGINE_ADDR: host.docker.internal:9090
+          # Dev-only token; override in production with a Guardian-issued token
+          # that may write /doctor/**.
+          DOCTOR_MONOFS_TOKEN: dev-guardian-token
+          DOCTOR_MONOFS_CLIENT_ID: doctor-sentinel
+        ports:
+          - name: http
+            containerPort: 18082
+            protocol: TCP

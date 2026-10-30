@@ -18,6 +18,7 @@ spec:
         env:
           DOCTOR_QUERY_HTTP_ADDR: :18080
           DOCTOR_RULES_URL: http://doctor-rules:18081
+          DOCTOR_SENTINEL_URL: http://doctor-sentinel:18082
           DOCTOR_DEFAULT_TENANT: default
           DOCTOR_MONOFS_LOGENGINE_ADDR: host.docker.internal:9090
           DOCTOR_QUERY_GUARDIAN_HEALTH_ENABLED: "true"
