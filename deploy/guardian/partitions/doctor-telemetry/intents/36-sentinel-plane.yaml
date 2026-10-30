@@ -26,6 +26,8 @@ spec:
           DOCTOR_SENTINEL_LEASE_RENEW: 10s
           DOCTOR_SENTINEL_DELIVERY_ENABLED: "true"
           DOCTOR_SENTINEL_AUTH_ALLOW_ALL: "true"
+          DOCTOR_SENTINEL_GUARDIAN_HMAC_SECRET: dev-sentinel-hmac
+          DOCTOR_SENTINEL_SERVICE_TOKEN: dev-sentinel-service-token
           DOCTOR_SENTINEL_STORE_ROOT: /doctor/v1/alerts
           DOCTOR_SENTINEL_DEFAULT_TENANT: default
           DOCTOR_MONOFS_LOGENGINE_ADDR: host.docker.internal:9090
