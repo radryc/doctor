@@ -1,9 +1,18 @@
 export interface Alert {
   id: string;
   fingerprint: string;
+  scope?: string;
   source: string;
   tenant: string;
   partition: string;
+  sourcePartition?: string;
+  audience?: {
+    type: string;
+    partitions?: string[];
+    groups?: string[];
+  };
+  dedupeKey?: string;
+  expiresAt?: string | null;
   status: "pending" | "firing" | "resolved" | "no_data" | "error" | string;
   severity: string;
   labels: Record<string, string>;
@@ -126,4 +135,21 @@ export interface Route {
 export interface ReceiverConfig {
   receivers: Receiver[];
   routes: Route[];
+}
+
+export interface SubspaceRequest {
+  tenant?: string;
+  source?: string;
+  sourcePartition?: string;
+  severity?: string;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  audience: {
+    type: "tenant-admins" | "partition-owners" | "partitions" | "groups" | "all" | string;
+    partitions?: string[];
+    groups?: string[];
+  };
+  dedupeKey: string;
+  startsAt?: string;
+  expiresAt?: string;
 }

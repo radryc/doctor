@@ -36,6 +36,15 @@ func (a *API) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant, partition := tenantPartition(r)
 	identity := IdentityFromRequest(r, a.AllowAll)
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "subspace") {
+		alerts, err := a.Service.ListSubspace(r.Context(), tenant, identity)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"alerts": alerts, "returned": len(alerts)})
+		return
+	}
 	if !identity.Can(CapAlertsRead, tenant, partition) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -69,6 +78,12 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "intake/guardian":
 		a.handleGuardianIntake(w, r)
+	case path == "subspace":
+		a.handleSubspace(w, r)
+	case path == "subspace/preview":
+		a.handleSubspacePreview(w, r)
+	case strings.HasPrefix(path, "subspace/"):
+		a.handleSubspaceResolve(w, r, strings.TrimPrefix(path, "subspace/"))
 	case path == "silences":
 		a.handleSilences(w, r)
 	case strings.HasPrefix(path, "silences/"):
@@ -170,6 +185,73 @@ func (a *API) handleGuardianIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "alert": alert})
+}
+
+func (a *API) handleSubspace(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	identity := IdentityFromRequest(r, a.AllowAll)
+	tenant, _ := tenantPartition(r)
+	if !identity.Can(CapSubspaceWrite, tenant, "") {
+		writeError(w, http.StatusForbidden, "subspace broadcast requires an admin or service token")
+		return
+	}
+	var req SubspaceRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	alert, err := a.Service.UpsertSubspace(r.Context(), req, tenant, identity.User)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "alert": alert})
+}
+
+func (a *API) handleSubspacePreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req SubspaceRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"audienceType": req.Audience.Type,
+		"partitions":   req.Audience.Partitions,
+		"groups":       req.Audience.Groups,
+		"channels":     "configured receivers",
+		"note":         "preview counts are finalized by the audience resolver",
+	})
+}
+
+func (a *API) handleSubspaceResolve(w http.ResponseWriter, r *http.Request, rest string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	dedupeKey := strings.TrimSuffix(strings.Trim(rest, "/"), "/resolve")
+	identity := IdentityFromRequest(r, a.AllowAll)
+	tenant, _ := tenantPartition(r)
+	if !identity.Can(CapSubspaceWrite, tenant, "") {
+		writeError(w, http.StatusForbidden, "subspace resolve requires an admin or service token")
+		return
+	}
+	alert, err := a.Service.ResolveSubspace(r.Context(), tenant, dedupeKey)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, alert)
 }
 
 func (a *API) handleSilences(w http.ResponseWriter, r *http.Request) {

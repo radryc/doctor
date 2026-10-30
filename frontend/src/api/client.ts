@@ -36,6 +36,7 @@ import type {
   SourceListResponse,
   DeliveryResponse,
   ReceiverConfig,
+  SubspaceRequest,
 } from "../types/alerts";
 
 async function fetchText(url: string): Promise<string> {
@@ -272,6 +273,19 @@ export const api = {
 
   getDelivery: (params: URLSearchParams) =>
     fetchJSON<DeliveryResponse>(`/v1/alerts/delivery?${params}`),
+
+  createSubspaceAlert: (tenant: string, req: SubspaceRequest) =>
+    fetchJSONBody<{ status: string; alert: Alert }>(
+      `/v1/alerts/subspace?tenant=${encodeURIComponent(tenant)}`,
+      "POST",
+      req
+    ),
+
+  resolveSubspaceAlert: (tenant: string, id: string) =>
+    fetchJSON<Alert>(
+      `/v1/alerts/subspace/${encodeURIComponent(id)}/resolve?tenant=${encodeURIComponent(tenant)}`,
+      "POST"
+    ),
 
   getReceivers: () => fetchJSON<ReceiverConfig>("/v1/alerts/receivers"),
 

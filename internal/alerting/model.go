@@ -26,26 +26,31 @@ const (
 
 // Alert is the canonical alert instance.
 type Alert struct {
-	ID             string            `json:"id"`
-	Fingerprint    string            `json:"fingerprint"`
-	Source         string            `json:"source"`
-	Tenant         string            `json:"tenant"`
-	Partition      string            `json:"partition"`
-	Status         string            `json:"status"`
-	Severity       string            `json:"severity"`
-	Labels         map[string]string `json:"labels"`
-	Annotations    map[string]string `json:"annotations,omitempty"`
-	StartsAt       time.Time         `json:"startsAt"`
-	EndsAt         *time.Time        `json:"endsAt,omitempty"`
-	Value          string            `json:"value,omitempty"`
-	Delivery       string            `json:"delivery"`
-	Acked          bool              `json:"acked,omitempty"`
-	AckedBy        string            `json:"ackedBy,omitempty"`
-	AckedAt        *time.Time        `json:"ackedAt,omitempty"`
-	SilenceIDs     []string          `json:"silenceIds,omitempty"`
-	LastNotifiedAt *time.Time        `json:"lastNotifiedAt,omitempty"`
-	CreatedAt      time.Time         `json:"createdAt"`
-	UpdatedAt      time.Time         `json:"updatedAt"`
+	ID              string            `json:"id"`
+	Fingerprint     string            `json:"fingerprint"`
+	Scope           string            `json:"scope,omitempty"`
+	Source          string            `json:"source"`
+	Tenant          string            `json:"tenant"`
+	Partition       string            `json:"partition"`
+	SourcePartition string            `json:"sourcePartition,omitempty"`
+	Audience        *Audience         `json:"audience,omitempty"`
+	DedupeKey       string            `json:"dedupeKey,omitempty"`
+	ExpiresAt       *time.Time        `json:"expiresAt,omitempty"`
+	Status          string            `json:"status"`
+	Severity        string            `json:"severity"`
+	Labels          map[string]string `json:"labels"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
+	StartsAt        time.Time         `json:"startsAt"`
+	EndsAt          *time.Time        `json:"endsAt,omitempty"`
+	Value           string            `json:"value,omitempty"`
+	Delivery        string            `json:"delivery"`
+	Acked           bool              `json:"acked,omitempty"`
+	AckedBy         string            `json:"ackedBy,omitempty"`
+	AckedAt         *time.Time        `json:"ackedAt,omitempty"`
+	SilenceIDs      []string          `json:"silenceIds,omitempty"`
+	LastNotifiedAt  *time.Time        `json:"lastNotifiedAt,omitempty"`
+	CreatedAt       time.Time         `json:"createdAt"`
+	UpdatedAt       time.Time         `json:"updatedAt"`
 }
 
 // Validate checks the fields every source must provide.
@@ -75,6 +80,13 @@ func (a *Alert) Validate() error {
 		a.Delivery = DeliverySentinel
 	}
 	return nil
+}
+
+// Audience targets a subspace alert.
+type Audience struct {
+	Type       string   `json:"type" yaml:"type"`
+	Partitions []string `json:"partitions,omitempty" yaml:"partitions,omitempty"`
+	Groups     []string `json:"groups,omitempty" yaml:"groups,omitempty"`
 }
 
 // Matcher is one silence matcher.
