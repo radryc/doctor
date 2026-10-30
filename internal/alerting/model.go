@@ -48,6 +48,7 @@ type Alert struct {
 	AckedBy         string            `json:"ackedBy,omitempty"`
 	AckedAt         *time.Time        `json:"ackedAt,omitempty"`
 	SilenceIDs      []string          `json:"silenceIds,omitempty"`
+	LastSeenAt      *time.Time        `json:"lastSeenAt,omitempty"`
 	LastNotifiedAt  *time.Time        `json:"lastNotifiedAt,omitempty"`
 	CreatedAt       time.Time         `json:"createdAt"`
 	UpdatedAt       time.Time         `json:"updatedAt"`
