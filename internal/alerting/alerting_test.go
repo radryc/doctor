@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -158,6 +159,63 @@ func TestGuardianIntakeDeliversAndSilenceSuppresses(t *testing.T) {
 	case got := <-received:
 		t.Fatalf("silenced resolve was delivered: %+v", got)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestGoAlertDelivery(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	var forms []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		forms = append(forms, r.PostForm)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv("GOALERT_TEST_KEY", "key-123")
+	if err := store.PutReceiverConfig(ctx, ReceiverConfig{
+		Receivers: []Receiver{{Name: "goalert", Type: "goalert", URL: server.URL + "/api/v2/generic/incoming", SecretEnv: "GOALERT_TEST_KEY"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{Store: store, DefaultTenant: "default", DeliveryEnabled: true}
+	alert, err := service.IngestGuardian(ctx, "default", GuardianAlert{
+		Event: "partition.failing", Partition: "payments", Status: "firing",
+		Severity: "critical", Summary: "2 failing intents", FiredAt: time.Now().UTC(),
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &Dispatcher{Store: store}
+	if err := dispatcher.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(forms) != 1 {
+		t.Fatalf("forms = %d", len(forms))
+	}
+	if forms[0].Get("token") != "key-123" || forms[0].Get("dedup") != alert.Fingerprint {
+		t.Fatalf("goalert firing form = %#v", forms[0])
+	}
+	if forms[0].Get("action") != "" {
+		t.Fatalf("firing action = %q", forms[0].Get("action"))
+	}
+
+	now := time.Now().UTC()
+	if _, err := service.IngestGuardian(ctx, "default", GuardianAlert{
+		Event: "partition.recovered", Partition: "payments", Status: "resolved",
+		FiredAt: alert.StartsAt, ResolvedAt: &now,
+		Details: map[string]string{"resolvedEvent": "partition.failing"},
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(forms) != 2 {
+		t.Fatalf("forms after resolve = %d", len(forms))
+	}
+	if forms[1].Get("action") != "close" || forms[1].Get("dedup") != alert.Fingerprint {
+		t.Fatalf("goalert resolve form = %#v", forms[1])
 	}
 }
 
