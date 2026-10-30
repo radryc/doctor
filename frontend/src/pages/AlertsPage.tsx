@@ -22,10 +22,12 @@ import type {
   Silence,
   SourceStatus,
   AWSPolicy,
+  SubspaceRequest,
 } from "../types/alerts";
 
 const TABS = [
   { key: "inbox", label: "Inbox" },
+  { key: "subspace", label: "Subspace" },
   { key: "silences", label: "Silences" },
   { key: "sources", label: "Sources" },
   { key: "receivers", label: "Receivers" },
@@ -89,6 +91,7 @@ export default function AlertsPage() {
   const [partition, setPartition] = useState(config.default_partition || "");
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [subspaceAlerts, setSubspaceAlerts] = useState<Alert[]>([]);
   const [silences, setSilences] = useState<Silence[]>([]);
   const [sources, setSources] = useState<SourceStatus[]>([]);
   const [policy, setPolicy] = useState<AWSPolicy | null>(null);
@@ -108,6 +111,14 @@ export default function AlertsPage() {
   const [silenceMinutes, setSilenceMinutes] = useState("60");
   const [silenceComment, setSilenceComment] = useState("");
   const [saving, setSaving] = useState(false);
+  const [broadcastOpen, setBroadcastOpen] = useState(false);
+  const [broadcastName, setBroadcastName] = useState("PlatformNotice");
+  const [broadcastSummary, setBroadcastSummary] = useState("");
+  const [broadcastSeverity, setBroadcastSeverity] = useState("warning");
+  const [broadcastAudience, setBroadcastAudience] = useState("partition-owners");
+  const [broadcastTargets, setBroadcastTargets] = useState("");
+  const [broadcastDedupe, setBroadcastDedupe] = useState("");
+  const [broadcastMinutes, setBroadcastMinutes] = useState("60");
 
   const params = useMemo(() => {
     const p = new URLSearchParams();
@@ -152,6 +163,11 @@ export default function AlertsPage() {
     try {
       await loadCaps();
       if (tab === "inbox") await loadInbox();
+      if (tab === "subspace") {
+        const p = new URLSearchParams({ tenant, scope: "subspace" });
+        const data = await api.getAlerts(p);
+        setSubspaceAlerts(data.alerts ?? []);
+      }
       if (tab === "silences") {
         const p = new URLSearchParams(params);
         const data = await api.getSilences(p);
@@ -180,7 +196,7 @@ export default function AlertsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadCaps, loadInbox, params, tab]);
+  }, [loadCaps, loadInbox, params, tab, tenant]);
 
   useEffect(() => {
     void loadTab();
@@ -283,6 +299,51 @@ export default function AlertsPage() {
       setNotice("Receiver configuration saved");
     } catch (e) {
       setError(e instanceof Error ? e.message : "invalid receiver JSON");
+    }
+  };
+
+  const broadcast = async () => {
+    setSaving(true);
+    setError("");
+    const now = new Date();
+    const targets = broadcastTargets.split(",").map((value) => value.trim()).filter(Boolean);
+    const req: SubspaceRequest = {
+      tenant,
+      source: "sentinel",
+      sourcePartition: partition,
+      severity: broadcastSeverity,
+      dedupeKey: broadcastDedupe || `platform.${broadcastName}.${now.toISOString()}`,
+      labels: { alertname: broadcastName },
+      annotations: { summary: broadcastSummary || broadcastName },
+      audience: {
+        type: broadcastAudience,
+        ...(broadcastAudience === "partitions" || broadcastAudience === "partition-owners"
+          ? { partitions: targets }
+          : {}),
+        ...(broadcastAudience === "groups" ? { groups: targets } : {}),
+      },
+      expiresAt: new Date(now.getTime() + Number(broadcastMinutes) * 60_000).toISOString(),
+    };
+    try {
+      await api.createSubspaceAlert(tenant, req);
+      setBroadcastOpen(false);
+      setNotice("Subspace alert broadcast");
+      await loadTab();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not broadcast subspace alert");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const resolveSubspace = async (alert: Alert) => {
+    if (!alert.dedupeKey) return;
+    try {
+      await api.resolveSubspaceAlert(tenant, alert.dedupeKey);
+      setNotice("Subspace alert resolved");
+      await loadTab();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not resolve subspace alert");
     }
   };
 
@@ -484,6 +545,55 @@ export default function AlertsPage() {
             </div>
           )}
 
+          {tab === "subspace" && (
+            <section className="rounded-lg border border-slate-800 bg-slate-900/50">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
+                <div>
+                  <h2 className="text-sm font-semibold">Subspace alerts</h2>
+                  <p className="text-[11px] text-slate-500">Platform-wide events delivered to an explicit audience.</p>
+                </div>
+                {can(caps, "alerts.subspace.write") && (
+                  <button type="button" onClick={() => setBroadcastOpen(true)} className="btn btn--primary text-xs">
+                    <Send size={13} /> Broadcast
+                  </button>
+                )}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-950/70 text-slate-500">
+                    <tr><th className="px-3 py-2">Alert</th><th className="px-3 py-2">Severity</th><th className="px-3 py-2">Audience</th><th className="px-3 py-2">Source partition</th><th className="px-3 py-2">State</th><th className="px-3 py-2" /></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {subspaceAlerts.map((alert) => (
+                      <tr key={alert.fingerprint}>
+                        <td className="px-3 py-2">
+                          <div className="font-medium text-slate-200">{alert.labels.alertname}</div>
+                          <div className="text-[10px] text-slate-500">{alert.annotations?.summary}</div>
+                        </td>
+                        <td className="px-3 py-2"><span className={`rounded border px-1.5 py-0.5 text-[10px] uppercase ${severityClass(alert.severity)}`}>{alert.severity}</span></td>
+                        <td className="px-3 py-2 text-slate-400">
+                          {alert.audience?.type === "partitions" || alert.audience?.type === "partition-owners"
+                            ? (alert.audience.partitions || []).join(", ")
+                            : alert.audience?.type || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-slate-500">{alert.sourcePartition || "—"}</td>
+                        <td className="px-3 py-2"><span className={`rounded border px-1.5 py-0.5 text-[10px] uppercase ${statusClass(alert.status)}`}>{alert.status}</span></td>
+                        <td className="px-3 py-2 text-right">
+                          {can(caps, "alerts.subspace.write") && alert.status !== "resolved" && (
+                            <button type="button" onClick={() => void resolveSubspace(alert)} className="btn text-xs">Resolve</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {subspaceAlerts.length === 0 && (
+                      <tr><td colSpan={6} className="px-4 py-10 text-center text-slate-500">No subspace alerts are visible to this identity.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           {tab === "silences" && partition && (
             <section className="rounded-lg border border-slate-800 bg-slate-900/50">
               <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
@@ -603,6 +713,60 @@ export default function AlertsPage() {
           )}
         </div>
       </div>
+
+      {broadcastOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-lg rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold">Broadcast subspace alert</h2>
+                <p className="mt-1 text-[11px] text-slate-500">Deliver a platform event to an explicit audience.</p>
+              </div>
+              <button type="button" onClick={() => setBroadcastOpen(false)} className="text-slate-500 hover:text-slate-200"><XCircle size={16} /></button>
+            </div>
+            <label className="mt-4 block text-[11px] text-slate-400">Alert name</label>
+            <input value={broadcastName} onChange={(e) => setBroadcastName(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs" />
+            <label className="mt-3 block text-[11px] text-slate-400">Summary</label>
+            <input value={broadcastSummary} onChange={(e) => setBroadcastSummary(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs" />
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <label className="block text-[11px] text-slate-400">Severity
+                <select value={broadcastSeverity} onChange={(e) => setBroadcastSeverity(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs">
+                  <option value="info">Info</option>
+                  <option value="warning">Warning</option>
+                  <option value="critical">Critical</option>
+                </select>
+              </label>
+              <label className="block text-[11px] text-slate-400">Audience
+                <select value={broadcastAudience} onChange={(e) => setBroadcastAudience(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs">
+                  <option value="partition-owners">Partition owners</option>
+                  <option value="partitions">Specific partitions</option>
+                  <option value="tenant-admins">Tenant admins</option>
+                  <option value="groups">Groups</option>
+                  <option value="all">All partition users</option>
+                </select>
+              </label>
+            </div>
+            {(broadcastAudience === "partitions" || broadcastAudience === "partition-owners" || broadcastAudience === "groups") && (
+              <>
+                <label className="mt-3 block text-[11px] text-slate-400">{broadcastAudience === "groups" ? "Groups" : "Partitions"} (comma separated)</label>
+                <input value={broadcastTargets} onChange={(e) => setBroadcastTargets(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs" />
+              </>
+            )}
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <label className="block text-[11px] text-slate-400">Dedupe key (optional)
+                <input value={broadcastDedupe} onChange={(e) => setBroadcastDedupe(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs" />
+              </label>
+              <label className="block text-[11px] text-slate-400">Expires (minutes)
+                <input value={broadcastMinutes} onChange={(e) => setBroadcastMinutes(e.target.value)} type="number" min="1" className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs" />
+              </label>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setBroadcastOpen(false)} className="btn text-xs">Cancel</button>
+              <button type="button" onClick={() => void broadcast()} disabled={saving} className="btn btn--primary text-xs">{saving ? "Sending…" : "Broadcast"}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {silenceFor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
