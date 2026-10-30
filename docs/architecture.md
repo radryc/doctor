@@ -92,7 +92,19 @@ Recording-rule CRUD API and per-shard evaluator with lease-based HA.
 - Requires `DOCTOR_MONOFS_LOGENGINE_ADDR` and `DOCTOR_MONOFS_TOKEN`.
 - Only the lease holder evaluates; followers take over after lease expiry.
 
-### 2.4 Frontend (`frontend/`)
+### 2.4 doctor-sentinel (`cmd/doctor-sentinel`)
+
+Alert routing, delivery, silences, PromQL alert rules, and subspace alerts.
+
+- Listens on `:18082` (`DOCTOR_SENTINEL_HTTP_ADDR`).
+- Imports Guardian webhooks, CloudWatch alarms through the AWS pusher read
+  API, Alertmanager-compatible webhooks, and Sentinel PromQL rules.
+- Stores rules, silences, state, receivers, and the delivery outbox under
+  `/doctor/v1/alerts` with CAS.
+- Uses per-shard leases for evaluation and outbox delivery.
+- `doctor-query` proxies `/v1/alerts*` to Sentinel and serves the UI.
+
+### 2.5 Frontend (`frontend/`)
 
 React 19 + TypeScript + Vite 6 + Tailwind 4, HashRouter, Recharts. Built into
 `internal/query/ui/dist` and embedded with `//go:embed`; the SPA fallback
@@ -304,7 +316,26 @@ Elasticsearch, BigQuery, and AWS.
   `/v1/logs/services`, Tempo service list) always union the AWS federation
   when enabled.
 
-## 7. Recording Rules (`internal/ruler`)
+## 7. Sentinel Alerts (`internal/alerting`)
+
+- **Intake**: Guardian HMAC, CloudWatch polling, Alertmanager/generic webhooks.
+- **State**: canonical alert model, stable fingerprint, `pending`/`firing`/
+  `resolved`/`no_data`/`error`, persisted in MonoFS.
+- **CloudWatch selection**: `managed-only` default; include/exclude rules and
+  `sentinel.io/import` tags; excludes always win.
+- **Rules**: Prometheus-compatible `alert`/`expr`/`for` groups stored at
+  `/doctor/v1/alerts/rules/<tenant>/<partition>/<group>.yaml`.
+- **Delivery**: receiver/route config, outbox with retries, webhook/Slack,
+  delivery log in the logengine; `delivery: sentinel | native` prevents
+  duplicate pages.
+- **Silences**: matcher-based, partition-scoped, instance/rule/service/
+  partition scopes; ack is per fingerprint.
+- **Subspace**: platform alerts with `tenant-admins`/`partition-owners`/
+  `partitions`/`groups`/`all` audiences.
+- **RBAC**: capability checks per partition; unauthorized partitions return
+  404; UI reads capabilities from `/v1/alerts/capabilities`.
+
+## 8. Recording Rules (`internal/ruler`)
 
 - **Storage**: `/doctor/v1/rules/<tenant>/<group>.yaml` with CAS writes
   (`ExpectedVersionID`), root configurable (`DOCTOR_RULES_STORE_ROOT`).
@@ -324,7 +355,7 @@ Elasticsearch, BigQuery, and AWS.
   (YAML body), `POST /v1/rules/evaluate?tenant=&group=`. The `Authorizer`
   hook exists but is nil today (observe-first).
 
-## 8. Access Control (`internal/access`, `internal/auth`)
+## 9. Access Control (`internal/access`, `internal/auth`)
 
 - **Identity**: OIDC bearer verification plus a static break-glass admin
   token (`break-glass-admin`); optional browser login when OIDC client
@@ -348,7 +379,7 @@ Elasticsearch, BigQuery, and AWS.
   provisioned datasources under enforcement. Only enable where every caller
   is trusted; the tenant header is not a secret.
 
-## 9. HTTP Surface Summary
+## 10. HTTP Surface Summary
 
 - **doctor-ingest**: OTLP gRPC + HTTP, `/v1/guardian/events`, `/healthz`,
   `/api/v1/status/buildinfo`.
@@ -356,11 +387,13 @@ Elasticsearch, BigQuery, and AWS.
   (`/api/v1/*`), Loki API (`/loki/api/v1/*`), Tempo API (`/api/*`,
   `/api/v2/*`), `/v1/proxy/endpoints`, UI at `/`.
 - **doctor-rules**: rule CRUD + `/v1/rules/evaluate`, `/healthz`.
+- **doctor-sentinel**: `/v1/alerts*` intake, state, silences, rules,
+  sources, receivers, delivery log, capabilities, and subspace alerts.
 
 Content negotiation: Tempo trace-by-ID is the only endpoint that serves
 protobuf; everything else is JSON.
 
-## 10. Deployment and Operations
+## 11. Deployment and Operations
 
 - **Dockerfile**: multi-stage (Node 22 frontend, Go 1.26.10 service selected by
   `DOCTOR_SERVICE`), ldflags-injected buildinfo, distroless runtime. The
@@ -382,7 +415,7 @@ protobuf; everything else is JSON.
   traces/metrics/logs; heartbeat gauge `doctor.component.up`; ingest counters
   `doctor.ingest.requests.accepted` / `records.accepted`.
 
-## 11. Design Tradeoffs
+## 12. Design Tradeoffs
 
 - **Privacy before persistence** — tokenization/redaction happen in the
   receiver so sensitive data never reaches the WAL or storage.
@@ -398,7 +431,7 @@ protobuf; everything else is JSON.
 - **Rules with lease HA over CAS** — no external coordinator; a MonoFS CAS
   file is the single leader lock.
 
-## 12. Known Gaps and Dead Code
+## 13. Known Gaps and Dead Code
 
 - `DOCTOR_COST_*` cost controls are scaffolded but **not wired** into
   `doctor-ingest`; the knobs currently have no effect.
