@@ -29,6 +29,7 @@ export default function App() {
             <Route path="/federation" element={<FederationCatalogPage />} />
             <Route path="/probes" element={<ProbesPage />} />
             <Route path="/rules" element={<RecordingRulesPage />} />
+            <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/alerts/*" element={<AlertsPage />} />
             <Route path="/traces" element={<TracesPage />} />
             <Route path="/logs" element={<LogsPage />} />
