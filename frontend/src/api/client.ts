@@ -282,13 +282,15 @@ export const api = {
       `/v1/alerts/capabilities?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
     ),
 
-  getSources: () => fetchJSON<SourceListResponse>("/v1/alerts/sources"),
+  getSources: (params: URLSearchParams) =>
+    fetchJSON<SourceListResponse>(`/v1/alerts/sources?${params}`),
 
-  getAWSPolicy: () => fetchJSON<AWSPolicy>("/v1/alerts/sources/aws/policy"),
+  getAWSPolicy: (params: URLSearchParams) =>
+    fetchJSON<AWSPolicy>(`/v1/alerts/sources/aws/policy?${params}`),
 
-  putAWSPolicy: (policy: AWSPolicy) =>
+  putAWSPolicy: (params: URLSearchParams, policy: AWSPolicy) =>
     fetchJSONBody<{ status: string; policy: AWSPolicy }>(
-      "/v1/alerts/sources/aws/policy",
+      `/v1/alerts/sources/aws/policy?${params}`,
       "PUT",
       policy
     ),
@@ -338,10 +340,11 @@ export const api = {
       "POST"
     ),
 
-  getReceivers: () => fetchJSON<ReceiverConfig>("/v1/alerts/receivers"),
+  getReceivers: (params: URLSearchParams) =>
+    fetchJSON<ReceiverConfig>(`/v1/alerts/receivers?${params}`),
 
-  putReceivers: (config: ReceiverConfig) =>
-    fetchJSONBody<{ status: string }>("/v1/alerts/receivers", "PUT", config),
+  putReceivers: (params: URLSearchParams, config: ReceiverConfig) =>
+    fetchJSONBody<{ status: string }>(`/v1/alerts/receivers?${params}`, "PUT", config),
 
   // ── Dashboards ───────────────────────────────────────────────────────────────
   listDashboards: (params: URLSearchParams) =>
