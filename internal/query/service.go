@@ -755,6 +755,7 @@ func (s *Service) handleSentinelProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cloned := r.Clone(r.Context())
+	partition := sentinelRequestPartition(r)
 	if identity, ok := authz.IdentityFromContext(r.Context()); ok {
 		display := identity.Email
 		if display == "" {
@@ -772,9 +773,31 @@ func (s *Service) handleSentinelProxy(w http.ResponseWriter, r *http.Request) {
 		if s.policyGate != nil && s.policyGate.IsAdmin(identity) {
 			cloned.Header.Set("X-Doctor-Admin", "true")
 			cloned.Header.Set("X-Doctor-Partition-Access", "*")
+		} else if s.policyGate != nil && partition != "" {
+			if !s.policyGate.CanSeePartition(identity, partition) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+				return
+			}
+			cloned.Header.Set("X-Doctor-Partition-Access", partition)
 		}
 	}
 	s.sentinelProxy.ServeHTTP(w, cloned)
+}
+
+func sentinelRequestPartition(r *http.Request) string {
+	if partition := strings.TrimSpace(r.URL.Query().Get("partition")); partition != "" {
+		return partition
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/v1/alerts/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	switch {
+	case len(parts) >= 3 && (parts[0] == "rules" || parts[0] == "silences"):
+		return strings.TrimSpace(parts[1])
+	case len(parts) >= 3 && parts[0] == "subspace":
+		return strings.TrimSpace(parts[1])
+	default:
+		return ""
+	}
 }
 
 func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
