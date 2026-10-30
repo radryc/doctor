@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os/signal"
+	"path"
 	"syscall"
 	"time"
 
@@ -58,12 +60,19 @@ func main() {
 			Load: func(ctx context.Context) ([]alerting.RuleGroupRef, error) {
 				return store.ListRuleGroups(ctx, "")
 			},
-			Evaluate: service.EvaluateRuleGroup,
-			Interval: cfg.PollInterval,
-			Logger:   log.Default(),
+			Evaluate:   service.EvaluateRuleGroup,
+			Interval:   cfg.PollInterval,
+			ShardIndex: cfg.ShardIndex,
+			ShardCount: cfg.EvalShards,
+			Logger:     log.Default(),
 		}
-		go scheduler.Run(ctx)
-		log.Printf("sentinel rule evaluation enabled via %s", cfg.QueryURL)
+		lease := alerting.NewLeaseManager(
+			files, cfg.MonoFSToken,
+			path.Join(cfg.StoreRoot, ".leases", fmt.Sprintf("shard-%d.json", cfg.ShardIndex)),
+			cfg.RulerID, cfg.ShardIndex, cfg.LeaseTTL, cfg.LeaseRenew, log.Default(),
+		)
+		go lease.Run(ctx, scheduler.Run)
+		log.Printf("sentinel rule evaluation enabled via %s (shard %d/%d)", cfg.QueryURL, cfg.ShardIndex, cfg.EvalShards)
 	}
 	api := &alerting.API{
 		Store:    store,
