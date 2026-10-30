@@ -124,6 +124,27 @@ func (s *Service) ResolveSubspace(ctx context.Context, tenant, dedupeKey string)
 	return s.Apply(ctx, *alert)
 }
 
+// ExpireSubspace resolves expired platform alerts.
+func (s *Service) ExpireSubspace(ctx context.Context, tenant string) error {
+	alerts, err := s.Store.ListAlerts(ctx, tenant, SubspacePartition)
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	for _, alert := range alerts {
+		if alert.Status == StatusResolved || alert.ExpiresAt == nil || alert.ExpiresAt.After(now) {
+			continue
+		}
+		alert.Status = StatusResolved
+		endsAt := now
+		alert.EndsAt = &endsAt
+		if _, err := s.Apply(ctx, alert); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ListSubspace returns subspace alerts visible to the identity.
 func (s *Service) ListSubspace(ctx context.Context, tenant string, identity Identity) ([]Alert, error) {
 	alerts, err := s.Store.ListAlerts(ctx, tenant, SubspacePartition)
