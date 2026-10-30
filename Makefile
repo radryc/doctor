@@ -1,6 +1,6 @@
 MONOFS_DIR ?= ../monofs
 SERVICE ?= doctor-ingest
-SERVICES ?= doctor-ingest doctor-query doctor-rules
+SERVICES ?= doctor-ingest doctor-query doctor-rules doctor-sentinel
 
 .PHONY: test build vet docker-build image image-all frontend frontend-dev verify-correlation verify-aws loadtest-federation loadtest-federation-race
 
