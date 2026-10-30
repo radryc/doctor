@@ -182,6 +182,11 @@ func (a *API) handleGuardianIntake(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	signature := r.Header.Get("X-Guardian-Signature")
+	if !VerifyGuardianSignature(a.Service.GuardianHMACKey, body, signature) {
+		writeError(w, http.StatusUnauthorized, "invalid Guardian signature")
+		return
+	}
 	var payload GuardianAlert
 	if err := json.Unmarshal(body, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -191,7 +196,7 @@ func (a *API) handleGuardianIntake(w http.ResponseWriter, r *http.Request) {
 	if tenant == "" {
 		tenant = a.Service.DefaultTenant
 	}
-	alert, err := a.Service.IngestGuardian(r.Context(), tenant, payload, r.Header.Get("X-Guardian-Signature"))
+	alert, err := a.Service.IngestGuardian(r.Context(), tenant, payload, "")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

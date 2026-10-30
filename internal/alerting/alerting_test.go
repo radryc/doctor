@@ -2,6 +2,9 @@ package alerting
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -21,6 +24,23 @@ func TestFingerprintStableAndLabelSensitive(t *testing.T) {
 	third := Fingerprint("sentinel", "default", "payments", labels)
 	if third == first {
 		t.Fatal("fingerprint did not change when labels changed")
+	}
+}
+
+func TestVerifyGuardianSignature(t *testing.T) {
+	body := []byte(`{"event":"partition.failing","partition":"payments"}`)
+	key := []byte("secret")
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(body)
+	signature := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if !VerifyGuardianSignature(key, body, signature) {
+		t.Fatal("valid signature rejected")
+	}
+	if VerifyGuardianSignature(key, body, signature[:len(signature)-1]+"0") {
+		t.Fatal("invalid signature accepted")
+	}
+	if VerifyGuardianSignature(nil, body, "") != true {
+		t.Fatal("empty key should skip verification")
 	}
 }
 
