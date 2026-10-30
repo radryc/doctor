@@ -11,6 +11,7 @@ import LogsPage from "./pages/LogsPage";
 import MetricsPage from "./pages/MetricsPage";
 import FleetDashboard from "./pages/FleetDashboard";
 import RecordingRulesPage from "./pages/RecordingRulesPage";
+import AlertsPage from "./pages/AlertsPage";
 import PartitionViewPage from "./pages/PartitionViewPage";
 import PartitionAssetsPage from "./pages/PartitionAssetsPage";
 
@@ -28,6 +29,7 @@ export default function App() {
             <Route path="/federation" element={<FederationCatalogPage />} />
             <Route path="/probes" element={<ProbesPage />} />
             <Route path="/rules" element={<RecordingRulesPage />} />
+            <Route path="/alerts/*" element={<AlertsPage />} />
             <Route path="/traces" element={<TracesPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />

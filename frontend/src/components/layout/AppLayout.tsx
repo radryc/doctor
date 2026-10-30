@@ -17,6 +17,7 @@ const GO_ROUTES: Record<string, string> = {
   m: "/metrics",
   f: "/fleet",
   p: "/probes",
+  a: "/alerts",
 };
 
 function isTypingTarget(target: EventTarget | null): boolean {
