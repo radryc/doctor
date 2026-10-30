@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Activity,
   BarChart3,
+  Bell,
   Cloud,
   Copy,
   Cpu,
@@ -116,6 +117,15 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         keywords: "synthetics probes health blackbox http tcp",
         icon: Cpu,
         run: go("/probes"),
+      },
+      {
+        id: "nav-alerts",
+        group: "Go to",
+        label: "Alerts",
+        hint: "g a",
+        keywords: "alerts sentinel firing silences notification delivery",
+        icon: Bell,
+        run: go("/alerts"),
       },
       {
         id: "nav-rules",
