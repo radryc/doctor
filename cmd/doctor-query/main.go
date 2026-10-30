@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/auth"
 	"github.com/radryc/doctor/internal/config"
@@ -25,6 +24,7 @@ import (
 	awsstore "github.com/radryc/doctor/internal/store/aws"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/doctor/internal/telemetry"
+	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -85,6 +85,10 @@ func main() {
 	svc.SetRulesURL(cfg.RulesURL)
 	if strings.TrimSpace(cfg.RulesURL) != "" {
 		log.Printf("recording rules UI enabled via %s", cfg.RulesURL)
+	}
+	svc.SetSentinelURL(cfg.SentinelURL)
+	if strings.TrimSpace(cfg.SentinelURL) != "" {
+		log.Printf("sentinel UI enabled via %s", cfg.SentinelURL)
 	}
 
 	// Shared CAS file store: MonoFS when a token is set, in-memory fallback for

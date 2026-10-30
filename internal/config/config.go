@@ -79,6 +79,7 @@ type QueryConfig struct {
 	DefaultPartition    string
 	MonoFSLogEngineAddr string
 	RulesURL            string
+	SentinelURL         string
 	AWSEnabled          bool
 	AWSBackendURL       string
 	AWSBackendToken     string
@@ -204,6 +205,58 @@ func LoadRules(service string) RulesConfig {
 	}
 }
 
+// SentinelConfig holds doctor-sentinel settings.
+type SentinelConfig struct {
+	Enabled             bool
+	HTTPAddr            string
+	QueryURL            string
+	QueryToken          string
+	StoreRoot           string
+	DefaultTenant       string
+	MonoFSLogEngineAddr string
+	MonoFSToken         string
+	MonoFSClientID      string
+	GuardianHMACSecret  string
+	ServiceToken        string
+	AuthAllowAll        bool
+	DeliveryEnabled     bool
+	PollInterval        time.Duration
+	EvalShards          int
+	ShardIndex          int
+	RulerID             string
+}
+
+// LoadSentinel loads the doctor-sentinel configuration from the environment.
+func LoadSentinel(service string) SentinelConfig {
+	rulerID := envString("DOCTOR_SENTINEL_RULER_ID", "")
+	if rulerID == "" {
+		if hostname, err := os.Hostname(); err == nil {
+			rulerID = hostname
+		} else {
+			rulerID = "doctor-sentinel"
+		}
+	}
+	return SentinelConfig{
+		Enabled:             envBool("DOCTOR_SENTINEL_ENABLED", true),
+		HTTPAddr:            envString("DOCTOR_SENTINEL_HTTP_ADDR", ":18082"),
+		QueryURL:            envString("DOCTOR_SENTINEL_QUERY_URL", ""),
+		QueryToken:          envString("DOCTOR_SENTINEL_QUERY_TOKEN", ""),
+		StoreRoot:           envString("DOCTOR_SENTINEL_STORE_ROOT", "/doctor/v1/alerts"),
+		DefaultTenant:       envString("DOCTOR_SENTINEL_DEFAULT_TENANT", "default"),
+		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
+		MonoFSToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
+		MonoFSClientID:      envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-sentinel"),
+		GuardianHMACSecret:  envString("DOCTOR_SENTINEL_GUARDIAN_HMAC_SECRET", ""),
+		ServiceToken:        envString("DOCTOR_SENTINEL_SERVICE_TOKEN", ""),
+		AuthAllowAll:        envBool("DOCTOR_SENTINEL_AUTH_ALLOW_ALL", true),
+		DeliveryEnabled:     envBool("DOCTOR_SENTINEL_DELIVERY_ENABLED", true),
+		PollInterval:        envDuration("DOCTOR_SENTINEL_POLL_INTERVAL", 30*time.Second),
+		EvalShards:          int(envInt64("DOCTOR_SENTINEL_EVAL_SHARDS", 1)),
+		ShardIndex:          int(envInt64("DOCTOR_SENTINEL_SHARD_INDEX", 0)),
+		RulerID:             rulerID,
+	}
+}
+
 func LoadIngest(service string) (IngestConfig, error) {
 	cfg := IngestConfig{
 		DefaultTenant:       envString("DOCTOR_DEFAULT_TENANT", "default"),
@@ -268,6 +321,7 @@ func LoadQuery(service string) QueryConfig {
 		DefaultPartition:    envString("DOCTOR_DEFAULT_PARTITION", ""),
 		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
 		RulesURL:            envString("DOCTOR_RULES_URL", ""),
+		SentinelURL:         envString("DOCTOR_SENTINEL_URL", ""),
 		AWSEnabled:          envBool("DOCTOR_AWS_ENABLED", true),
 		AWSBackendURL:       envString("DOCTOR_AWS_BACKEND_URL", ""),
 		AWSBackendToken:     envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
