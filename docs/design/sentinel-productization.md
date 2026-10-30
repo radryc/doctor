@@ -87,7 +87,7 @@ Acceptance: one real AWS account can install the pusher, discover alarms, import
 
 Effort: ~3 engineer-weeks.
 
-- [ ] Slack, generic webhook, PagerDuty Events API v2, email.
+- [ ] Slack, generic webhook, GoAlert Generic API, PagerDuty Events API v2, email.
 - [ ] Routing policies: matchers, grouping, repeat interval, continue/stop.
 - [ ] Receiver/route UI builder with validation and test notification.
 - [ ] Channel health checks and fallback chain.
