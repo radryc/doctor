@@ -224,6 +224,13 @@ type SentinelConfig struct {
 	EvalShards          int
 	ShardIndex          int
 	RulerID             string
+
+	AWSEnabled        bool
+	AWSURL            string
+	AWSToken          string
+	AWSPollInterval   time.Duration
+	AWSRegions        []string
+	AWSAlarmSelection string
 }
 
 // LoadSentinel loads the doctor-sentinel configuration from the environment.
@@ -254,6 +261,13 @@ func LoadSentinel(service string) SentinelConfig {
 		EvalShards:          int(envInt64("DOCTOR_SENTINEL_EVAL_SHARDS", 1)),
 		ShardIndex:          int(envInt64("DOCTOR_SENTINEL_SHARD_INDEX", 0)),
 		RulerID:             rulerID,
+
+		AWSEnabled:        envBool("DOCTOR_SENTINEL_AWS_ENABLED", false),
+		AWSURL:            envString("DOCTOR_SENTINEL_AWS_URL", ""),
+		AWSToken:          envString("DOCTOR_SENTINEL_AWS_TOKEN", ""),
+		AWSPollInterval:   envDuration("DOCTOR_SENTINEL_AWS_POLL_INTERVAL", 60*time.Second),
+		AWSRegions:        envCSV("DOCTOR_SENTINEL_AWS_REGIONS", nil),
+		AWSAlarmSelection: envString("DOCTOR_SENTINEL_AWS_ALARM_SELECTION", ""),
 	}
 }
 

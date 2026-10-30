@@ -63,6 +63,22 @@ func main() {
 		go dispatcher.Run(ctx)
 	}
 
+	if cfg.AWSEnabled && cfg.AWSURL != "" {
+		source := &alerting.AWSSource{
+			BaseURL:     cfg.AWSURL,
+			Token:       cfg.AWSToken,
+			Regions:     cfg.AWSRegions,
+			Tenant:      cfg.DefaultTenant,
+			Service:     service,
+			Store:       store,
+			Logger:      log.Default(),
+			Interval:    cfg.AWSPollInterval,
+			DefaultMode: alerting.AWSPolicyMode(cfg.AWSAlarmSelection),
+		}
+		go source.Run(ctx)
+		log.Printf("sentinel aws source enabled: %s", cfg.AWSURL)
+	}
+
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: api.Handler()}
 	go func() {
 		<-ctx.Done()
