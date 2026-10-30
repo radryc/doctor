@@ -368,6 +368,7 @@ func (s *Service) evaluateRule(ctx context.Context, group RuleGroup, rule AlertR
 		for key, val := range rule.Annotations {
 			annotations[key] = val
 		}
+		lastSeen := now
 		alert := Alert{
 			Fingerprint: Fingerprint("sentinel", group.Tenant, group.Partition, labels),
 			Source:      "sentinel",
@@ -380,6 +381,7 @@ func (s *Service) evaluateRule(ctx context.Context, group RuleGroup, rule AlertR
 			StartsAt:    startsAt,
 			Value:       strconv.FormatFloat(value, 'g', -1, 64),
 			Delivery:    DeliverySentinel,
+			LastSeenAt:  &lastSeen,
 		}
 		alert.ID = alert.Fingerprint
 		if _, err := s.Apply(ctx, alert); err != nil {
@@ -401,6 +403,9 @@ func (s *Service) resolveRuleAlerts(ctx context.Context, group RuleGroup, rule A
 			continue
 		}
 		if alert.Status == StatusResolved {
+			continue
+		}
+		if rule.KeepFiringFor > 0 && alert.LastSeenAt != nil && now.Sub(*alert.LastSeenAt) <= time.Duration(rule.KeepFiringFor) {
 			continue
 		}
 		alert.Status = StatusResolved
