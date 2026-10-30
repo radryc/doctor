@@ -50,6 +50,7 @@ type Service struct {
 	proxyRouter      *proxy.Router
 	guardianClient   *http.Client
 	rulesProxy       *httputil.ReverseProxy
+	sentinelProxy    *httputil.ReverseProxy
 	policyGate       *access.PolicyGate
 	dashboardStore   DashboardStore
 
@@ -250,6 +251,27 @@ func (s *Service) SetRulesURL(raw string) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "rules service unavailable: " + err.Error()})
 	}
 	s.rulesProxy = proxy
+}
+
+// SetSentinelURL configures the doctor-sentinel API base URL used by the UI
+// proxy. Sentinel is a separate process; doctor-query only forwards reads and
+// operator actions.
+func (s *Service) SetSentinelURL(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		s.sentinelProxy = nil
+		return
+	}
+	target, err := url.Parse(raw)
+	if err != nil || target.Host == "" {
+		s.sentinelProxy = nil
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "sentinel service unavailable: " + err.Error()})
+	}
+	s.sentinelProxy = proxy
 }
 
 // guardianTimelineEntry mirrors Guardian's TimelineEntry JSON structure.
@@ -647,6 +669,8 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/metrics/range", s.handleMetricRange)
 	mux.HandleFunc("/v1/rules", s.handleRulesProxy)
 	mux.HandleFunc("/v1/rules/", s.handleRulesProxy)
+	mux.HandleFunc("/v1/alerts", s.handleSentinelProxy)
+	mux.HandleFunc("/v1/alerts/", s.handleSentinelProxy)
 	mux.HandleFunc("/v1/services/discover", s.handleServiceDiscovery)
 	mux.HandleFunc("/v1/services/suggest", s.handleServiceSuggest)
 	mux.HandleFunc("/v1/dashboards", s.handleDashboardsRouter)
@@ -720,6 +744,37 @@ func (s *Service) handleRulesProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.rulesProxy.ServeHTTP(w, r)
+}
+
+// handleSentinelProxy forwards alert reads and operator actions to
+// doctor-sentinel. Identity headers are derived from the caller's verified
+// identity; Sentinel performs the authoritative capability checks.
+func (s *Service) handleSentinelProxy(w http.ResponseWriter, r *http.Request) {
+	if s.sentinelProxy == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "sentinel service is not configured"})
+		return
+	}
+	cloned := r.Clone(r.Context())
+	if identity, ok := authz.IdentityFromContext(r.Context()); ok {
+		display := identity.Email
+		if display == "" {
+			display = identity.Subject
+		}
+		if display == "" {
+			display = identity.ClientID
+		}
+		if display != "" {
+			cloned.Header.Set("X-Doctor-User", display)
+		}
+		if len(identity.Groups) > 0 {
+			cloned.Header.Set("X-Doctor-Groups", strings.Join(identity.Groups, ","))
+		}
+		if s.policyGate != nil && s.policyGate.IsAdmin(identity) {
+			cloned.Header.Set("X-Doctor-Admin", "true")
+			cloned.Header.Set("X-Doctor-Partition-Access", "*")
+		}
+	}
+	s.sentinelProxy.ServeHTTP(w, cloned)
 }
 
 func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
