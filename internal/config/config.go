@@ -223,6 +223,8 @@ type SentinelConfig struct {
 	PollInterval        time.Duration
 	EvalShards          int
 	ShardIndex          int
+	LeaseTTL            time.Duration
+	LeaseRenew          time.Duration
 	RulerID             string
 
 	AWSEnabled        bool
@@ -260,6 +262,8 @@ func LoadSentinel(service string) SentinelConfig {
 		PollInterval:        envDuration("DOCTOR_SENTINEL_POLL_INTERVAL", 30*time.Second),
 		EvalShards:          int(envInt64("DOCTOR_SENTINEL_EVAL_SHARDS", 1)),
 		ShardIndex:          int(envInt64("DOCTOR_SENTINEL_SHARD_INDEX", 0)),
+		LeaseTTL:            envDuration("DOCTOR_SENTINEL_LEASE_TTL", 30*time.Second),
+		LeaseRenew:          envDuration("DOCTOR_SENTINEL_LEASE_RENEW", 10*time.Second),
 		RulerID:             rulerID,
 
 		AWSEnabled:        envBool("DOCTOR_SENTINEL_AWS_ENABLED", false),

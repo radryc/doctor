@@ -447,14 +447,16 @@ func numericValue(value any) (float64, error) {
 
 // RuleScheduler periodically evaluates all stored rule groups.
 type RuleScheduler struct {
-	Load      func(context.Context) ([]RuleGroupRef, error)
-	Evaluate  func(context.Context, RuleGroup) []RuleEvalResult
-	Interval  time.Duration
-	Logger    *log.Logger
-	mu        sync.Mutex
-	groups    int
-	lastLoad  time.Time
-	lastError string
+	Load       func(context.Context) ([]RuleGroupRef, error)
+	Evaluate   func(context.Context, RuleGroup) []RuleEvalResult
+	Interval   time.Duration
+	ShardIndex int
+	ShardCount int
+	Logger     *log.Logger
+	mu         sync.Mutex
+	groups     int
+	lastLoad   time.Time
+	lastError  string
 }
 
 // RuleSchedulerStats reports scheduler state.
@@ -507,6 +509,9 @@ func (s *RuleScheduler) evaluateAll(ctx context.Context) {
 	}
 	for _, ref := range refs {
 		if ref.File == nil {
+			continue
+		}
+		if ShardFor(ref.Tenant, ref.Partition, ref.Group, s.ShardCount) != s.ShardIndex {
 			continue
 		}
 		for _, group := range ref.File.Groups {
