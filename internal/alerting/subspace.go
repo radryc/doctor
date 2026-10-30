@@ -105,10 +105,11 @@ func (s *Service) UpsertSubspace(ctx context.Context, req SubspaceRequest, tenan
 		ExpiresAt:       req.ExpiresAt,
 	}
 	alert.ID = alert.Fingerprint
-	if _, err := s.Apply(ctx, alert); err != nil {
+	applied, err := s.Apply(ctx, alert)
+	if err != nil {
 		return nil, err
 	}
-	return &alert, nil
+	return applied, nil
 }
 
 // ResolveSubspace resolves a platform alert by dedupe key.
