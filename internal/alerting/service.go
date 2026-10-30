@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -37,23 +36,7 @@ type Service struct {
 }
 
 // IngestGuardian validates and normalizes a Guardian alert.
-func (s *Service) IngestGuardian(ctx context.Context, tenant string, payload GuardianAlert, signature string) (*Alert, error) {
-	if !strings.HasPrefix(signature, "sha256=") {
-		if len(s.GuardianHMACKey) > 0 {
-			return nil, fmt.Errorf("alerting: guardian signature is required")
-		}
-	} else if len(s.GuardianHMACKey) > 0 {
-		body, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-		mac := hmac.New(sha256.New, s.GuardianHMACKey)
-		_, _ = mac.Write(body)
-		want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(strings.ToLower(signature)), []byte(strings.ToLower(want))) {
-			return nil, fmt.Errorf("alerting: guardian signature mismatch")
-		}
-	}
+func (s *Service) IngestGuardian(ctx context.Context, tenant string, payload GuardianAlert, _ string) (*Alert, error) {
 	if tenant == "" {
 		tenant = s.DefaultTenant
 	}
@@ -307,6 +290,22 @@ func (s *Service) CreateSilence(ctx context.Context, silence Silence, user strin
 		return nil, err
 	}
 	return &silence, nil
+}
+
+// VerifyGuardianSignature verifies an HMAC over the exact Guardian request
+// body. The API should call this before decoding the JSON.
+func VerifyGuardianSignature(key, body []byte, signature string) bool {
+	if len(key) == 0 {
+		return true
+	}
+	signature = strings.TrimSpace(signature)
+	if !strings.HasPrefix(signature, "sha256=") {
+		return false
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(body)
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(strings.ToLower(signature)), []byte(strings.ToLower(want)))
 }
 
 func (s *Service) now() time.Time {
