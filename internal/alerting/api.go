@@ -81,6 +81,13 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "intake/guardian":
 		a.handleGuardianIntake(w, r)
+	case strings.HasPrefix(path, "intake/"):
+		source := strings.TrimPrefix(path, "intake/")
+		if strings.HasPrefix(source, "preview/") {
+			a.handleGenericPreview(w, r, strings.TrimPrefix(source, "preview/"))
+			return
+		}
+		a.handleGenericIntake(w, r, source)
 	case path == "subspace":
 		a.handleSubspace(w, r)
 	case path == "subspace/preview":
