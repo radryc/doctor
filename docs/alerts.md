@@ -146,6 +146,10 @@ parameters. Resolved alerts send `action=close` with the same `dedup` value, so
 GoAlert closes the matching alert. The integration key is read from the named
 environment variable and is never stored in MonoFS.
 
+The Guardian-managed GoAlert deployments (Kubernetes and AWS) live in
+`stratatools/partitions/goalert`. Use that partition rather than deploying
+GoAlert with raw Kubernetes manifests.
+
 ## Configuration
 
 ```text
