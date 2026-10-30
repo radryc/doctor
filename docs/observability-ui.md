@@ -3,7 +3,7 @@
 Status: **Draft for implementation**  
 Audience: Doctor maintainers, Strata platform engineers  
 Scope: `frontend/` (React 19 + TypeScript + Vite 6 + Tailwind 4), `internal/dashboards/` (new MonoFS-backed shared dashboard store), `internal/query/` (`/v1/dashboards` CRUD + export/import APIs), `cmd/doctor-query/main.go`  
-Non-goals: Alerting & notification routing (deferred to a future phase)
+Alerting & notification routing: delivered by the separate `doctor-sentinel` service and the Alerts UI; see `docs/alerts.md`.
 
 ---
 
@@ -27,7 +27,7 @@ Additionally, this design introduces **Shared Dashboards** persisted in **MonoFS
 | D4 | **Global Time Range & Context Synchronization** | A unified `TimeRangeContext` in the top bar replaces isolated per-page `15m/1h/6h/24h` state, syncing `?from=&to=&tenant=&partition=&service=&env=` across all views and supporting chart brush-to-zoom. |
 | D5 | **Universal Context Drawer (`InspectorDrawer`)** | Clicking any Log row, Trace ID, Metric Exemplar diamond, or Service node opens a slide-over drawer for metrics $\rightarrow$ traces $\rightarrow$ logs correlation without leaving the active page. |
 | D6 | **Dual-Mode Querying (Visual Builder + Raw Query)** | Logs (Visual Filter Pills + LogQL), Metrics (Visual Tag/Rollup Builder + PromQL), and Traces (Visual Facets + TraceQL) support both point-and-click and raw query languages. |
-| D7 | **Alerting is explicitly out of scope** | Alert rules, silences, and notification channels are excluded for now. Recording rules (`/rules`) remain supported and gain live PromQL chart previews. |
+| D7 | **Alerting is a separate Sentinel service** | Alert rules, delivery, silences, sources, and subspace alerts live in `doctor-sentinel`; the UI consumes `/v1/alerts*` through `doctor-query`. Recording rules (`/rules`) remain separate. |
 
 ---
 
