@@ -75,10 +75,11 @@ func main() {
 		log.Printf("sentinel rule evaluation enabled via %s (shard %d/%d)", cfg.QueryURL, cfg.ShardIndex, cfg.EvalShards)
 	}
 	api := &alerting.API{
-		Store:    store,
-		Service:  service,
-		Logger:   log.Default(),
-		AllowAll: cfg.AuthAllowAll,
+		Store:        store,
+		Service:      service,
+		Logger:       log.Default(),
+		AllowAll:     cfg.AuthAllowAll,
+		ServiceToken: cfg.ServiceToken,
 	}
 
 	dispatcher := &alerting.Dispatcher{Store: store, Logger: log.Default()}
