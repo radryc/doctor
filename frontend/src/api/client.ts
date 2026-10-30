@@ -37,6 +37,7 @@ import type {
   DeliveryResponse,
   ReceiverConfig,
   SubspaceRequest,
+  AlertRuleGroupsResponse,
 } from "../types/alerts";
 
 async function fetchText(url: string): Promise<string> {
@@ -66,6 +67,27 @@ async function fetchJSONBody<T>(url: string, method: string, body: unknown): Pro
     throw new Error(
       (data as { error?: string }).error ?? `HTTP ${res.status}`
     );
+  return data as T;
+}
+
+async function fetchJSONText<T>(
+  url: string,
+  method: string,
+  body: string
+): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: { Accept: "application/json", "Content-Type": "application/yaml" },
+    body,
+    signal: AbortSignal.timeout(60_000),
+  });
+  const ct = res.headers.get("content-type") ?? "";
+  const data = ct.includes("application/json")
+    ? await res.json()
+    : { error: await res.text() };
+  if (!res.ok) {
+    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
   return data as T;
 }
 
@@ -284,6 +306,35 @@ export const api = {
   resolveSubspaceAlert: (tenant: string, id: string) =>
     fetchJSON<Alert>(
       `/v1/alerts/subspace/${encodeURIComponent(id)}/resolve?tenant=${encodeURIComponent(tenant)}`,
+      "POST"
+    ),
+
+  getAlertRuleGroups: (tenant: string, partition: string) =>
+    fetchJSON<AlertRuleGroupsResponse>(
+      `/v1/alerts/rules?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
+    ),
+
+  getAlertRuleGroup: (tenant: string, partition: string, group: string) =>
+    fetchText(
+      `/v1/alerts/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`
+    ),
+
+  putAlertRuleGroup: (tenant: string, partition: string, group: string, yaml: string) =>
+    fetchJSONText(
+      `/v1/alerts/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`,
+      "PUT",
+      yaml
+    ),
+
+  deleteAlertRuleGroup: (tenant: string, partition: string, group: string) =>
+    fetchJSON<{ status: string }>(
+      `/v1/alerts/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`,
+      "DELETE"
+    ),
+
+  testAlertRuleGroup: (tenant: string, partition: string, group: string) =>
+    fetchJSON<unknown>(
+      `/v1/alerts/rules/test?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}&group=${encodeURIComponent(group)}`,
       "POST"
     ),
 

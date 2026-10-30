@@ -11,6 +11,7 @@ import (
 
 	"github.com/radryc/doctor/internal/alerting"
 	"github.com/radryc/doctor/internal/config"
+	"github.com/radryc/doctor/internal/ruler"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
 
@@ -50,6 +51,19 @@ func main() {
 		GuardianHMACKey: []byte(cfg.GuardianHMACSecret),
 		DeliveryEnabled: cfg.DeliveryEnabled,
 		Logger:          log.Default(),
+	}
+	if cfg.QueryURL != "" {
+		service.Querier = ruler.NewHTTPQuerier(cfg.QueryURL, cfg.QueryToken, nil)
+		scheduler := &alerting.RuleScheduler{
+			Load: func(ctx context.Context) ([]alerting.RuleGroupRef, error) {
+				return store.ListRuleGroups(ctx, "")
+			},
+			Evaluate: service.EvaluateRuleGroup,
+			Interval: cfg.PollInterval,
+			Logger:   log.Default(),
+		}
+		go scheduler.Run(ctx)
+		log.Printf("sentinel rule evaluation enabled via %s", cfg.QueryURL)
 	}
 	api := &alerting.API{
 		Store:    store,

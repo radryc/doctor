@@ -31,6 +31,7 @@ type Service struct {
 	DefaultTenant   string
 	GuardianHMACKey []byte
 	DeliveryEnabled bool
+	Querier         Querier
 	Logger          *log.Logger
 	Now             func() time.Time
 }
