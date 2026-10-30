@@ -54,6 +54,19 @@ func main() {
 		DeliveryEnabled: cfg.DeliveryEnabled,
 		Logger:          log.Default(),
 	}
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = service.ExpireSubspace(ctx, cfg.DefaultTenant)
+			}
+		}
+	}()
+
 	if cfg.QueryURL != "" {
 		service.Querier = ruler.NewHTTPQuerier(cfg.QueryURL, cfg.QueryToken, nil)
 		scheduler := &alerting.RuleScheduler{
