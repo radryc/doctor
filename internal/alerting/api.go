@@ -14,11 +14,12 @@ import (
 
 // API serves the Sentinel HTTP surface.
 type API struct {
-	Store    *Store
-	Service  *Service
-	Logger   *log.Logger
-	AllowAll bool
-	Now      func() time.Time
+	Store        *Store
+	Service      *Service
+	Logger       *log.Logger
+	AllowAll     bool
+	ServiceToken string
+	Now          func() time.Time
 }
 
 // Handler builds the Sentinel HTTP handler.
@@ -163,13 +164,11 @@ func (a *API) handleGuardianIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity := IdentityFromRequest(r, a.AllowAll)
-	if !identity.Admin {
-		// Service-to-service callers use the configured HMAC, but a user
-		// identity without admin must not spoof Guardian alerts.
-		if identity.User != "local-dev" {
-			writeError(w, http.StatusForbidden, "forbidden")
-			return
-		}
+	if !identity.Admin && len(a.Service.GuardianHMACKey) == 0 && !a.AllowAll {
+		// Service-to-service callers authenticate with the HMAC when one is
+		// configured. Without HMAC, only a local/admin caller may inject.
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -200,7 +199,7 @@ func (a *API) handleSubspace(w http.ResponseWriter, r *http.Request) {
 	}
 	identity := IdentityFromRequest(r, a.AllowAll)
 	tenant, _ := tenantPartition(r)
-	if !identity.Can(CapSubspaceWrite, tenant, "") {
+	if !identity.Can(CapSubspaceWrite, tenant, "") && !a.isServiceToken(r) {
 		writeError(w, http.StatusForbidden, "subspace broadcast requires an admin or service token")
 		return
 	}
@@ -248,7 +247,7 @@ func (a *API) handleSubspaceResolve(w http.ResponseWriter, r *http.Request, rest
 	dedupeKey := strings.TrimSuffix(strings.Trim(rest, "/"), "/resolve")
 	identity := IdentityFromRequest(r, a.AllowAll)
 	tenant, _ := tenantPartition(r)
-	if !identity.Can(CapSubspaceWrite, tenant, "") {
+	if !identity.Can(CapSubspaceWrite, tenant, "") && !a.isServiceToken(r) {
 		writeError(w, http.StatusForbidden, "subspace resolve requires an admin or service token")
 		return
 	}
@@ -599,6 +598,14 @@ func (a *API) now() time.Time {
 		return a.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (a *API) isServiceToken(r *http.Request) bool {
+	if strings.TrimSpace(a.ServiceToken) == "" {
+		return false
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	return strings.EqualFold(auth, "Bearer "+a.ServiceToken)
 }
 
 func tenantPartition(r *http.Request) (string, string) {
