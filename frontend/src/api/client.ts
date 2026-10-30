@@ -26,6 +26,17 @@ import type {
   LokiQueryResponse,
 } from "../types/api";
 import type { DashboardDocument, DashboardVersion, DashboardBundle } from "../types/dashboard";
+import type {
+  Alert,
+  AlertListResponse,
+  Capabilities,
+  Silence,
+  SilenceListResponse,
+  AWSPolicy,
+  SourceListResponse,
+  DeliveryResponse,
+  ReceiverConfig,
+} from "../types/alerts";
 
 async function fetchText(url: string): Promise<string> {
   const res = await fetch(url, {
@@ -211,6 +222,61 @@ export const api = {
 
   lokiStats: (params: URLSearchParams) =>
     fetchJSON<unknown>(`/loki/api/v1/index/stats?${params}`),
+
+  // ── Sentinel alerts ─────────────────────────────────────────────────────────
+  getAlerts: (params: URLSearchParams) =>
+    fetchJSON<AlertListResponse>(`/v1/alerts?${params}`),
+
+  getAlert: (tenant: string, partition: string, fingerprint: string) =>
+    fetchJSON<Alert>(
+      `/v1/alerts/${encodeURIComponent(fingerprint)}?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
+    ),
+
+  ackAlert: (tenant: string, partition: string, fingerprint: string, acked = true) =>
+    fetchJSON<Alert>(
+      `/v1/alerts/${encodeURIComponent(fingerprint)}/ack?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      acked ? "POST" : "DELETE"
+    ),
+
+  getSilences: (params: URLSearchParams) =>
+    fetchJSON<SilenceListResponse>(`/v1/alerts/silences?${params}`),
+
+  createSilence: (tenant: string, partition: string, silence: Partial<Silence>) =>
+    fetchJSONBody<Silence>(
+      `/v1/alerts/silences?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST",
+      silence
+    ),
+
+  deleteSilence: (tenant: string, partition: string, id: string) =>
+    fetchJSON<{ status: string }>(
+      `/v1/alerts/silences/${encodeURIComponent(tenant)}/${encodeURIComponent(partition)}/${encodeURIComponent(id)}`,
+      "DELETE"
+    ),
+
+  getAlertCapabilities: (tenant: string, partition: string) =>
+    fetchJSON<Capabilities>(
+      `/v1/alerts/capabilities?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
+    ),
+
+  getSources: () => fetchJSON<SourceListResponse>("/v1/alerts/sources"),
+
+  getAWSPolicy: () => fetchJSON<AWSPolicy>("/v1/alerts/sources/aws/policy"),
+
+  putAWSPolicy: (policy: AWSPolicy) =>
+    fetchJSONBody<{ status: string; policy: AWSPolicy }>(
+      "/v1/alerts/sources/aws/policy",
+      "PUT",
+      policy
+    ),
+
+  getDelivery: (params: URLSearchParams) =>
+    fetchJSON<DeliveryResponse>(`/v1/alerts/delivery?${params}`),
+
+  getReceivers: () => fetchJSON<ReceiverConfig>("/v1/alerts/receivers"),
+
+  putReceivers: (config: ReceiverConfig) =>
+    fetchJSONBody<{ status: string }>("/v1/alerts/receivers", "PUT", config),
 
   // ── Dashboards ───────────────────────────────────────────────────────────────
   listDashboards: (params: URLSearchParams) =>

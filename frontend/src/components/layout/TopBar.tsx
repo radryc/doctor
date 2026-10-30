@@ -12,6 +12,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/federation": "Federation",
   "/probes": "Synthetics",
   "/rules": "Recording Rules",
+  "/alerts": "Alerts",
   "/traces": "Traces",
   "/logs": "Logs",
   "/metrics": "Metrics",
@@ -24,6 +25,7 @@ function pageTitle(pathname: string): string {
   if (pathname.startsWith("/services")) return "APM Services";
   if (pathname.startsWith("/federation")) return "Federation";
   if (pathname.startsWith("/probes")) return "Synthetics";
+  if (pathname.startsWith("/alerts")) return "Alerts";
   return PAGE_TITLES[pathname] ?? "Doctor";
 }
 
