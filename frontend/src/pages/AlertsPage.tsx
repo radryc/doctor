@@ -186,15 +186,15 @@ export default function AlertsPage() {
       }
       if (tab === "sources") {
         const [sourceData, policyData] = await Promise.all([
-          api.getSources(),
-          api.getAWSPolicy(),
+          api.getSources(params),
+          api.getAWSPolicy(params),
         ]);
         setSources(sourceData.sources ?? []);
         setPolicy(policyData);
         setPolicyText(JSON.stringify(policyData, null, 2));
       }
       if (tab === "receivers") {
-        const data = await api.getReceivers();
+        const data = await api.getReceivers(params);
         setReceivers(data);
         setReceiverText(JSON.stringify(data, null, 2));
       }
@@ -294,7 +294,7 @@ export default function AlertsPage() {
   const savePolicy = async () => {
     try {
       const parsed = JSON.parse(policyText) as AWSPolicy;
-      const result = await api.putAWSPolicy(parsed);
+      const result = await api.putAWSPolicy(params, parsed);
       setPolicy(result.policy);
       setNotice("Alarm selection policy saved");
     } catch (e) {
@@ -305,7 +305,7 @@ export default function AlertsPage() {
   const saveReceivers = async () => {
     try {
       const parsed = JSON.parse(receiverText) as ReceiverConfig;
-      await api.putReceivers(parsed);
+      await api.putReceivers(params, parsed);
       setReceivers(parsed);
       setNotice("Receiver configuration saved");
     } catch (e) {
