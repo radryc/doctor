@@ -171,6 +171,7 @@ export default function AlertsPage() {
       if (tab === "inbox") await loadInbox();
       if (tab === "subspace") {
         const p = new URLSearchParams({ tenant, scope: "subspace" });
+        if (partition) p.set("partition", partition);
         const data = await api.getAlerts(p);
         setSubspaceAlerts(data.alerts ?? []);
       }
