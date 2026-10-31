@@ -1205,7 +1205,17 @@ func targetRank(backend Backend) int {
 }
 
 func backendFingerprint(backend Backend) string {
-	return strings.Join([]string{backend.Name, backend.Kind, backend.BaseURL, backend.Token, backend.Tenant}, "|")
+	return strings.Join([]string{
+		backend.Name,
+		backend.Kind,
+		backend.BaseURL,
+		backend.Token,
+		backend.Tenant,
+		backend.Index,
+		backend.Project,
+		backend.Dataset,
+		backend.Table,
+	}, "|")
 }
 
 const (

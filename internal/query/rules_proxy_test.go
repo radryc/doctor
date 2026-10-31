@@ -43,6 +43,28 @@ func TestRulesProxyReadAndEvaluateOnly(t *testing.T) {
 	}
 }
 
+func TestRulesProxyForwardsServiceToken(t *testing.T) {
+	var got string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"groups":[]}`)
+	}))
+	defer target.Close()
+
+	svc := &Service{}
+	svc.SetRulesURL(target.URL)
+	svc.SetRulesToken("rules-api-token")
+	rec := httptest.NewRecorder()
+	svc.handleRulesProxy(rec, httptest.NewRequest(http.MethodGet, "/v1/rules", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got != "Bearer rules-api-token" {
+		t.Fatalf("authorization = %q", got)
+	}
+}
+
 func TestRulesProxyUnavailableWithoutURL(t *testing.T) {
 	svc := &Service{}
 	rec := httptest.NewRecorder()

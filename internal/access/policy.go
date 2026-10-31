@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/radryc/doctor/internal/segment"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
-	"github.com/radryc/doctor/internal/segment"
 )
 
 // PolicyOptions configures the repo-managed access policy gate.
@@ -113,7 +113,7 @@ func (g *PolicyGate) policy() *policy.Policy {
 // admin subject (from the shared auth verifier) always bypasses, even while no
 // policy is loaded.
 func (g *PolicyGate) IsAdmin(id authz.Identity) bool {
-	if id.Subject == "break-glass-admin" {
+	if id.Subject == "break-glass-admin" || id.ClientID == "break-glass-admin" {
 		return true
 	}
 	p := g.policy()
@@ -172,9 +172,27 @@ func (g *PolicyGate) PartitionVisible(id authz.Identity, partition string, signa
 	if g.IsAdmin(id) {
 		return true
 	}
+	if g.policy() == nil {
+		return false
+	}
+	return g.partitionReadable(id, partition, signal)
+}
+
+// partitionReadable evaluates the loaded policy without applying the
+// observe/enforce short-circuit. Observe mode uses it to report what would be
+// filtered, while PartitionVisible uses it only after enforcement is enabled.
+func (g *PolicyGate) partitionReadable(id authz.Identity, partition string, signal policy.Signal) bool {
+	if g == nil || signal == policy.SignalMetrics {
+		return true
+	}
+	if g.IsAdmin(id) {
+		return true
+	}
 	p := g.policy()
 	if p == nil {
-		return false
+		// No policy is loaded yet. Observe mode cannot predict a decision;
+		// enforcement fails closed in PartitionVisible instead.
+		return true
 	}
 	if strings.TrimSpace(partition) == "" {
 		return false
@@ -247,7 +265,6 @@ func (g *PolicyGate) FilterLogs(id authz.Identity, records []segment.LogRecord) 
 			continue
 		}
 		if canonical != rec.Partition {
-			rec = rec
 			rec.Partition = canonical
 		}
 		kept = append(kept, rec)
@@ -278,7 +295,6 @@ func (g *PolicyGate) FilterSpans(id authz.Identity, spans []segment.TraceRecord)
 			continue
 		}
 		if canonical != span.Partition {
-			span = span
 			span.Partition = canonical
 		}
 		kept = append(kept, span)
@@ -291,7 +307,7 @@ func countLogDrops(g *PolicyGate, id authz.Identity, records []segment.LogRecord
 	dropped := 0
 	for _, rec := range records {
 		attrs := mergedAttributes(rec.ResourceAttributes, rec.Attributes)
-		if !g.PartitionVisible(id, g.canonicalize(rec.Partition, attrs), policy.SignalLogs) {
+		if !g.partitionReadable(id, g.canonicalize(rec.Partition, attrs), policy.SignalLogs) {
 			dropped++
 		}
 	}
@@ -302,7 +318,7 @@ func countSpanDrops(g *PolicyGate, id authz.Identity, spans []segment.TraceRecor
 	dropped := 0
 	for _, span := range spans {
 		attrs := mergedAttributes(span.ResourceAttributes, span.Attributes)
-		if !g.PartitionVisible(id, g.canonicalize(span.Partition, attrs), policy.SignalTraces) {
+		if !g.partitionReadable(id, g.canonicalize(span.Partition, attrs), policy.SignalTraces) {
 			dropped++
 		}
 	}

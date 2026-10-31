@@ -35,6 +35,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-trimpath otelc go build \
 
 FROM gcr.io/distroless/base-debian12
 ENV OTEL_GO_DISABLED_INSTRUMENTATIONS=nethttp,grpc
+WORKDIR /tmp
+USER 65532:65532
 
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=unknown

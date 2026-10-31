@@ -1,3 +1,7 @@
+import { useMemo } from "react";
+import type { EChartsCoreOption } from "echarts/core";
+import EChart from "./EChart";
+import { escapeHtml, useChartTheme } from "../../lib/chartTheme";
 import type { LogRecord } from "../../types/api";
 
 interface LogHistogramProps {
@@ -5,17 +9,15 @@ interface LogHistogramProps {
 }
 
 const BUCKETS = 20;
-const W = 600, H = 150, pL = 38, pB = 26, pT = 18, pR = 8;
-const cW = W - pL - pR, cH = H - pT - pB;
-const barW = cW / BUCKETS;
 
 type SevKey = "error" | "warn" | "info" | "debug";
 
-const SEV_COLORS: Record<SevKey, string> = {
-  error: "var(--chart-5)",
-  warn: "var(--chart-4)",
-  info: "var(--chart-2)",
-  debug: "var(--chart-text)",
+const SEV_ORDER: SevKey[] = ["error", "warn", "info", "debug"];
+const SEV_LABELS: Record<SevKey, string> = {
+  error: "ERROR",
+  warn: "WARN",
+  info: "INFO",
+  debug: "DEBUG",
 };
 
 function sevKey(text: string): SevKey {
@@ -35,116 +37,139 @@ function fmt(t: number): string {
   );
 }
 
-export default function LogHistogram({ records }: LogHistogramProps) {
-  if (!records.length) return null;
+interface HistogramData {
+  categories: string[];
+  starts: number[];
+  ends: number[];
+  buckets: Array<Record<SevKey, number>>;
+}
 
+function buildHistogram(records: LogRecord[]): HistogramData | null {
   const timestamps = records
-    .map((r) => new Date(r.timestamp).getTime())
-    .filter((t) => !isNaN(t));
-
-  if (!timestamps.length) return null;
+    .map((record) => new Date(record.timestamp).getTime())
+    .filter((timestamp) => !isNaN(timestamp));
+  if (timestamps.length === 0) return null;
 
   const minT = Math.min(...timestamps);
   const maxT = Math.max(...timestamps, minT + 1);
   const bucketMs = (maxT - minT) / BUCKETS || 60000;
 
-  type Bucket = Record<SevKey, number> & { total: number };
-  const data: Bucket[] = Array.from({ length: BUCKETS }, () => ({
-    error: 0, warn: 0, info: 0, debug: 0, total: 0,
+  const buckets: Array<Record<SevKey, number>> = Array.from({ length: BUCKETS }, () => ({
+    error: 0,
+    warn: 0,
+    info: 0,
+    debug: 0,
   }));
 
-  records.forEach((r) => {
-    const t = new Date(r.timestamp).getTime();
-    if (isNaN(t)) return;
-    const bi = Math.min(Math.floor((t - minT) / bucketMs), BUCKETS - 1);
-    const k = sevKey(r.severity_text ?? "");
-    data[bi][k]++;
-    data[bi].total++;
-  });
+  for (const record of records) {
+    const timestamp = new Date(record.timestamp).getTime();
+    if (isNaN(timestamp)) continue;
+    const index = Math.min(Math.floor((timestamp - minT) / bucketMs), BUCKETS - 1);
+    buckets[index][sevKey(record.severity_text ?? "")] += 1;
+  }
 
-  const maxCount = Math.max(1, ...data.map((b) => b.total));
+  return {
+    categories: Array.from({ length: BUCKETS }, (_, index) => fmt(minT + index * bucketMs)),
+    starts: Array.from({ length: BUCKETS }, (_, index) => minT + index * bucketMs),
+    ends: Array.from({ length: BUCKETS }, (_, index) => minT + (index + 1) * bucketMs),
+    buckets,
+  };
+}
 
-  const legend: [string, SevKey][] = [
-    ["ERROR", "error"],
-    ["WARN", "warn"],
-    ["INFO", "info"],
-    ["DEBUG", "debug"],
-  ];
+export default function LogHistogram({ records }: LogHistogramProps) {
+  const theme = useChartTheme();
+  const histogram = useMemo(() => buildHistogram(records), [records]);
+
+  const option = useMemo<EChartsCoreOption>(() => {
+    if (!histogram) return {};
+    const colors: Record<SevKey, string> = {
+      error: theme.palette[4],
+      warn: theme.palette[3],
+      info: theme.palette[1],
+      debug: theme.text,
+    };
+
+    return {
+      animation: false,
+      color: SEV_ORDER.map((severity) => colors[severity]),
+      grid: { left: 4, right: 8, top: 22, bottom: 4, containLabel: true },
+      legend: {
+        top: 0,
+        left: 0,
+        icon: "roundRect",
+        itemWidth: 8,
+        itemHeight: 8,
+        itemGap: 10,
+        textStyle: { color: theme.text, fontSize: 9 },
+      },
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        backgroundColor: theme.elevated,
+        borderColor: theme.borderStrong,
+        borderWidth: 1,
+        padding: [5, 7],
+        textStyle: { color: theme.text, fontSize: 11 },
+        extraCssText: "border-radius:6px;",
+        axisPointer: { type: "shadow", shadowStyle: { color: theme.grid } },
+        formatter: (params: unknown) => {
+          const list = (Array.isArray(params) ? params : [params]) as Array<{
+            dataIndex?: number;
+            seriesName?: string;
+            value?: number;
+          }>;
+          if (list.length === 0) return "";
+          const index = list[0]?.dataIndex ?? 0;
+          const start = histogram.starts[index] ?? 0;
+          const end = histogram.ends[index] ?? start;
+          const rows = list
+            .filter((item) => Number(item.value) > 0)
+            .map(
+              (item) =>
+                `<div class="ts-tooltip__row">` +
+                `<span class="ts-tooltip__name">${escapeHtml(item.seriesName ?? "")}</span>` +
+                `<span class="ts-tooltip__value">${Number(item.value)}</span>` +
+                `</div>`
+            )
+            .join("");
+          return (
+            `<div class="ts-tooltip"><div class="ts-tooltip__time">${fmt(start)} – ${fmt(end)}</div>` +
+            `${rows || '<div class="ts-tooltip__row">No logs</div>'}</div>`
+          );
+        },
+      },
+      xAxis: {
+        type: "category",
+        data: histogram.categories,
+        axisLine: { lineStyle: { color: theme.border } },
+        axisTick: { show: false },
+        axisLabel: { color: theme.text, fontSize: 9, hideOverlap: true },
+      },
+      yAxis: {
+        type: "value",
+        minInterval: 1,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: { color: theme.text, fontSize: 9 },
+        splitLine: { lineStyle: { color: theme.grid, type: "dashed" } },
+      },
+      series: SEV_ORDER.map((severity) => ({
+        type: "bar" as const,
+        name: SEV_LABELS[severity],
+        stack: "severity",
+        data: histogram.buckets.map((bucket) => bucket[severity]),
+        barMaxWidth: 14,
+        itemStyle: { color: colors[severity] },
+        emphasis: { focus: "series" as const },
+      })),
+    };
+  }, [histogram, theme]);
+
+  if (!histogram) return null;
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ display: "block", width: "100%", maxHeight: 96 }}>
-      {/* Grid */}
-      {[0, 1, 2, 3, 4].map((i) => {
-        const y = pT + cH - (i / 4) * cH;
-        return (
-          <g key={i}>
-            <line
-              x1={pL} y1={y} x2={pL + cW} y2={y}
-              stroke="var(--chart-grid)" strokeWidth={1} strokeDasharray="3,3"
-            />
-            <text x={pL - 4} y={y + 4} textAnchor="end" fill="var(--chart-text)" fontSize={10}>
-              {Math.round((maxCount * i) / 4)}
-            </text>
-          </g>
-        );
-      })}
-
-      {/* Bars */}
-      {data.map((b, i) => {
-        let yOff = 0;
-        return (
-          <g key={i}>
-            {(["error", "warn", "info", "debug"] as SevKey[]).map((k) => {
-              if (!b[k]) return null;
-              const bH = (b[k] / maxCount) * cH;
-              const rect = (
-                <rect
-                  key={k}
-                  x={pL + i * barW + 1}
-                  y={pT + cH - yOff - bH}
-                  width={barW - 2}
-                  height={bH}
-                  fill={SEV_COLORS[k]}
-                  rx={1}
-                />
-              );
-              yOff += bH;
-              return rect;
-            })}
-          </g>
-        );
-      })}
-
-      {/* X-axis labels */}
-      {[0, 1, 2, 3, 4].map((i) => (
-        <text
-          key={i}
-          x={pL + (i / 4) * cW}
-          y={H - 4}
-          textAnchor="middle"
-          fill="var(--chart-text)"
-          fontSize={10}
-        >
-          {fmt(minT + (i / 4) * (maxT - minT))}
-        </text>
-      ))}
-
-      {/* Legend */}
-      {(() => {
-        let lx = pL;
-        return legend.map(([lbl, key]) => {
-          const el = (
-            <g key={key}>
-              <rect x={lx} y={4} width={10} height={10} fill={SEV_COLORS[key]} rx={2} />
-              <text x={lx + 13} y={13} fill="var(--chart-text)" fontSize={10}>
-                {lbl}
-              </text>
-            </g>
-          );
-          lx += lbl.length * 6.5 + 22;
-          return el;
-        });
-      })()}
-    </svg>
+    <div style={{ height: 108 }}>
+      <EChart option={option} ariaLabel="Log volume by severity over time" />
+    </div>
   );
 }

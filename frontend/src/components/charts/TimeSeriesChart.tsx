@@ -1,18 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Maximize2 } from "lucide-react";
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import type { EChartsCoreOption } from "echarts/core";
+import EChart from "./EChart";
+import SeriesLegend from "./SeriesLegend";
+import { escapeHtml, useChartTheme } from "../../lib/chartTheme";
 import type { MetricSeries } from "../../types/api";
 
 export type ChartDisplayMode = "line" | "area" | "bars";
@@ -70,6 +61,47 @@ export function formatDateTimeFull(value: number | Date | string): string {
   return date.toLocaleString(undefined, { timeZoneName: "short" });
 }
 
+interface TooltipItem {
+  seriesName?: string;
+  color?: string;
+  value?: unknown;
+  axisValue?: unknown;
+}
+
+/** Grafana-style tooltip: timestamp first, then values sorted high → low. */
+function tooltipFormatter(params: unknown): string {
+  const list = (Array.isArray(params) ? params : [params]) as TooltipItem[];
+  if (list.length === 0) return "";
+
+  const firstValue = list[0]?.value;
+  const firstTimestamp = Array.isArray(firstValue) ? Number(firstValue[0]) : NaN;
+  const label = Number.isFinite(firstTimestamp)
+    ? formatDateTimeFull(firstTimestamp)
+    : String(list[0]?.axisValue ?? "");
+
+  const rows = list
+    .map((item) => ({
+      name: item.seriesName ?? "",
+      color: item.color ?? "transparent",
+      value: Array.isArray(item.value) ? Number(item.value[1]) : Number(item.value),
+    }))
+    .filter((item) => Number.isFinite(item.value))
+    .sort((left, right) => right.value - left.value);
+
+  const body = rows
+    .map(
+      (row) =>
+        `<div class="ts-tooltip__row">` +
+        `<span class="ts-tooltip__swatch" style="background:${escapeHtml(row.color)}"></span>` +
+        `<span class="ts-tooltip__name">${escapeHtml(row.name)}</span>` +
+        `<span class="ts-tooltip__value">${escapeHtml(formatChartValue(row.value))}</span>` +
+        `</div>`
+    )
+    .join("");
+
+  return `<div class="ts-tooltip"><div class="ts-tooltip__time">${escapeHtml(label)}</div>${body}</div>`;
+}
+
 export default function TimeSeriesChart({
   series,
   height,
@@ -80,161 +112,177 @@ export default function TimeSeriesChart({
   maxSeries = 50,
   unit,
 }: TimeSeriesChartProps) {
+  const theme = useChartTheme();
+  // Series hidden with Ctrl/Cmd-click on the legend.
   const [hidden, setHidden] = useState<Set<string>>(() => new Set());
-  const visibleSeries = maxSeries > 0 && series.length > maxSeries ? series.slice(0, maxSeries) : series;
+  // Grafana/Thanos behaviour: a plain legend click isolates one series.
+  const [isolated, setIsolated] = useState<string | null>(null);
+
+  const visibleSeries = useMemo(
+    () => (maxSeries > 0 && series.length > maxSeries ? series.slice(0, maxSeries) : series),
+    [series, maxSeries]
+  );
+
   const keys = useMemo(
     () =>
       visibleSeries.map((item, index) => ({
         key: `s${index}`,
+        index,
         label: item.label,
-        color: CHART_PALETTE[index % CHART_PALETTE.length],
+        color: theme.palette[index % theme.palette.length],
       })),
-    [visibleSeries]
+    [visibleSeries, theme.palette]
   );
-  const renderedKeys = keys.filter((item) => !hidden.has(item.key));
 
-  const data = useMemo(() => {
-    const byTime = new Map<number, Record<string, number>>();
-    visibleSeries.forEach((item, index) => {
-      const key = `s${index}`;
+  // Reset visibility when the returned series set changes (new query, new
+  // partition). Position-based keys would otherwise hide unrelated series.
+  const identity = useMemo(
+    () => keys.map((item) => item.label).join("\u0000"),
+    [keys]
+  );
+  useEffect(() => {
+    setHidden(new Set());
+    setIsolated(null);
+  }, [identity]);
+
+  const activeIsolation =
+    isolated && keys.some((item) => item.key === isolated) ? isolated : null;
+
+  const visibleKeys = useMemo(
+    () =>
+      keys.filter(
+        (item) =>
+          !hidden.has(item.key) && (activeIsolation === null || item.key === activeIsolation)
+      ),
+    [keys, hidden, activeIsolation]
+  );
+
+  const withDate = useMemo(() => {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const item of visibleSeries) {
       for (const point of item.points) {
         const ts = new Date(point.timestamp).getTime();
-        const value = Number(point.value);
-        if (!Number.isFinite(ts) || !Number.isFinite(value)) continue;
-        let row = byTime.get(ts);
-        if (!row) {
-          row = { ts };
-          byTime.set(ts, row);
-        }
-        row[key] = value;
+        if (!Number.isFinite(ts)) continue;
+        if (ts < min) min = ts;
+        if (ts > max) max = ts;
       }
-    });
-    return [...byTime.values()].sort((a, b) => a.ts - b.ts);
+    }
+    return Number.isFinite(min) && Number.isFinite(max) && max - min > 12 * 60 * 60 * 1000;
   }, [visibleSeries]);
 
-  if (keys.length === 0 || data.length === 0) {
-    return <div className="dash-empty">No series in range.</div>;
-  }
+  const option = useMemo<EChartsCoreOption>(() => {
+    const chartSeries = visibleKeys.map((item) => {
+      const source = visibleSeries[item.index];
+      const data = (source?.points ?? [])
+        .map((point) => {
+          const ts = new Date(point.timestamp).getTime();
+          const value = Number(point.value);
+          return [ts, value] as [number, number];
+        })
+        .filter(([ts, value]) => Number.isFinite(ts) && Number.isFinite(value))
+        .sort((left, right) => left[0] - right[0]);
 
-  const withDate = data.length > 1 && data[data.length - 1].ts - data[0].ts > 12 * 60 * 60 * 1000;
-  const toggleSeries = (key: string) => {
-    setHidden((previous) => {
-      const next = new Set(previous);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
+      const stack = stacked ? "total" : undefined;
+      const emphasis = { focus: "series" as const };
+
+      if (displayMode === "bars") {
+        return {
+          type: "bar" as const,
+          name: item.label,
+          data,
+          stack,
+          barMaxWidth: 16,
+          itemStyle: { color: item.color, borderRadius: stacked ? 0 : [2, 2, 0, 0] },
+          emphasis,
+        };
+      }
+
+      if (displayMode === "area") {
+        return {
+          type: "line" as const,
+          name: item.label,
+          data,
+          stack,
+          smooth: false,
+          showSymbol: false,
+          symbol: "circle",
+          symbolSize: 6,
+          connectNulls: true,
+          sampling: "lttb" as const,
+          lineStyle: { color: item.color, width: 2 },
+          itemStyle: { color: item.color },
+          areaStyle: { color: item.color, opacity: stacked ? 0.25 : 0.14 },
+          emphasis,
+        };
+      }
+
+      return {
+        type: "line" as const,
+        name: item.label,
+        data,
+        smooth: false,
+        showSymbol: false,
+        symbol: "circle",
+        symbolSize: 6,
+        connectNulls: true,
+        sampling: "lttb" as const,
+        lineStyle: { color: item.color, width: 2 },
+        itemStyle: { color: item.color },
+        emphasis,
+      };
     });
-  };
 
-  const common = {
-    data,
-    margin: { top: 16, right: 12, bottom: 4, left: 0 },
-  };
-  const grid = <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} />;
-  const xAxis = (
-    <XAxis
-      dataKey="ts"
-      type="number"
-      domain={["dataMin", "dataMax"]}
-      tickFormatter={(value) => formatAxisTime(Number(value), withDate)}
-      minTickGap={28}
-      tick={{ fill: "var(--chart-text)", fontSize: 10 }}
-      stroke="var(--ui-border)"
-    />
-  );
-  const yAxis = (
-    <YAxis
-      width={48}
-      tickFormatter={(value) => formatChartValue(Number(value))}
-      tick={{ fill: "var(--chart-text)", fontSize: 10 }}
-      stroke="var(--ui-border)"
-    />
-  );
-  const tooltip = (
-    <Tooltip
-      labelFormatter={(label) => formatDateTimeFull(Number(label))}
-      formatter={(value, name) => [formatChartValue(Number(value)), name]}
-      contentStyle={{
-        background: "var(--ui-elevated)",
-        border: "1px solid var(--ui-border-strong)",
-        borderRadius: 6,
-        color: "var(--ui-text)",
-        fontSize: 11,
-        maxHeight: 280,
-        overflowY: "auto",
-      }}
-      labelStyle={{ color: "var(--ui-muted)" }}
-      itemStyle={{ color: "var(--ui-text)" }}
-      cursor={{ stroke: "var(--ui-border-strong)", strokeDasharray: "3 3" }}
-    />
-  );
+    return {
+      animation: false,
+      color: theme.palette,
+      grid: { left: 4, right: 14, top: 16, bottom: 4, containLabel: true },
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        backgroundColor: theme.elevated,
+        borderColor: theme.borderStrong,
+        borderWidth: 1,
+        padding: [6, 8],
+        textStyle: { color: theme.text, fontSize: 11 },
+        extraCssText: "max-height:300px;overflow-y:auto;border-radius:6px;",
+        axisPointer: {
+          type: "line",
+          lineStyle: { color: theme.borderStrong, type: "dashed" },
+        },
+        formatter: tooltipFormatter,
+      },
+      xAxis: {
+        type: "time",
+        boundaryGap: displayMode === "bars" ? ["2%", "2%"] : false,
+        axisLine: { lineStyle: { color: theme.border } },
+        axisTick: { show: false },
+        axisLabel: {
+          color: theme.text,
+          fontSize: 10,
+          hideOverlap: true,
+          formatter: (value: number) => formatAxisTime(Number(value), withDate),
+        },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        type: "value",
+        scale: displayMode !== "bars",
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: {
+          color: theme.text,
+          fontSize: 10,
+          formatter: (value: number) => formatChartValue(Number(value)),
+        },
+        splitLine: { lineStyle: { color: theme.grid, type: "dashed" } },
+      },
+      series: chartSeries,
+    };
+  }, [displayMode, stacked, theme, visibleKeys, visibleSeries, withDate]);
 
-  let chart;
-  if (displayMode === "bars") {
-    chart = (
-      <BarChart {...common}>
-        {grid}
-        {xAxis}
-        {yAxis}
-        {tooltip}
-        {renderedKeys.map((item) => (
-          <Bar
-            key={item.key}
-            dataKey={item.key}
-            name={item.label}
-            fill={item.color}
-            stackId={stacked ? "stack" : undefined}
-            radius={[2, 2, 0, 0]}
-            isAnimationActive={false}
-          />
-        ))}
-      </BarChart>
-    );
-  } else if (displayMode === "area") {
-    chart = (
-      <AreaChart {...common}>
-        {grid}
-        {xAxis}
-        {yAxis}
-        {tooltip}
-        {renderedKeys.map((item) => (
-          <Area
-            key={item.key}
-            dataKey={item.key}
-            name={item.label}
-            stroke={item.color}
-            fill={item.color}
-            fillOpacity={stacked ? 0.2 : 0.12}
-            strokeWidth={2}
-            stackId={stacked ? "stack" : undefined}
-            isAnimationActive={false}
-          />
-        ))}
-      </AreaChart>
-    );
-  } else {
-    chart = (
-      <LineChart {...common}>
-        {grid}
-        {xAxis}
-        {yAxis}
-        {tooltip}
-        {renderedKeys.map((item) => (
-          <Line
-            key={item.key}
-            type="linear"
-            dataKey={item.key}
-            name={item.label}
-            stroke={item.color}
-            strokeWidth={2}
-            dot={false}
-            activeDot={{ r: 3 }}
-            connectNulls
-            isAnimationActive={false}
-          />
-        ))}
-      </LineChart>
-    );
+  if (keys.length === 0 || visibleSeries.every((item) => item.points.length === 0)) {
+    return <div className="dash-empty">No series in range.</div>;
   }
 
   return (
@@ -273,38 +321,42 @@ export default function TimeSeriesChart({
         </button>
       )}
       <div className="timeseries-chart__plot">
-        {renderedKeys.length === 0 ? (
+        {visibleKeys.length === 0 ? (
           <div className="dash-empty">All series are hidden. Click a legend item to show it again.</div>
         ) : (
-          <ResponsiveContainer width="100%" height="100%">
-            {chart}
-          </ResponsiveContainer>
+          <EChart
+            option={option}
+            ariaLabel="Time series chart"
+            style={{ cursor: onExpand ? "zoom-in" : undefined }}
+          />
         )}
       </div>
       {showLegend && (
-        <div className="timeseries-chart__legend">
-          {keys.map((item) => (
-            <button
-              type="button"
-              key={item.key}
-              className={"timeseries-chart__legend-item" + (hidden.has(item.key) ? " is-hidden" : "")}
-              title={hidden.has(item.key) ? `Show ${item.label}` : `Hide ${item.label}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                toggleSeries(item.key);
-              }}
-            >
-              <span
-                className="timeseries-chart__swatch"
-                style={{
-                  backgroundColor: item.color,
-                  borderRadius: displayMode === "bars" ? 2 : 999,
-                }}
-              />
-              <span className="timeseries-chart__legend-label">{item.label}</span>
-            </button>
-          ))}
-        </div>
+        <SeriesLegend
+          items={keys}
+          hidden={hidden}
+          isolated={activeIsolation}
+          swatchShape={displayMode === "bars" ? "square" : "circle"}
+          onToggle={(key) =>
+            setHidden((previous) => {
+              const next = new Set(previous);
+              if (next.has(key)) next.delete(key);
+              else next.add(key);
+              return next;
+            })
+          }
+          onIsolate={(key) => {
+            if (key !== null) {
+              setHidden((previous) => {
+                if (!previous.has(key)) return previous;
+                const next = new Set(previous);
+                next.delete(key);
+                return next;
+              });
+            }
+            setIsolated(key);
+          }}
+        />
       )}
     </div>
   );

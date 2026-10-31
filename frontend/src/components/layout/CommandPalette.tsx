@@ -55,6 +55,7 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const [partitions, setPartitions] = useState<GuardianOverview["partitions"]>([]);
   const [notice, setNotice] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -325,6 +326,24 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
       if (event.key === "Enter") {
         event.preventDefault();
         filtered[active]?.run();
+        return;
+      }
+      if (event.key === "Tab" && dialogRef.current) {
+        const focusable = Array.from(
+          dialogRef.current.querySelectorAll<HTMLElement>(
+            'input, button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+          )
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -342,7 +361,7 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="command-modal" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div ref={dialogRef} className="command-modal" role="dialog" aria-modal="true" aria-label="Command palette">
         <div className="command-search">
           <Search size={17} aria-hidden="true" />
           <input

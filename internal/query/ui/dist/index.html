@@ -8,13 +8,21 @@
     <script>
       (function () {
         try {
-          var theme = localStorage.getItem("doctor.theme");
-          if (theme) document.documentElement.setAttribute("data-theme", theme);
+          var theme = localStorage.getItem("strata.theme") || localStorage.getItem("doctor.theme");
+          if (!theme) theme = "system";
+          var resolved = theme;
+          if (theme === "system") {
+            resolved = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "daylight"
+              : "midnight";
+          }
+          document.documentElement.setAttribute("data-theme", resolved);
+          document.documentElement.dataset.themePreference = theme;
         } catch (e) { /* localStorage unavailable */ }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-DUgh_P_C.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DWtTu6_0.css">
+    <script type="module" crossorigin src="/assets/index-Q7OnVEG6.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DWYKFxrY.css">
   </head>
   <body>
     <div id="root"></div>

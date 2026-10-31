@@ -10,3 +10,7 @@
 /frontend/tsconfig.tsbuildinfo
 
 # Do NOT ignore internal/query/ui/dist/ — it is embedded via //go:embed
+
+# Internal notes, duplicates, and generated backups (not public docs)
+docs/internal/
+docs-backup-*/

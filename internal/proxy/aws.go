@@ -200,11 +200,11 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 		case "|=":
 			conditions = append(conditions, "@message like /"+regexp.QuoteMeta(filter.Value)+"/")
 		case "|~":
-			conditions = append(conditions, "@message like /"+filter.Value+"/")
+			conditions = append(conditions, "@message like /"+insightsRegex(filter.Value)+"/")
 		case "!=":
 			conditions = append(conditions, "@message not like /"+regexp.QuoteMeta(filter.Value)+"/")
 		case "!~":
-			conditions = append(conditions, "@message not like /"+filter.Value+"/")
+			conditions = append(conditions, "@message not like /"+insightsRegex(filter.Value)+"/")
 		}
 	}
 	if len(conditions) > 0 {
@@ -228,6 +228,16 @@ func AWSLogsForLoki(ctx context.Context, client AWSClient, tenant string, pushdo
 		defaultGroup = logGroups[0]
 	}
 	return AWSLogRecords(records, tenant, defaultGroup, "", ""), nil
+}
+
+// insightsRegex keeps the user's regex semantics while preventing the value
+// from terminating the Insights /.../ literal or injecting a new pipeline
+// stage. Newlines are not valid in an Insights query line.
+func insightsRegex(value string) string {
+	value = strings.ReplaceAll(value, "/", `\/`)
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return value
 }
 
 // AWSLogRecords converts awsread log records into the segment shape used by

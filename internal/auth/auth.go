@@ -45,6 +45,11 @@ func (c Config) BrowserLoginEnabled() bool {
 // NewVerifier builds the verifier chain: OIDC first, then the break-glass token.
 // It returns (nil, nil) when authentication is not configured.
 func NewVerifier(cfg Config) (authz.TokenVerifier, error) {
+	issuerSet := strings.TrimSpace(cfg.Issuer) != ""
+	audienceSet := strings.TrimSpace(cfg.Audience) != ""
+	if issuerSet != audienceSet {
+		return nil, errors.New("auth: OIDC issuer and audience must be configured together")
+	}
 	verifiers := make([]authz.TokenVerifier, 0, 2)
 	if cfg.Issuer != "" && cfg.Audience != "" {
 		verifier, err := authz.NewOIDCVerifier(authz.OIDCConfig{

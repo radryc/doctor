@@ -83,6 +83,10 @@ func main() {
 	svc.SetGuardianAPIURL(cfg.GuardianAPIURL)
 	svc.SetDefaultPartition(cfg.DefaultPartition)
 	svc.SetRulesURL(cfg.RulesURL)
+	svc.SetRulesToken(cfg.RulesAPIToken)
+	if strings.TrimSpace(cfg.RulesURL) != "" && strings.TrimSpace(cfg.RulesAPIToken) == "" {
+		log.Printf("rules proxy is configured without DOCTOR_RULES_API_TOKEN; doctor-rules requires it and proxy requests will fail")
+	}
 	if strings.TrimSpace(cfg.RulesURL) != "" {
 		log.Printf("recording rules UI enabled via %s", cfg.RulesURL)
 	}
@@ -106,13 +110,11 @@ func main() {
 				Writable:    true,
 			})
 			if err != nil {
-				log.Printf("dashboards: could not connect MonoFS file store: %v — using in-memory store", err)
-				sharedFS = ruler.NewMemoryStore()
-			} else {
-				defer dashClient.Close()
-				sharedFS = dashClient
-				log.Printf("file store: using MonoFS at %s", cfg.MonoFSLogEngineAddr)
+				log.Fatalf("dashboards: connect MonoFS file store: %v", err)
 			}
+			defer dashClient.Close()
+			sharedFS = dashClient
+			log.Printf("file store: using MonoFS at %s", cfg.MonoFSLogEngineAddr)
 		} else {
 			sharedFS = ruler.NewMemoryStore()
 			log.Printf("file store: DOCTOR_MONOFS_TOKEN unset — using in-memory store")
@@ -234,8 +236,12 @@ func main() {
 	}
 
 	server := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: handler,
+		Addr:              cfg.HTTPAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
 	}
 	if telemetryHandle.Enabled() {
 		server.Handler = otelhttp.NewHandler(server.Handler, "doctor-query-http")
@@ -244,8 +250,14 @@ func main() {
 		<-ctx.Done()
 		_ = server.Shutdown(context.Background())
 	}()
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	var serveErr error
+	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+		serveErr = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	} else {
+		serveErr = server.ListenAndServe()
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		log.Fatal(serveErr)
 	}
 }
 
@@ -488,13 +500,15 @@ func buildFederationTokenResolver(cfg config.QueryConfig, files ruler.FileStore)
 	}
 	var bundle federation.TokenResolver
 	if files != nil && strings.TrimSpace(cfg.MonoFSFileToken) != "" {
-		bundle = federation.NewBundleTokenResolver(federation.BundleTokenResolverOptions{
+		bundleResolver := federation.NewBundleTokenResolver(federation.BundleTokenResolverOptions{
 			Files:      files,
 			Root:       cfg.FederationTokenBundleRoot,
 			Tenant:     cfg.FederationSnapshotTenant,
 			ShardCount: cfg.FederationTokenShardCount,
 			CacheTTL:   cfg.FederationTokenCacheTTL,
 		})
+		bundleResolver.Key = []byte(cfg.FederationTokenKey)
+		bundle = bundleResolver
 	}
 
 	switch mode {

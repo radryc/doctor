@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/doctor/internal/store"
+	"github.com/radryc/monofs/pkg/authz"
 	"sigs.k8s.io/yaml"
 )
 
@@ -17,6 +19,17 @@ import (
 // (observe-first rollout).
 type Authorizer interface {
 	CanModify(ctx context.Context, tenant, group string) bool
+}
+
+// AuthenticatedAuthorizer allows mutations from any authenticated caller.
+// The rules binary installs a static-token authentication middleware in front
+// of the API, so reaching this authorizer implies a valid service credential.
+type AuthenticatedAuthorizer struct{}
+
+// CanModify implements Authorizer.
+func (AuthenticatedAuthorizer) CanModify(ctx context.Context, _, _ string) bool {
+	id, ok := authz.IdentityFromContext(ctx)
+	return ok && !id.IsAnonymous()
 }
 
 // API serves the rule CRUD and manual evaluation endpoints.
@@ -33,6 +46,7 @@ type API struct {
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/v1/rules", a.handleCollection)
 	mux.HandleFunc("/v1/rules/status", a.handleStatus)
 	mux.HandleFunc("/v1/rules/evaluate", a.handleEvaluate)

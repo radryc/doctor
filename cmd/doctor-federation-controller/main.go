@@ -85,6 +85,7 @@ func main() {
 		MetadataConcurrency:  *concurrency,
 		SnapshotShardTargets: *shardTargets,
 		TokenShardCount:      *tokenShards,
+		TokenKey:             envOr("DOCTOR_FEDERATION_TOKEN_KEY", ""),
 		LeaseTTL:             *leaseTTL,
 		Holder:               *holder,
 		DryRun:               *dryRun,

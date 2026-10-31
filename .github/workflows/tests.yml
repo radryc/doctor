@@ -36,6 +36,14 @@ jobs:
         with:
           go-version-file: doctor/go.mod
           cache-dependency-path: doctor/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: doctor/frontend/package-lock.json
+      - name: Build frontend
+        working-directory: doctor/frontend
+        run: npm ci && npm run build
       - name: Run tests
         working-directory: doctor
         run: go test ./...
