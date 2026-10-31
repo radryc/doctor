@@ -15,6 +15,7 @@ import (
 	"github.com/radryc/doctor/internal/config"
 	"github.com/radryc/doctor/internal/ruler"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
+	"github.com/radryc/doctor/internal/telemetry"
 )
 
 func main() {
@@ -24,6 +25,28 @@ func main() {
 	cfg := config.LoadSentinel("doctor-sentinel")
 	if !cfg.Enabled {
 		log.Fatal("doctor-sentinel is disabled (DOCTOR_SENTINEL_ENABLED=false)")
+	}
+	telemetryCfg, err := telemetry.LoadConfig("doctor-sentinel")
+	if err != nil {
+		log.Fatal(err)
+	}
+	telemetryHandle, err := telemetry.Setup(ctx, telemetryCfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if telemetryHandle.Enabled() {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = telemetryHandle.Shutdown(shutdownCtx)
+		}()
+	}
+	heartbeatHandle, err := telemetry.RegisterComponentHeartbeat("doctor.sentinel")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if heartbeatHandle != nil {
+		defer func() { _ = heartbeatHandle.Unregister() }()
 	}
 
 	var files alerting.FileStore
@@ -69,6 +92,15 @@ func main() {
 
 	if cfg.QueryURL != "" {
 		service.Querier = ruler.NewHTTPQuerier(cfg.QueryURL, cfg.QueryToken, nil)
+		seeder := &alerting.DefaultRuleSeeder{
+			Querier:          service.Querier,
+			Store:            store,
+			Tenant:           cfg.DefaultTenant,
+			Interval:         5 * time.Minute,
+			Logger:           log.Default(),
+			PusherPartitions: cfg.PusherPartitions,
+		}
+		go seeder.Run(ctx)
 		scheduler := &alerting.RuleScheduler{
 			Load: func(ctx context.Context) ([]alerting.RuleGroupRef, error) {
 				return store.ListRuleGroups(ctx, "")
