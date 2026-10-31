@@ -64,14 +64,51 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 				break
 			}
 		}
-		if capable {
+
+		// Build the fallback subset regardless. In a mixed fleet, capable
+		// backends get the native TraceQL query while local/AWS/Elasticsearch
+		// backends get the best-effort subset instead of being silently
+		// omitted from the result.
+		fallback := search
+		fallbackErr := fallback.ApplyTraceQL()
+		if !capable {
+			if fallbackErr != nil {
+				return nil, accessWarnings, fmt.Errorf("%w: %v", ErrUnsupported, fallbackErr)
+			}
+			if fallback.MatchNone {
+				return nil, accessWarnings, nil
+			}
+			search = fallback
+		} else {
+			if len(targets) == 0 {
+				return nil, nil, nil
+			}
 			groups := make([][]TraceSummary, len(targets))
-			warnings, err := r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
-				upstream, ok := target.upstreams.Traces.(TraceQLUpstream)
-				if !ok {
+			var (
+				extraMu  sync.Mutex
+				extra    []Warning
+				warnings []Warning
+			)
+			warnings, err = r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
+				if upstream, ok := target.upstreams.Traces.(TraceQLUpstream); ok {
+					summaries, queryErr := upstream.SearchTraceQL(ctx, tenant, search.TraceQL, search.From, search.To, search.Limit)
+					if queryErr != nil {
+						return queryErr
+					}
+					groups[target.index] = summaries
 					return nil
 				}
-				summaries, queryErr := upstream.SearchTraceQL(ctx, tenant, search.TraceQL, search.From, search.To, search.Limit)
+				if fallbackErr != nil {
+					extraMu.Lock()
+					extra = append(extra, Warning{
+						Backend: target.backend.Name,
+						Signal:  SignalTraces,
+						Message: "TraceQL is not supported by this backend: " + fallbackErr.Error(),
+					})
+					extraMu.Unlock()
+					return nil
+				}
+				summaries, queryErr := target.upstreams.Traces.SearchTraces(ctx, tenant, fallback)
 				if queryErr != nil {
 					return queryErr
 				}
@@ -81,16 +118,7 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 			if err != nil {
 				return nil, warnings, err
 			}
-			return MergeTraceSummaries(groups...), warnings, nil
-		}
-
-		// No TraceQL-capable backend: fall back to the shared subset matcher
-		// for local/AWS/Elasticsearch sources.
-		if err := search.ApplyTraceQL(); err != nil {
-			return nil, accessWarnings, fmt.Errorf("%w: %v", ErrUnsupported, err)
-		}
-		if search.MatchNone {
-			return nil, accessWarnings, nil
+			return MergeTraceSummaries(groups...), append(warnings, extra...), nil
 		}
 	}
 	if len(targets) == 0 {

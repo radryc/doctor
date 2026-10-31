@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/monofs/pkg/authz/policy"
 )
 
 type rawLogQueryBackend interface {
@@ -29,6 +29,14 @@ type lokiVectorSample struct {
 }
 
 func (s *Service) handleLokiReady(w http.ResponseWriter, _ *http.Request) {
+	if s.logEngine == nil {
+		http.Error(w, "log engine is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if s.policyGate != nil && s.policyGate.Enforced() && !s.policyGate.Ready() {
+		http.Error(w, "access policy is not loaded", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ready"))
 }

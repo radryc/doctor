@@ -1036,7 +1036,7 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	writePrometheusSuccess(w, filterPrometheusDataByIdentity(r, mergePrometheusQueryData(localData, awsData, "vector")))
+	writePrometheusSuccess(w, s.filterPrometheusDataForRequest(r, mergePrometheusQueryData(localData, awsData, "vector")))
 }
 
 func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Request) {
@@ -1113,7 +1113,7 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	writePrometheusSuccess(w, filterPrometheusDataByIdentity(r, mergePrometheusQueryData(localData, awsData, "matrix")))
+	writePrometheusSuccess(w, s.filterPrometheusDataForRequest(r, mergePrometheusQueryData(localData, awsData, "matrix")))
 }
 
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {

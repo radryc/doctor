@@ -453,7 +453,7 @@ func (m *Manager) ListMetrics(ctx context.Context, namespace, metric string) ([]
 			if metric != "" && name != metric {
 				continue
 			}
-			cached = append(cached, awsstore.MetricDescriptor{MetricName: name, Region: target.Region})
+			cached = append(cached, awsstore.MetricDescriptor{MetricName: name, Region: target.Region, Account: target.Account})
 		}
 	}
 	if len(cached) > 0 {
@@ -478,7 +478,13 @@ func (m *Manager) ListMetrics(ctx context.Context, namespace, metric string) ([]
 			m.logger.Printf("federation: ListMetrics target=%s: %v", result.target.ID, result.err)
 			continue
 		}
+		start := len(out)
 		out = append(out, result.value...)
+		for i := start; i < len(out); i++ {
+			if out[i].Account == "" {
+				out[i].Account = result.target.Account
+			}
+		}
 	}
 	if len(out) == 0 && failures == len(targets) {
 		return nil, fmt.Errorf("aws federation: all %d targets failed ListMetrics", failures)
@@ -898,12 +904,13 @@ func (m *Manager) PrometheusSeries(ctx context.Context, match []string, start, e
 	if err != nil {
 		return nil, err
 	}
+	forwarded := forwardedMatches(match)
 	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) ([]map[string]string, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
 			return nil, clientErr
 		}
-		resp, callErr := client.PrometheusSeries(callCtx, match, start, end)
+		resp, callErr := client.PrometheusSeries(callCtx, forwarded, start, end)
 		if callErr != nil {
 			return nil, callErr
 		}
@@ -941,12 +948,13 @@ func (m *Manager) PrometheusLabels(ctx context.Context, match []string, start, e
 	if err != nil {
 		return nil, err
 	}
+	forwarded := forwardedMatches(match)
 	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) ([]string, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
 			return nil, clientErr
 		}
-		resp, callErr := client.PrometheusLabels(callCtx, match, start, end)
+		resp, callErr := client.PrometheusLabels(callCtx, forwarded, start, end)
 		if callErr != nil {
 			return nil, callErr
 		}
@@ -982,12 +990,13 @@ func (m *Manager) PrometheusLabelValues(ctx context.Context, label string, match
 	if err != nil {
 		return nil, err
 	}
+	forwarded := forwardedMatches(match)
 	results := fanoutTargets(m, ctx, targets, SignalMetrics, func(callCtx context.Context, target Target) ([]string, error) {
 		client, clientErr := m.clientFor(target)
 		if clientErr != nil {
 			return nil, clientErr
 		}
-		resp, callErr := client.PrometheusLabelValues(callCtx, label, match, start, end)
+		resp, callErr := client.PrometheusLabelValues(callCtx, label, forwarded, start, end)
 		if callErr != nil {
 			return nil, callErr
 		}
@@ -1025,6 +1034,20 @@ func (m *Manager) planMatches(ctx context.Context, match []string, start, end ti
 	}
 	expr := strings.Join(forwarded, " or ")
 	return m.plan(ctx, Query{Signal: SignalMetrics, Expr: expr, From: start, To: end})
+}
+
+// forwardedMatches prepares series/label selectors for a remote target. The
+// planner needs the target-selection labels (account, region, partition), but
+// CloudWatch does not expose them as metric labels, so they are stripped before
+// forwarding. Without this, /series and label discovery fail for every selector
+// that scopes the federation catalog.
+func forwardedMatches(match []string) []string {
+	out := make([]string, 0, len(match))
+	for _, selector := range match {
+		stripped, _ := proxy.AWSQueryMode(selector)
+		out = append(out, stripTargetLabels(stripped))
+	}
+	return out
 }
 
 func (m *Manager) convertLogRecords(records []awsstore.LogRecord, target Target) []segment.LogRecord {
@@ -1083,7 +1106,7 @@ func dedupeMetricDescriptors(in []awsstore.MetricDescriptor) []awsstore.MetricDe
 	seen := make(map[string]struct{}, len(in))
 	out := make([]awsstore.MetricDescriptor, 0, len(in))
 	for _, item := range in {
-		key := item.Namespace + "\x00" + item.MetricName + "\x00" + item.Region
+		key := item.Account + "\x00" + item.Namespace + "\x00" + item.MetricName + "\x00" + item.Region
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -1091,6 +1114,9 @@ func dedupeMetricDescriptors(in []awsstore.MetricDescriptor) []awsstore.MetricDe
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].Account != out[j].Account {
+			return out[i].Account < out[j].Account
+		}
 		if out[i].Namespace == out[j].Namespace {
 			return out[i].MetricName < out[j].MetricName
 		}

@@ -37,15 +37,8 @@ import { useConfig } from "../context/ConfigContext";
 import TraceWaterfall from "../components/charts/TraceWaterfall";
 import TraceFlow from "../components/charts/TraceFlow";
 import GraphQueryBuilder from "../components/charts/GraphQueryBuilder";
+import MiniLineChart from "../components/charts/MiniLineChart";
 import { resolveNodeKind } from "../components/topology/nodeKind";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
 
 interface LayoutNode extends GuardianTopologyNode {
   x: number;
@@ -2480,14 +2473,11 @@ export default function PartitionAssetsPage() {
                               ) : keyMetricData.length === 0 ? (
                                 <div className="h-full flex items-center justify-center text-xs text-slate-600">No samples in the selected window</div>
                               ) : (
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <LineChart data={keyMetricData}>
-                                    <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
-                                    <YAxis stroke="var(--chart-text)" fontSize={10} />
-                                    <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
-                                    <Line type="monotone" dataKey="value" name={detectedMetric} stroke="var(--chart-1)" strokeWidth={1.5} dot={false} />
-                                  </LineChart>
-                                </ResponsiveContainer>
+                                <MiniLineChart
+                                  data={keyMetricData}
+                                  series={[{ key: "value", label: detectedMetric, color: "var(--chart-1)" }]}
+                                  ariaLabel={`Key metric ${detectedMetric}`}
+                                />
                               )}
                             </div>
                           </>
@@ -2569,16 +2559,11 @@ export default function PartitionAssetsPage() {
                           ) : customData.length === 0 || customSeries.length === 0 ? (
                             <div className="h-full flex items-center justify-center text-xs text-slate-600">Run a query to render a separate graph</div>
                           ) : (
-                            <ResponsiveContainer width="100%" height="100%">
-                              <LineChart data={customData}>
-                                <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
-                                <YAxis stroke="var(--chart-text)" fontSize={10} />
-                                <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
-                                {customSeries.map((series) => (
-                                  <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={1.5} dot={false} connectNulls />
-                                ))}
-                              </LineChart>
-                            </ResponsiveContainer>
+                            <MiniLineChart
+                              data={customData}
+                              series={customSeries}
+                              ariaLabel="Custom metric query graph"
+                            />
                           )}
                         </div>
                       </div>
@@ -2607,15 +2592,14 @@ export default function PartitionAssetsPage() {
                             <div className="h-44 flex items-center justify-center text-xs text-slate-600">No metric samples for the selected time window</div>
                           ) : (
                             <div className="h-44">
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={metricData}>
-                                  <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
-                                  <YAxis stroke="var(--chart-text)" fontSize={10} />
-                                  <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
-                                  <Line type="monotone" dataKey="p95" stroke="var(--chart-1)" strokeWidth={1.5} dot={false} />
-                                  <Line type="monotone" dataKey="p99" stroke="var(--chart-5)" strokeWidth={1.5} dot={false} />
-                                </LineChart>
-                              </ResponsiveContainer>
+                              <MiniLineChart
+                                data={metricData}
+                                series={[
+                                  { key: "p95", label: "p95", color: "var(--chart-1)" },
+                                  { key: "p99", label: "p99", color: "var(--chart-5)" },
+                                ]}
+                                ariaLabel="Latency p95 and p99"
+                              />
                             </div>
                           )}
                         </div>
@@ -2634,14 +2618,11 @@ export default function PartitionAssetsPage() {
                             <div className="h-44 flex items-center justify-center text-xs text-slate-600">No throughput data for the selected time window</div>
                           ) : (
                             <div className="h-44">
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={metricData}>
-                                  <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
-                                  <YAxis stroke="var(--chart-text)" fontSize={10} />
-                                  <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
-                                  <Line type="monotone" dataKey="rps" stroke="var(--chart-2)" strokeWidth={1.5} dot={false} />
-                                </LineChart>
-                              </ResponsiveContainer>
+                              <MiniLineChart
+                                data={metricData}
+                                series={[{ key: "rps", label: "rps", color: "var(--chart-2)" }]}
+                                ariaLabel="Throughput in requests per second"
+                              />
                             </div>
                           )}
                         </div>
@@ -2868,16 +2849,11 @@ export default function PartitionAssetsPage() {
                           ) : customData.length === 0 || customSeries.length === 0 ? (
                             <div className="h-full flex items-center justify-center text-xs text-slate-600">Apply and run a query to preview this graph</div>
                           ) : (
-                            <ResponsiveContainer width="100%" height="100%">
-                              <LineChart data={customData}>
-                                <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
-                                <YAxis stroke="var(--chart-text)" fontSize={10} />
-                                <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
-                                {customSeries.map((series) => (
-                                  <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={1.5} dot={false} connectNulls />
-                                ))}
-                              </LineChart>
-                            </ResponsiveContainer>
+                            <MiniLineChart
+                              data={customData}
+                              series={customSeries}
+                              ariaLabel="Custom metric query graph"
+                            />
                           )}
                         </div>
                       </div>
@@ -2993,16 +2969,11 @@ export default function PartitionAssetsPage() {
                                   ) : graph.data.length === 0 || graph.series.length === 0 ? (
                                     <div className="h-full flex items-center justify-center text-xs text-slate-600">No data for this graph yet</div>
                                   ) : (
-                                    <ResponsiveContainer width="100%" height="100%">
-                                      <LineChart data={graph.data}>
-                                        <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={10} />
-                                        <YAxis stroke="var(--chart-text)" fontSize={10} />
-                                        <Tooltip contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)", fontSize: 12 }} />
-                                        {graph.series.map((series) => (
-                                          <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={1.5} dot={false} connectNulls />
-                                        ))}
-                                      </LineChart>
-                                    </ResponsiveContainer>
+                                    <MiniLineChart
+                                      data={graph.data}
+                                      series={graph.series}
+                                      ariaLabel="Metric graph"
+                                    />
                                   )}
                                 </div>
                               </div>

@@ -28,7 +28,7 @@ func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.
 		return
 	}
 	writeProxyWarnings(w, warnings)
-	writePrometheusSuccess(w, filterPrometheusDataByIdentity(r, data))
+	writePrometheusSuccess(w, s.filterPrometheusDataForRequest(r, data))
 }
 
 // handlePrometheusQueryRangeViaRouter executes a range query through the
@@ -47,7 +47,7 @@ func (s *Service) handlePrometheusQueryRangeViaRouter(w http.ResponseWriter, r *
 		return
 	}
 	writeProxyWarnings(w, warnings)
-	writePrometheusSuccess(w, filterPrometheusDataByIdentity(r, data))
+	writePrometheusSuccess(w, s.filterPrometheusDataForRequest(r, data))
 }
 
 // handleProxyEndpoints lists the configured backends, fleet summary, and their health.

@@ -105,6 +105,15 @@ func TestNewVerifierBreakGlass(t *testing.T) {
 	}
 }
 
+func TestNewVerifierRequiresIssuerAndAudienceTogether(t *testing.T) {
+	if _, err := NewVerifier(Config{Issuer: "https://idp.example.com"}); err == nil {
+		t.Fatal("expected error when issuer is configured without audience")
+	}
+	if _, err := NewVerifier(Config{Audience: "doctor"}); err == nil {
+		t.Fatal("expected error when audience is configured without issuer")
+	}
+}
+
 func TestNewVerifierDisabled(t *testing.T) {
 	verifier, err := NewVerifier(Config{})
 	if err != nil || verifier != nil {
