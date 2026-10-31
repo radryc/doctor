@@ -29,6 +29,7 @@ type ControllerConfig struct {
 	MetadataConcurrency  int
 	SnapshotShardTargets int
 	TokenShardCount      int
+	TokenKey             string
 	LeaseTTL             time.Duration
 	Holder               string
 	DryRun               bool
@@ -112,13 +113,15 @@ func NewController(cfg ControllerConfig, files CatalogFileStore) (*Controller, e
 		cfg.Logger.Printf("federation controller: metadata cache reset: %v", err)
 		cache = &MetadataCache{entries: make(map[string]MetadataCacheEntry)}
 	}
+	tokenWriter := NewTokenBundleWriter(files, cfg.MonoFSToken, path.Join(cfg.SnapshotRoot, "tokens"), cfg.Tenant, cfg.TokenShardCount)
+	tokenWriter.Key = []byte(cfg.TokenKey)
 	controller := &Controller{
 		Config:        cfg,
 		Guardian:      NewGuardianFeed(cfg.GuardianURL, cfg.GuardianToken, nil),
 		Metadata:      NewMetadataFetcher(nil),
 		Files:         files,
 		Store:         snapshotStore,
-		Tokens:        NewTokenBundleWriter(files, cfg.MonoFSToken, path.Join(cfg.SnapshotRoot, "tokens"), cfg.Tenant, cfg.TokenShardCount),
+		Tokens:        tokenWriter,
 		Lease:         NewLeaderLease(files, cfg.MonoFSToken, cfg.SnapshotRoot, cfg.Tenant, cfg.Holder, cfg.LeaseTTL),
 		MetadataCache: cache,
 	}
@@ -257,6 +260,9 @@ func (c *Controller) Sync(ctx context.Context) (err error) {
 		c.Config.Logger.Printf("federation controller dry-run: targets=%d partitions=%d tokens=%d warnings=%d",
 			len(result.Snapshot.Targets), len(partitions), len(targetTokens), len(warnings))
 		return nil
+	}
+	if len(targetTokens) > 0 && (c.Tokens == nil || len(c.Tokens.Key) == 0) {
+		return errors.New("federation token encryption key is required (DOCTOR_FEDERATION_TOKEN_KEY)")
 	}
 
 	changedShards, err := c.Tokens.Write(ctx, targetTokens)

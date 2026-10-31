@@ -2,10 +2,12 @@ package federation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +132,84 @@ func TestBundleTokenResolverSupportsGuardianPusherRefs(t *testing.T) {
 	token, err := bundle.Resolve(context.Background(), target)
 	if err != nil || token != "bundle-token" {
 		t.Fatalf("Resolve() = %q, %v", token, err)
+	}
+}
+
+func TestTokenBundleEncryptionRoundTrip(t *testing.T) {
+	files := ruler.NewMemoryStore()
+	writer := NewTokenBundleWriter(files, "", "/doctor/v1/federation/tokens", "default", 4)
+	writer.Key = []byte("operator-secret")
+	target := Target{ID: "aws-1", TokenRef: "guardian-pusher://aws-1"}
+	if _, err := writer.Write(context.Background(), map[string]string{target.ID: "bundle-token"}); err != nil {
+		t.Fatalf("Write encrypted token: %v", err)
+	}
+	raw, err := files.ReadFile(context.Background(), writer.shardPath(writer.shardFor(target.ID)))
+	if err != nil {
+		t.Fatalf("read shard: %v", err)
+	}
+	if strings.Contains(string(raw), "bundle-token") {
+		t.Fatalf("encrypted shard contains plaintext token: %s", raw)
+	}
+	resolver := NewBundleTokenResolver(BundleTokenResolverOptions{
+		Files:      files,
+		Root:       "/doctor/v1/federation/tokens",
+		Tenant:     "default",
+		ShardCount: 4,
+	})
+	resolver.Key = []byte("operator-secret")
+	if token, err := resolver.Resolve(context.Background(), target); err != nil || token != "bundle-token" {
+		t.Fatalf("Resolve = %q, %v", token, err)
+	}
+	resolver.Invalidate(target)
+	resolver.Key = []byte("wrong-secret")
+	if _, err := resolver.Resolve(context.Background(), target); err == nil {
+		t.Fatal("Resolve with wrong key succeeded")
+	}
+}
+
+func TestTokenBundleWriterMigratesPlaintextShards(t *testing.T) {
+	files := ruler.NewMemoryStore()
+	writer := NewTokenBundleWriter(files, "", "/doctor/v1/federation/tokens", "default", 4)
+	target := Target{ID: "aws-1", TokenRef: "guardian-pusher://aws-1"}
+	if _, err := writer.Write(context.Background(), map[string]string{target.ID: "bundle-token"}); err != nil {
+		t.Fatalf("Write plaintext token: %v", err)
+	}
+	writer.Key = []byte("operator-secret")
+	if _, err := writer.Write(context.Background(), map[string]string{target.ID: "bundle-token"}); err != nil {
+		t.Fatalf("Write with key: %v", err)
+	}
+	raw, err := files.ReadFile(context.Background(), writer.shardPath(writer.shardFor(target.ID)))
+	if err != nil {
+		t.Fatalf("read shard: %v", err)
+	}
+	if strings.Contains(string(raw), "bundle-token") {
+		t.Fatalf("plaintext was not migrated: %s", raw)
+	}
+}
+
+func TestTokenBundleWriterRevokesRemovedTargets(t *testing.T) {
+	files := ruler.NewMemoryStore()
+	writer := NewTokenBundleWriter(files, "", "/doctor/v1/federation/tokens", "default", 4)
+	target := Target{ID: "aws-1", TokenRef: "guardian-pusher://aws-1"}
+	if _, err := writer.Write(context.Background(), map[string]string{target.ID: "bundle-token"}); err != nil {
+		t.Fatalf("Write initial token: %v", err)
+	}
+	resolver := NewBundleTokenResolver(BundleTokenResolverOptions{
+		Files:      files,
+		Root:       "/doctor/v1/federation/tokens",
+		Tenant:     "default",
+		ShardCount: 4,
+		CacheTTL:   time.Minute,
+	})
+	if token, err := resolver.Resolve(context.Background(), target); err != nil || token != "bundle-token" {
+		t.Fatalf("Resolve = %q, %v", token, err)
+	}
+	if _, err := writer.Write(context.Background(), map[string]string{}); err != nil {
+		t.Fatalf("Write empty token map: %v", err)
+	}
+	resolver.Invalidate(target)
+	if _, err := resolver.Resolve(context.Background(), target); !errors.Is(err, ErrTokenNotFound) {
+		t.Fatalf("Resolve after revocation error = %v, want ErrTokenNotFound", err)
 	}
 }
 

@@ -333,6 +333,9 @@ type BundleTokenResolver struct {
 	tenant     string
 	shardCount int
 	cacheTTL   time.Duration
+	// Key decrypts AES-256-GCM token shards. It is required when the bundle
+	// was published encrypted.
+	Key []byte
 
 	mu      sync.Mutex
 	shards  map[int]bundleTokenShard
@@ -468,14 +471,13 @@ func (r *BundleTokenResolver) loadShard(ctx context.Context, shard int) (map[str
 		}
 		return nil, fmt.Errorf("read token shard %s: %w", logicalPath, err)
 	}
-	var bundle struct {
-		Tokens map[string]string `json:"tokens"`
-	}
-	if err := json.Unmarshal(raw, &bundle); err != nil {
+	var doc tokenShardDocument
+	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("parse token shard %s: %w", logicalPath, err)
 	}
-	if bundle.Tokens == nil {
-		bundle.Tokens = map[string]string{}
+	tokens, err := decodeTokenShard(doc, r.Key)
+	if err != nil {
+		return nil, fmt.Errorf("decode token shard %s: %w", logicalPath, err)
 	}
-	return bundle.Tokens, nil
+	return tokens, nil
 }

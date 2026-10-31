@@ -21,13 +21,14 @@ const NAV = [
 
 interface SidebarProps {
   onOpenPalette: () => void;
+  mobileOpen?: boolean;
 }
 
-export default function Sidebar({ onOpenPalette }: SidebarProps) {
+export default function Sidebar({ onOpenPalette, mobileOpen = false }: SidebarProps) {
   const { config } = useConfig();
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${mobileOpen ? " is-open" : ""}`}>
       <div className="brand">
         <div className="brand__mark">
           <img src="/doctor.png" alt="Doctor" style={{ height: "2rem", width: "auto" }} />

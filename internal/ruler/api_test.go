@@ -1,12 +1,26 @@
 package ruler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/radryc/monofs/pkg/authz"
 )
+
+func TestAuthenticatedAuthorizer(t *testing.T) {
+	authorizer := AuthenticatedAuthorizer{}
+	if authorizer.CanModify(context.Background(), "default", "group") {
+		t.Fatal("anonymous caller must not modify rules")
+	}
+	ctx := authz.ContextWithIdentity(context.Background(), authz.Identity{Subject: "doctor-rules-api"})
+	if !authorizer.CanModify(ctx, "default", "group") {
+		t.Fatal("authenticated caller should modify rules")
+	}
+}
 
 func TestStatusReportsLeaseAndScheduler(t *testing.T) {
 	lease := NewLeaseManager(nil, "/doctor/v1/rules/.lease/leader.json", "ruler-1", 30*time.Second, 10*time.Second, nil)

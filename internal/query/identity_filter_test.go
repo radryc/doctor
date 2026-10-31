@@ -40,6 +40,31 @@ func TestFilterPrometheusDataByIdentity(t *testing.T) {
 	}
 }
 
+func TestFilterPrometheusDataByPartitionCanonicalizesAWS(t *testing.T) {
+	data := map[string]any{"result": []any{
+		map[string]any{"metric": map[string]string{
+			"source":       "aws",
+			"@aws.account": "123456789012",
+			"@aws.region":  "us-east-1",
+		}},
+		map[string]any{"metric": map[string]string{
+			"source":       "aws",
+			"@aws.account": "999999999999",
+			"@aws.region":  "us-east-1",
+		}},
+	}}
+	filtered := filterPrometheusDataByPartitionWith(data, "prod", func(account, _, _ string) string {
+		if account == "123456789012" {
+			return "prod"
+		}
+		return "other"
+	})
+	result := filtered["result"].([]any)
+	if len(result) != 1 {
+		t.Fatalf("filtered result = %+v, want one AWS series", result)
+	}
+}
+
 func TestFilterPrometheusDataByIdentityAWSIntentLabels(t *testing.T) {
 	data := map[string]any{"result": []any{
 		map[string]any{"metric": map[string]string{

@@ -57,6 +57,13 @@ type CostConfig struct {
 type IngestConfig struct {
 	DefaultTenant       string
 	TenantHeader        string
+	AuthToken           string
+	AllowedTenants      []string
+	MemoryLimitBytes    int64
+	TLSCertFile         string
+	TLSKeyFile          string
+	GRPCTLSCertFile     string
+	GRPCTLSKeyFile      string
 	GRPCAddr            string
 	HTTPAddr            string
 	DebugAddr           string
@@ -74,12 +81,15 @@ type QueryConfig struct {
 	DefaultTenant       string
 	TenantHeader        string
 	HTTPAddr            string
+	TLSCertFile         string
+	TLSKeyFile          string
 	GuardianURL         string
 	GuardianAPIURL      string
 	DefaultPartition    string
 	MonoFSLogEngineAddr string
 	RulesURL            string
 	SentinelURL         string
+	RulesAPIToken       string
 	AWSEnabled          bool
 	AWSBackendURL       string
 	AWSBackendToken     string
@@ -95,6 +105,7 @@ type QueryConfig struct {
 	FederationTokenCacheTTL        time.Duration
 	FederationTokenBundleRoot      string
 	FederationTokenShardCount      int
+	FederationTokenKey             string
 	FederationReloadInterval       time.Duration
 	FederationStaleAfter           time.Duration
 	FederationMaxFanout            int
@@ -163,6 +174,9 @@ type QueryConfig struct {
 type RulesConfig struct {
 	Enabled             bool
 	HTTPAddr            string
+	TLSCertFile         string
+	TLSKeyFile          string
+	APIToken            string
 	QueryURL            string
 	QueryToken          string
 	Workers             int
@@ -190,6 +204,9 @@ func LoadRules(service string) RulesConfig {
 	return RulesConfig{
 		Enabled:             envBool("DOCTOR_RULES_ENABLED", true),
 		HTTPAddr:            envString("DOCTOR_RULES_HTTP_ADDR", ":18081"),
+		TLSCertFile:         envString("DOCTOR_TLS_CERT_FILE", ""),
+		TLSKeyFile:          envString("DOCTOR_TLS_KEY_FILE", ""),
+		APIToken:            envString("DOCTOR_RULES_API_TOKEN", ""),
 		QueryURL:            envString("DOCTOR_RULES_QUERY_URL", ""),
 		QueryToken:          envString("DOCTOR_RULES_QUERY_TOKEN", ""),
 		Workers:             int(envInt64("DOCTOR_RULES_WORKERS", 8)),
@@ -279,9 +296,16 @@ func LoadIngest(service string) (IngestConfig, error) {
 	cfg := IngestConfig{
 		DefaultTenant:       envString("DOCTOR_DEFAULT_TENANT", "default"),
 		TenantHeader:        envString("DOCTOR_TENANT_HEADER", "X-Doctor-Tenant"),
+		AuthToken:           envString("DOCTOR_INGEST_AUTH_TOKEN", ""),
+		AllowedTenants:      envCSV("DOCTOR_INGEST_ALLOWED_TENANTS", nil),
+		MemoryLimitBytes:    envInt64("DOCTOR_MEMORY_LIMIT_BYTES", 858<<20),
+		TLSCertFile:         envString("DOCTOR_TLS_CERT_FILE", ""),
+		TLSKeyFile:          envString("DOCTOR_TLS_KEY_FILE", ""),
+		GRPCTLSCertFile:     envString("DOCTOR_GRPC_TLS_CERT_FILE", ""),
+		GRPCTLSKeyFile:      envString("DOCTOR_GRPC_TLS_KEY_FILE", ""),
 		GRPCAddr:            envString("DOCTOR_GRPC_ADDR", ":4317"),
 		HTTPAddr:            envString("DOCTOR_HTTP_ADDR", ":4318"),
-		DebugAddr:           envString("DOCTOR_DEBUG_ADDR", ":6060"),
+		DebugAddr:           envString("DOCTOR_DEBUG_ADDR", "127.0.0.1:6060"),
 		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
 		TraceBuffer: TraceBufferConfig{
 			Enabled:         envBool("DOCTOR_TRACE_BUFFER_ENABLED", true),
@@ -326,6 +350,15 @@ func LoadIngest(service string) (IngestConfig, error) {
 	if strings.TrimSpace(cfg.Privacy.HMACKey) == "" {
 		return IngestConfig{}, errors.New("DOCTOR_PRIVACY_HMAC_KEY is required")
 	}
+	if strings.TrimSpace(cfg.AuthToken) == "" {
+		return IngestConfig{}, errors.New("DOCTOR_INGEST_AUTH_TOKEN is required")
+	}
+	// Default to the single configured tenant instead of accepting every
+	// header value. Operators that need multiple tenants must opt in explicitly
+	// with DOCTOR_INGEST_ALLOWED_TENANTS.
+	if len(cfg.AllowedTenants) == 0 {
+		cfg.AllowedTenants = []string{cfg.DefaultTenant}
+	}
 	return cfg, nil
 }
 
@@ -334,12 +367,15 @@ func LoadQuery(service string) QueryConfig {
 		DefaultTenant:       envString("DOCTOR_DEFAULT_TENANT", "default"),
 		TenantHeader:        envString("DOCTOR_TENANT_HEADER", "X-Doctor-Tenant"),
 		HTTPAddr:            envString("DOCTOR_QUERY_HTTP_ADDR", envString("DOCTOR_HTTP_ADDR", ":18080")),
+		TLSCertFile:         envString("DOCTOR_TLS_CERT_FILE", ""),
+		TLSKeyFile:          envString("DOCTOR_TLS_KEY_FILE", ""),
 		GuardianURL:         envString("DOCTOR_GUARDIAN_UI_URL", ""),
 		GuardianAPIURL:      envString("DOCTOR_GUARDIAN_API_URL", envString("DOCTOR_GUARDIAN_UI_URL", "")),
 		DefaultPartition:    envString("DOCTOR_DEFAULT_PARTITION", ""),
 		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
 		RulesURL:            envString("DOCTOR_RULES_URL", ""),
 		SentinelURL:         envString("DOCTOR_SENTINEL_URL", ""),
+		RulesAPIToken:       envString("DOCTOR_RULES_API_TOKEN", ""),
 		AWSEnabled:          envBool("DOCTOR_AWS_ENABLED", true),
 		AWSBackendURL:       envString("DOCTOR_AWS_BACKEND_URL", ""),
 		AWSBackendToken:     envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
@@ -355,6 +391,7 @@ func LoadQuery(service string) QueryConfig {
 		FederationTokenCacheTTL:        envDuration("DOCTOR_FEDERATION_TOKEN_CACHE_TTL", 5*time.Minute),
 		FederationTokenBundleRoot:      envString("DOCTOR_FEDERATION_TOKEN_BUNDLE_ROOT", "/doctor/v1/federation/tokens"),
 		FederationTokenShardCount:      int(envInt64("DOCTOR_FEDERATION_TOKEN_SHARD_COUNT", 256)),
+		FederationTokenKey:             envString("DOCTOR_FEDERATION_TOKEN_KEY", ""),
 		FederationReloadInterval:       envDuration("DOCTOR_FEDERATION_RELOAD_INTERVAL", 30*time.Second),
 		FederationStaleAfter:           envDuration("DOCTOR_FEDERATION_STALE_AFTER", 0),
 		FederationMaxFanout:            int(envInt64("DOCTOR_FEDERATION_MAX_FANOUT", 32)),

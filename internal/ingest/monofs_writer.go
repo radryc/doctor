@@ -53,10 +53,11 @@ func (m *MonoFSWriter) WriteMetrics(ctx context.Context, records []segment.Metri
 	return m.client.IngestMetrics(ctx, newChunkID(), records)
 }
 
-// WriteGuardianEvents is a no-op for the monofs backend; guardian events are
-// not stored in the logengine.
+// WriteGuardianEvents is unsupported by the monofs logengine backend: the
+// logengine has no Guardian event chunk type. Return an explicit error so the
+// HTTP endpoint does not acknowledge and silently drop events.
 func (m *MonoFSWriter) WriteGuardianEvents(_ context.Context, _ []segment.GuardianEvent) error {
-	return nil
+	return ErrGuardianEventsUnsupported
 }
 
 func newChunkID() string {

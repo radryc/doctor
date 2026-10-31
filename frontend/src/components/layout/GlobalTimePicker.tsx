@@ -93,6 +93,7 @@ export default function GlobalTimePicker() {
         value={tr.autoRefresh}
         onChange={(e) => tr.setAutoRefresh(e.target.value)}
         title="Auto-refresh interval"
+        aria-label="Auto-refresh interval"
       >
         {AUTO_REFRESH_OPTIONS.map((o) => (
           <option key={o.value} value={o.value}>

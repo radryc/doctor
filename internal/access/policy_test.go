@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/radryc/doctor/internal/segment"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
-	"github.com/radryc/doctor/internal/segment"
 )
 
 const testPolicyYAML = `
@@ -124,6 +124,25 @@ func TestAdminBypass(t *testing.T) {
 	bg := authz.Identity{Subject: "break-glass-admin"}
 	if !gate.IsAdmin(bg) {
 		t.Fatal("break-glass subject must be treated as admin")
+	}
+	// The production break-glass verifier attaches the reserved name as a
+	// ClientID, not a Subject. Both spellings must bypass filtering.
+	bgClient := authz.Identity{ClientID: "break-glass-admin"}
+	if !gate.IsAdmin(bgClient) {
+		t.Fatal("break-glass client id must be treated as admin")
+	}
+	if len(gate.FilterLogs(bgClient, logRecords())) != 3 {
+		t.Fatal("break-glass client id must keep every log record")
+	}
+}
+
+func TestObserveModeReportsWouldFilter(t *testing.T) {
+	gate := newTestGate(t, false)
+	if got := countLogDrops(gate, foo(), logRecords()); got != 2 {
+		t.Fatalf("observe log drops = %d, want 2", got)
+	}
+	if got := countSpanDrops(gate, foo(), spanRecords()); got != 1 {
+		t.Fatalf("observe span drops = %d, want 1", got)
 	}
 }
 

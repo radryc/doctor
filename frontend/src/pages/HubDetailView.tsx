@@ -1,15 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Server, Activity } from "lucide-react";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
 import type { AssetGroup, HealthStatus } from "./FleetView";
 import { api } from "../api/client";
+import MiniLineChart from "../components/charts/MiniLineChart";
 import TraceWaterfall from "../components/charts/TraceWaterfall";
 import type {
   GuardianEventRecord,
@@ -781,17 +774,14 @@ export default function HubDetailView({
                   No latency metric samples for current filter window
                 </div>
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={metricData}>
-                    <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={11} />
-                    <YAxis stroke="var(--chart-text)" fontSize={11} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)" }}
-                    />
-                    <Line type="monotone" dataKey="p95" stroke="var(--chart-1)" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="p99" stroke="var(--chart-5)" strokeWidth={2} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+                <MiniLineChart
+                  data={metricData}
+                  series={[
+                    { key: "p95", label: "p95", color: "var(--chart-1)" },
+                    { key: "p99", label: "p99", color: "var(--chart-5)" },
+                  ]}
+                  ariaLabel="Latency p95 and p99"
+                />
               )}
             </div>
           </div>
@@ -806,16 +796,11 @@ export default function HubDetailView({
                   No throughput metric samples for current filter window
                 </div>
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={metricData}>
-                    <XAxis dataKey="time" stroke="var(--chart-text)" fontSize={11} />
-                    <YAxis stroke="var(--chart-text)" fontSize={11} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "var(--ui-elevated)", borderColor: "var(--ui-border)", color: "var(--ui-text)" }}
-                    />
-                    <Line type="monotone" dataKey="rps" stroke="var(--chart-2)" strokeWidth={2} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+                <MiniLineChart
+                  data={metricData}
+                  series={[{ key: "rps", label: "rps", color: "var(--chart-2)" }]}
+                  ariaLabel="Throughput in requests per second"
+                />
               )}
             </div>
           </div>

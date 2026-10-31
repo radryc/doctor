@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/federation"
 	"github.com/radryc/doctor/internal/proxy"
@@ -51,6 +52,7 @@ type Service struct {
 	guardianClient   *http.Client
 	rulesProxy       *httputil.ReverseProxy
 	sentinelProxy    *httputil.ReverseProxy
+	rulesToken       string
 	policyGate       *access.PolicyGate
 	dashboardStore   DashboardStore
 
@@ -149,7 +151,7 @@ func (s *Service) handleFederationPlan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
 		return
 	}
-	if s.policyGate != nil && s.policyGate.Enforced() && !s.policyGate.IsAdmin(identityFromContext(r.Context())) {
+	if s.policyGate != nil && !s.policyGate.IsAdmin(identityFromContext(r.Context())) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "federation plan is admin only"})
 		return
 	}
@@ -247,6 +249,13 @@ func (s *Service) SetRulesURL(raw string) {
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	director := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		director(req)
+		if token := strings.TrimSpace(s.rulesToken); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "rules service unavailable: " + err.Error()})
 	}
@@ -272,6 +281,13 @@ func (s *Service) SetSentinelURL(raw string) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "sentinel service unavailable: " + err.Error()})
 	}
 	s.sentinelProxy = proxy
+}
+
+// SetRulesToken configures the service credential the query proxy presents to
+// the rules API. The rules binary requires this token for every route except
+// /healthz.
+func (s *Service) SetRulesToken(token string) {
+	s.rulesToken = strings.TrimSpace(token)
 }
 
 // guardianTimelineEntry mirrors Guardian's TimelineEntry JSON structure.
@@ -626,6 +642,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/ready", s.handleLokiReady)
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/api/v1/query", s.handlePrometheusQuery)
 	mux.HandleFunc("/api/v1/query_range", s.handlePrometheusQueryRange)
 	mux.HandleFunc("/api/v1/labels", s.handlePrometheusLabels)
@@ -1237,9 +1254,12 @@ func (s *Service) fetchAllGuardianTopologies(ctx context.Context) ([]augmentedTo
 		edges []guardianTopologyEdge
 	}
 	ch := make(chan result, len(partitions))
+	sem := make(chan struct{}, 8)
 
 	for _, p := range partitions {
 		go func(part string) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			topo, err := s.fetchGuardianTopology(ctx, part)
 			if err != nil || topo == nil {
 				ch <- result{}
