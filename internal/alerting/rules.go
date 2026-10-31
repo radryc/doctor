@@ -418,6 +418,11 @@ func prometheusResultSlice(data map[string]any) []any {
 	if data == nil {
 		return nil
 	}
+	// HTTPQuerier returns the unwrapped Prometheus data object ({"result":...}),
+	// while tests and some callers wrap it again under "data". Accept both.
+	if result, ok := data["result"].([]any); ok {
+		return result
+	}
 	inner, _ := data["data"].(map[string]any)
 	result, _ := inner["result"].([]any)
 	return result

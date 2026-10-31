@@ -226,6 +226,7 @@ type SentinelConfig struct {
 	LeaseTTL            time.Duration
 	LeaseRenew          time.Duration
 	RulerID             string
+	PusherPartitions    map[string]string
 
 	AWSEnabled        bool
 	AWSURL            string
@@ -265,6 +266,7 @@ func LoadSentinel(service string) SentinelConfig {
 		LeaseTTL:            envDuration("DOCTOR_SENTINEL_LEASE_TTL", 30*time.Second),
 		LeaseRenew:          envDuration("DOCTOR_SENTINEL_LEASE_RENEW", 10*time.Second),
 		RulerID:             rulerID,
+		PusherPartitions:    parsePusherPartitions(envString("DOCTOR_SENTINEL_PUSHER_PARTITIONS", "")),
 
 		AWSEnabled:        envBool("DOCTOR_SENTINEL_AWS_ENABLED", false),
 		AWSURL:            envString("DOCTOR_SENTINEL_AWS_URL", ""),
@@ -273,6 +275,23 @@ func LoadSentinel(service string) SentinelConfig {
 		AWSRegions:        envCSV("DOCTOR_SENTINEL_AWS_REGIONS", nil),
 		AWSAlarmSelection: envString("DOCTOR_SENTINEL_AWS_ALARM_SELECTION", ""),
 	}
+}
+
+// parsePusherPartitions parses "pusher=partition,pusher=partition" mappings.
+func parsePusherPartitions(raw string) map[string]string {
+	out := map[string]string{}
+	for _, entry := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(entry), "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func LoadIngest(service string) (IngestConfig, error) {
