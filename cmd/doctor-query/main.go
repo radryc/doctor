@@ -18,6 +18,7 @@ import (
 	"github.com/radryc/doctor/internal/config"
 	"github.com/radryc/doctor/internal/dashboards"
 	"github.com/radryc/doctor/internal/federation"
+	"github.com/radryc/doctor/internal/netguard"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/query"
 	"github.com/radryc/doctor/internal/ruler"
@@ -226,6 +227,11 @@ func main() {
 		handler = policyGate.Middleware(handler)
 	}
 	handler = authMiddleware.Wrap(handler)
+	tenantGuard := auth.NewTenantGuard(cfg.TenantHeader, cfg.DefaultTenant, cfg.AllowedTenants, cfg.SingleTenant)
+	handler = tenantGuard.Wrap(handler)
+	if len(cfg.AllowedTenants) > 0 || cfg.SingleTenant != "" {
+		log.Printf("tenant guard enabled (single=%q allowed=%v)", cfg.SingleTenant, cfg.AllowedTenants)
+	}
 	if cfg.AccessTrustTenantHeader {
 		trust := auth.NewTenantTrust(cfg.TenantHeader, log.Default())
 		handler = trust.Wrap(handler)
@@ -393,12 +399,19 @@ func loadTeamMapping(raw string) (authz.TeamMapping, error) {
 // fallback policy, and additional backends come from the static file and
 // Guardian discovery.
 func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient proxy.AWSClient, gate *access.Gate) {
+	urlPolicy := netguard.Policy{
+		RequireHTTPS:  cfg.BackendRequireHTTPS,
+		AllowLoopback: cfg.BackendAllowLoopback,
+		AllowPrivate:  cfg.BackendAllowPrivate,
+		AllowedHosts:  cfg.BackendAllowedHosts,
+	}
 	registries := make([]proxy.Registry, 0, 2)
 	if cfg.ProxyBackendsFile != "" {
 		static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
-			Path:     cfg.ProxyBackendsFile,
-			Interval: cfg.ProxyRegistryInterval,
-			Logger:   log.Default(),
+			Path:      cfg.ProxyBackendsFile,
+			Interval:  cfg.ProxyRegistryInterval,
+			Logger:    log.Default(),
+			URLPolicy: urlPolicy,
 		})
 		if err != nil {
 			log.Fatalf("load proxy backends: %v", err)
@@ -412,10 +425,11 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 			log.Printf("guardian discovery enabled but DOCTOR_GUARDIAN_API_URL is unset; discovery disabled")
 		} else {
 			discovery := proxy.NewGuardianDiscovery(proxy.GuardianDiscoveryConfig{
-				BaseURL:  cfg.GuardianAPIURL,
-				Token:    cfg.GuardianToken,
-				Interval: cfg.GuardianDiscoveryInterval,
-				Logger:   log.Default(),
+				BaseURL:   cfg.GuardianAPIURL,
+				Token:     cfg.GuardianToken,
+				Interval:  cfg.GuardianDiscoveryInterval,
+				URLPolicy: urlPolicy,
+				Logger:    log.Default(),
 			})
 			registries = append(registries, discovery)
 			go discovery.Run(ctx)

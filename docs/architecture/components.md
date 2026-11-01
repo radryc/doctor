@@ -368,7 +368,7 @@ Recording rules:
 | File | Responsibility |
 |---|---|
 | `types.go` | `Target`, `Snapshot`, `Query`, `Predicates`, `Plan`, `ScopeError` |
-| `catalog.go` | immutable-ish catalog with account/region/partition/log-group/service/metric indexes; validation; `byTrace` map is read but never populated |
+| `catalog.go` | immutable-ish catalog with account/region/partition/log-group/service/metric indexes; validation. Trace IDs are intentionally unindexed and use a bounded fallback. |
 | `builder.go` | joins Guardian partitions + pushers + discovery metadata into account/region targets |
 | `snapshot.go` | file/memory/MonoFS snapshot stores; sharded save with SHA-256 shard refs and manifest CAS |
 | `targets.go` | paginated, access-filtered target view |

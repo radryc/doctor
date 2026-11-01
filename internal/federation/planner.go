@@ -144,11 +144,10 @@ func (p *Planner) predicates(q Query) Predicates {
 
 func (p *Planner) resolve(pred Predicates) ([]Target, string) {
 	if pred.TraceID != "" {
-		if target, ok := p.catalog.ByTrace(pred.TraceID); ok {
-			return []Target{target}, ""
-		}
-		// No trace index: only fall back to a full try when the catalog is
-		// small enough for a bounded fan-out.
+		// The catalog has no trace-ID index. Trace-ID lookup is therefore a
+		// bounded catalog fan-out; large catalogs require an explicit scope
+		// (account, region, partition, or service) instead of scanning all
+		// targets. See docs/logical-flows/federation.md.
 		if p.catalog.Len() <= p.MaxFanout() {
 			return p.catalog.Targets(), ""
 		}

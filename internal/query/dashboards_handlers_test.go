@@ -33,6 +33,64 @@ func TestDashboardYAMLDownloadHeader(t *testing.T) {
 	}
 }
 
+const importDashboardYAML = `version: doctor.dashboard/v1
+id: imported-yaml
+title: Imported YAML
+tenant: default
+variables: []
+layout:
+  - id: w1
+    title: Imports
+    kind: stat
+    gridPos: {x: 0, y: 0, w: 3, h: 3}
+    queries:
+      - refId: A
+        datasource: prometheus
+        expr: vector(1)
+`
+
+func importDashboard(t *testing.T, svc *Service, query string, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboards/import?tenant=default"+query, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/yaml")
+	rec := httptest.NewRecorder()
+	svc.handleDashboardsRouter(rec, req)
+	return rec
+}
+
+func TestDashboardImportConflictModes(t *testing.T) {
+	svc := newDashboardTestService()
+	if rec := importDashboard(t, svc, "", importDashboardYAML); rec.Code != http.StatusOK {
+		t.Fatalf("first import status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	conflict := importDashboard(t, svc, "", importDashboardYAML)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("default conflict status = %d, body = %s", conflict.Code, conflict.Body.String())
+	}
+	if !strings.Contains(conflict.Body.String(), `"conflicts"`) {
+		t.Fatalf("conflict body = %s", conflict.Body.String())
+	}
+
+	skipped := importDashboard(t, svc, "&mode=skip-existing", importDashboardYAML)
+	if skipped.Code != http.StatusOK || !strings.Contains(skipped.Body.String(), `"skipped":1`) {
+		t.Fatalf("skip status = %d, body = %s", skipped.Code, skipped.Body.String())
+	}
+
+	overwritten := importDashboard(t, svc, "&mode=overwrite", importDashboardYAML)
+	if overwritten.Code != http.StatusOK || !strings.Contains(overwritten.Body.String(), `"imported":1`) {
+		t.Fatalf("overwrite status = %d, body = %s", overwritten.Code, overwritten.Body.String())
+	}
+}
+
+func TestDashboardImportRejectsUnknownMode(t *testing.T) {
+	svc := newDashboardTestService()
+	rec := importDashboard(t, svc, "&mode=merge", importDashboardYAML)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDashboardImportAcceptsYAML(t *testing.T) {
 	svc := newDashboardTestService()
 	body := `version: doctor.dashboard/v1

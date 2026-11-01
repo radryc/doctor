@@ -31,7 +31,9 @@ external gateway or network policy, not by changing Doctor’s default metrics s
 
 ## P0 — security blockers
 
-### [ ] 1. Add mTLS/credentials to MonoFS transport
+### [~] 1. Add mTLS/credentials to MonoFS transport
+
+**2026-11-01:** TLS/mTLS configuration, CA/client-cert loading, and a production fail-closed path landed; add a real mTLS round-trip test before closing.
 
 **Problem:** `store/monofs` still uses `insecure.NewCredentials()`, and `LogEngineClient` has no
 credential field. Ingest/query/rules log traffic and file-store traffic are protected only by network
@@ -59,7 +61,9 @@ reachability.
 
 ---
 
-### [ ] 2. Make tenant a real isolation boundary
+### [~] 2. Make tenant a real isolation boundary
+
+**2026-11-01:** A tenant guard now supports allowlists and a forced single tenant; MonoFS storage keys still ignore tenant, so physical/logical storage isolation remains.
 
 **Problem:** Ingest now restricts tenant claims, but query accepts any tenant and MonoFS ignores the
 tenant field entirely. Dashboards/rules use tenant as a path segment with no authorization.
@@ -85,7 +89,9 @@ tenant field entirely. Dashboards/rules use tenant as a path segment with no aut
 
 ---
 
-### [ ] 3. Harden dashboard access and audit
+### [~] 3. Harden dashboard access and audit
+
+**2026-11-01:** CSRF/origin checks and structured audit events landed; per-tenant/OWNERS authorization for dashboard reads and writes remains.
 
 **Problem:** Any authenticated caller can read/write any tenant’s dashboards. Writes are attributed
 to the `doctor-query` service principal; there is no CSRF token and no audit log.
@@ -112,33 +118,9 @@ to the `doctor-query` service principal; there is no CSRF token and no audit log
 
 ---
 
-### [ ] 4. Add remote-backend allowlisting and egress controls
+### [~] 5. Add structured audit logging and request IDs
 
-**Problem:** Static and Guardian-discovered backend URLs are trusted and receive bearer tokens.
-A malicious Guardian record or config file can point Doctor at internal services (SSRF).
-
-**Where:**
-- `internal/proxy/discovery_guardian.go`
-- `internal/federation/guardian_feed.go`
-- `internal/proxy/upstream_*`
-- `internal/store/aws/client.go`
-
-**Do:**
-- Allowlist schemes (`https` in production), hosts, and optionally ports.
-- Block loopback, link-local, and private ranges unless explicitly allowed for development.
-- Use separate credentials per backend where possible.
-- Add redirect handling rules; do not follow cross-host redirects with bearer tokens.
-- Add tests for blocked loopback/private URLs and allowed production URLs.
-
-**Acceptance:**
-- A discovered backend pointing at `127.0.0.1`, `169.254.169.254`, or a private range is rejected.
-- Tokens are never sent to a non-allowlisted host.
-
----
-
-## P1 — isolation, audit, and operability
-
-### [ ] 5. Add structured audit logging and request IDs
+**2026-11-01:** Request IDs and structured audit events cover query mutations; gRPC/downstream propagation and the full endpoint matrix remain.
 
 **Problem:** There is no audit trail for dashboard/rule mutations, federation publishes, break-glass
 use, admin endpoints, or data exports. Ingest has no access log.
@@ -157,7 +139,9 @@ use, admin endpoints, or data exports. Ingest has no access log.
 
 ---
 
-### [ ] 6. Stop leaking internal errors to clients
+### [~] 6. Stop leaking internal errors to clients
+
+**2026-11-01:** 5xx responses are sanitized behind a generic envelope and request ID; audit the remaining 4xx handlers for internal detail leaks.
 
 **Problem:** Many handlers return `err.Error()` directly. This can expose upstream URLs, hostnames,
 policy reasons, and internal details.
@@ -176,62 +160,9 @@ policy reasons, and internal details.
 
 ---
 
-### [ ] 7. Add dashboard import conflict handling
+### [~] 10. Bound federation discovery/list responses
 
-**Problem:** Import calls `Put` with an empty `If-Match`, which resolves to the latest version and
-can overwrite a concurrent edit.
-
-**Where:** `internal/query/dashboards_handlers.go`, `internal/dashboards/store.go`.
-
-**Do:**
-- Support an import mode (`overwrite`, `skip-existing`, `fail-on-conflict`).
-- Default to `fail-on-conflict` or `skip-existing`.
-- Return per-dashboard conflict details.
-
-**Acceptance:**
-- Concurrent import/update cannot silently lose an edit.
-- Tests cover each import mode.
-
----
-
-### [ ] 8. Populate or remove the federation trace index
-
-**Problem:** `Catalog.byTrace` is read by `ByTrace` but never written; trace-ID planning always falls
-back to a full catalog scan or `scope required`.
-
-**Where:** `internal/federation/catalog.go`, `internal/federation/planner.go`,
-`internal/federation/builder.go`.
-
-**Do:**
-- If pushers can publish a trace index, add it to `Target` and populate `byTrace` during catalog
-  construction.
-- Otherwise remove `byTrace`/`ByTrace` and document the fallback and fan-out cost.
-
-**Acceptance:**
-- Trace-ID planning is either indexed or explicitly documented as unindexed.
-- 150k-target load test asserts the chosen behavior.
-
----
-
-### [ ] 9. Filter the proxy fleet summary by visibility
-
-**Problem:** `EndpointsPage` returns an unfiltered `EndpointSummary` (counts by account/region/
-cluster/status) even though the page items have per-item access decisions.
-
-**Where:** `internal/proxy/router.go`, `internal/query/proxy_handlers.go`.
-
-**Do:**
-- Add `SummarizeEndpointsFor(ctx)` that applies the same visibility as the page.
-- Or restrict the summary to admins and return only aggregate safe counts to everyone else.
-- Cache per-identity summaries if 50k-endpoint cost is too high.
-
-**Acceptance:**
-- A caller cannot infer hidden endpoint/account/region counts from the summary.
-- Page and summary agree for the same identity.
-
----
-
-### [ ] 10. Bound federation discovery/list responses
+**2026-11-01:** Service discovery already caps scanned records; add explicit pagination/truncation to the remaining federation ListMetrics/ListServices/ListLogGroups responses.
 
 **Problem:** `ListMetrics`, `ListServices`, and `ListLogGroups` can serialize fleet-wide results for
 50k targets. `include_metadata=true` can attach large per-target metadata.
@@ -267,61 +198,9 @@ federation token key is a plain environment variable.
 
 ---
 
-### [ ] 12. Add deployment manifests and health probes
+### [~] 15. Remove structural duplication
 
-**Problem:** Only one Guardian partition metadata file exists; there are no Compose/Kubernetes
-manifests for the six binaries, no resource limits, and no probes.
-
-**Do:**
-- Add manifests for ingest/query/rules/controller/CLI jobs, MonoFS, and Guardian integration.
-- Configure liveness/readiness (`/healthz`, `/ready`), resource requests/limits, non-root UIDs,
-  read-only root filesystems, and network policies.
-- Mount TLS/secret material and persistent WAL/session volumes.
-- Document the required collector/gateway topology.
-
-**Acceptance:**
-- `docker compose` or a kind/k8s manifest starts the stack.
-- Probes and resource limits are present; pprof is not publicly exposed.
-
----
-
-## P2 — hardening and maintainability
-
-### [ ] 13. Add frontend tests and contract checks to CI
-
-**Problem:** CI now builds the frontend, but there are no frontend unit/component/e2e tests, and the
-Grafana contract scripts are not wired.
-
-**Do:**
-- Add a test runner (Vitest/Jest) for `lib/variables`, `lib/logs`, chart helpers, and critical pages.
-- Add `npm run lint`/typecheck to CI.
-- Run `scripts/verify-grafana-contract.sh` against a local stack in a job.
-- Add `govulncheck` and `staticcheck` (or golangci-lint) to CI.
-
-**Acceptance:**
-- CI fails on frontend type/test/lint regressions.
-- Grafana contract failures are caught before merge.
-
----
-
-### [ ] 14. Add security headers/CSP to the embedded UI
-
-**Problem:** `handleUI` sets only a content type. There is no CSP, `X-Content-Type-Options`, frame
-protection, or referrer policy.
-
-**Do:**
-- Add a small middleware for UI responses.
-- Start with `default-src 'self'`, `connect-src 'self'`, `img-src 'self' data:`, and
-  `frame-ancestors 'none'`; adjust for the actual asset/CDN setup.
-- Add `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and `Permissions-Policy`.
-
-**Acceptance:**
-- Browser security headers are present on HTML/static responses.
-- The UI and Grafana embedding requirements are documented.
-
----
-
-### [ ] 15. Remove structural duplication
+**2026-11-01:** Deleted `internal/guardian`, `internal/store/fs`, and the unused FleetViewPage; the larger ingest/buffer/router/parser consolidation remains.
 
 Track the consolidation work in [`docs/internal/duplicate-functionality.md`](docs/internal/duplicate-functionality.md).
 Highest-value slices:
@@ -358,7 +237,9 @@ Track details in [`docs/internal/overcomplexity.md`](docs/internal/overcomplexit
 
 ---
 
-### [ ] 17. Fix remaining correctness/quality nits
+### [~] 17. Fix remaining correctness/quality nits
+
+**2026-11-01:** Added a global request body limit and `make verify`; WAL frame metadata, metric metadata, trace/metric field preservation, and unused settings remain.
 
 - [ ] Add key/version metadata to WAL frames.
 - [ ] Make `/api/v1/metadata` report stored metric metadata instead of always `untyped`.

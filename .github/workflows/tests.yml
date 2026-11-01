@@ -44,6 +44,19 @@ jobs:
       - name: Build frontend
         working-directory: doctor/frontend
         run: npm ci && npm run build
+      - name: Frontend tests
+        working-directory: doctor/frontend
+        run: npm test
+      - name: Frontend typecheck
+        working-directory: doctor/frontend
+        run: npm run typecheck
       - name: Run tests
         working-directory: doctor
         run: go test ./...
+      - name: Vet
+        working-directory: doctor
+        run: go vet ./...
+      - name: Vulnerability scan
+        uses: golang/govulncheck-action@v1
+        with:
+          work-dir: doctor
