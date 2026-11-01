@@ -92,6 +92,7 @@ type MetricDescriptor struct {
 	MetricName string   `json:"metric_name"`
 	Dimensions []string `json:"dimensions,omitempty"`
 	Region     string   `json:"region,omitempty"`
+	Account    string   `json:"account,omitempty"`
 }
 
 // MetricQuery selects a CloudWatch metric series.

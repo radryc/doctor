@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/doctor/internal/buildinfo"
 	"github.com/radryc/doctor/internal/otlp"
 	"github.com/radryc/doctor/internal/privacy"
@@ -35,14 +36,15 @@ type Flusher interface {
 }
 
 type Service struct {
-	tenantHeader  string
-	defaultTenant string
-	writer        Flusher
-	pipeline      *Pipeline
-	traceBuffer   *TraceBuffer
-	logBuffer     *LogBuffer
-	metricBuffer  *MetricBuffer
-	privacy       *privacy.Engine
+	tenantHeader   string
+	defaultTenant  string
+	allowedTenants map[string]struct{}
+	writer         Flusher
+	pipeline       *Pipeline
+	traceBuffer    *TraceBuffer
+	logBuffer      *LogBuffer
+	metricBuffer   *MetricBuffer
+	privacy        *privacy.Engine
 }
 
 func NewService(tenantHeader, defaultTenant string, writer Flusher, privacyEngine *privacy.Engine) *Service {
@@ -71,6 +73,33 @@ func NewServiceWithBuffers(tenantHeader, defaultTenant string, writer Flusher, p
 	}
 }
 
+// SetAllowedTenants restricts accepted tenants. An empty list keeps the
+// historical behavior of accepting any tenant, but the ingest binary always
+// configures a non-empty list when DOCTOR_INGEST_ALLOWED_TENANTS is set.
+func (s *Service) SetAllowedTenants(tenants []string) {
+	if s == nil {
+		return
+	}
+	if len(tenants) == 0 {
+		s.allowedTenants = nil
+		return
+	}
+	s.allowedTenants = make(map[string]struct{}, len(tenants))
+	for _, tenant := range tenants {
+		if trimmed := strings.TrimSpace(tenant); trimmed != "" {
+			s.allowedTenants[trimmed] = struct{}{}
+		}
+	}
+}
+
+func (s *Service) tenantAllowed(tenant string) bool {
+	if s == nil || len(s.allowedTenants) == 0 {
+		return true
+	}
+	_, ok := s.allowedTenants[strings.TrimSpace(tenant)]
+	return ok
+}
+
 func (s *Service) RegisterGRPC(server *grpc.Server) {
 	coltracepb.RegisterTraceServiceServer(server, &traceServer{svc: s})
 	collogspb.RegisterLogsServiceServer(server, &logsServer{svc: s})
@@ -81,6 +110,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/api/v1/status/buildinfo", s.handleBuildInfo)
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/v1/traces", s.handleHTTPTraces)
 	mux.HandleFunc("/v1/logs", s.handleHTTPLogs)
 	mux.HandleFunc("/v1/metrics", s.handleHTTPMetrics)
@@ -89,6 +119,9 @@ func (s *Service) Handler() http.Handler {
 }
 
 func (s *Service) ingestTraces(ctx context.Context, tenant string, req *coltracepb.ExportTraceServiceRequest) error {
+	if !s.tenantAllowed(tenant) {
+		return ErrTenantDenied
+	}
 	records := otlp.FlattenTraces(req, tenant, s.privacy)
 	if s.pipeline != nil {
 		if err := s.pipeline.SubmitTraces(ctx, records); err != nil {
@@ -112,6 +145,9 @@ func (s *Service) ingestTraces(ctx context.Context, tenant string, req *coltrace
 }
 
 func (s *Service) ingestLogs(ctx context.Context, tenant string, req *collogspb.ExportLogsServiceRequest) error {
+	if !s.tenantAllowed(tenant) {
+		return ErrTenantDenied
+	}
 	records := otlp.FlattenLogs(req, tenant, s.privacy)
 	if s.pipeline != nil {
 		if err := s.pipeline.SubmitLogs(ctx, records); err != nil {
@@ -135,6 +171,9 @@ func (s *Service) ingestLogs(ctx context.Context, tenant string, req *collogspb.
 }
 
 func (s *Service) ingestMetrics(ctx context.Context, tenant string, req *colmetricspb.ExportMetricsServiceRequest) error {
+	if !s.tenantAllowed(tenant) {
+		return ErrTenantDenied
+	}
 	records := otlp.FlattenMetrics(req, tenant, s.privacy)
 	if s.pipeline != nil {
 		if err := s.pipeline.SubmitMetrics(ctx, records); err != nil {
@@ -291,6 +330,10 @@ func (s *Service) handleGuardianEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := s.tenantFromHeader(r)
+	if !s.tenantAllowed(tenant) {
+		http.Error(w, ErrTenantDenied.Error(), http.StatusForbidden)
+		return
+	}
 	now := time.Now().UTC()
 	for i := range events {
 		if events[i].Tenant == "" {
@@ -301,6 +344,10 @@ func (s *Service) handleGuardianEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.writer.WriteGuardianEvents(r.Context(), events); err != nil {
+		if errors.Is(err, ErrGuardianEventsUnsupported) {
+			http.Error(w, err.Error(), http.StatusNotImplemented)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -452,6 +499,9 @@ func grpcIngestError(err error) error {
 	if errors.Is(err, ErrBufferFull) {
 		return status.Error(codes.ResourceExhausted, err.Error())
 	}
+	if errors.Is(err, ErrTenantDenied) {
+		return status.Error(codes.PermissionDenied, err.Error())
+	}
 	return err
 }
 
@@ -459,6 +509,9 @@ func grpcIngestError(err error) error {
 func httpIngestStatus(err error) int {
 	if errors.Is(err, ErrBufferFull) {
 		return http.StatusTooManyRequests
+	}
+	if errors.Is(err, ErrTenantDenied) {
+		return http.StatusForbidden
 	}
 	return http.StatusInternalServerError
 }

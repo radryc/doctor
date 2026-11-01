@@ -26,8 +26,17 @@ func TestLoadRulesHonorsDisableSwitch(t *testing.T) {
 	}
 }
 
+func TestLoadIngestRequiresAuthToken(t *testing.T) {
+	t.Setenv("DOCTOR_PRIVACY_HMAC_KEY", "test-hmac-key")
+	t.Setenv("DOCTOR_INGEST_AUTH_TOKEN", "")
+	if _, err := LoadIngest("doctor-ingest"); err == nil {
+		t.Fatal("LoadIngest() succeeded without DOCTOR_INGEST_AUTH_TOKEN")
+	}
+}
+
 func TestLoadIngestUsesLowLatencyBufferDefaults(t *testing.T) {
 	t.Setenv("DOCTOR_PRIVACY_HMAC_KEY", "test-hmac-key")
+	t.Setenv("DOCTOR_INGEST_AUTH_TOKEN", "test-ingest-token")
 	t.Setenv("DOCTOR_TRACE_BUFFER_FLUSH_INTERVAL", "")
 	t.Setenv("DOCTOR_LOG_BUFFER_FLUSH_INTERVAL", "")
 	t.Setenv("DOCTOR_METRIC_BUFFER_FLUSH_INTERVAL", "")
@@ -61,5 +70,8 @@ func TestLoadIngestUsesLowLatencyBufferDefaults(t *testing.T) {
 	}
 	if cfg.MetricBuffer.MaxBytes != 4<<20 {
 		t.Fatalf("metric max bytes = %d, want %d", cfg.MetricBuffer.MaxBytes, 4<<20)
+	}
+	if len(cfg.AllowedTenants) != 1 || cfg.AllowedTenants[0] != "default" {
+		t.Fatalf("allowed tenants = %#v, want [default]", cfg.AllowedTenants)
 	}
 }

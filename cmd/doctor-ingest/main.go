@@ -15,35 +15,44 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/radryc/doctor/internal/auth"
 	"github.com/radryc/doctor/internal/config"
 	"github.com/radryc/doctor/internal/ingest"
 	"github.com/radryc/doctor/internal/privacy"
 	"github.com/radryc/doctor/internal/telemetry"
 	"github.com/radryc/doctor/internal/wal"
+	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Set a soft memory limit at 80% of the container limit so GC runs
-	// aggressively before the kernel OOM killer fires.
-	const memLimit = 858 << 20 // 858 MiB (~80% of 1 GiB)
-	debug.SetMemoryLimit(memLimit)
-	log.Printf("GOMEMLIMIT set to %dMiB", memLimit>>20)
-
 	cfg, err := config.LoadIngest("doctor-ingest")
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	// Set a soft memory limit below the container limit so GC runs
+	// aggressively before the kernel OOM killer fires. Operators can override
+	// it with DOCTOR_MEMORY_LIMIT_BYTES.
+	if cfg.MemoryLimitBytes > 0 {
+		debug.SetMemoryLimit(cfg.MemoryLimitBytes)
+		log.Printf("GOMEMLIMIT set to %dMiB", cfg.MemoryLimitBytes>>20)
+	}
+
 	if cfg.DebugAddr != "" {
 		go func() {
 			log.Printf("pprof debug server listening on %s", cfg.DebugAddr)
-			if err := http.ListenAndServe(cfg.DebugAddr, nil); err != nil {
+			debugServer := &http.Server{
+				Addr:              cfg.DebugAddr,
+				ReadHeaderTimeout: 5 * time.Second,
+			}
+			if err := debugServer.ListenAndServe(); err != nil {
 				log.Printf("pprof debug server: %v", err)
 			}
 		}()
@@ -182,6 +191,12 @@ func main() {
 	}
 
 	service := ingest.NewServiceWithBuffers(cfg.TenantHeader, cfg.DefaultTenant, writer, pipeline, traceBuffer, logBuffer, metricBuffer, privacyEngine)
+	service.SetAllowedTenants(cfg.AllowedTenants)
+
+	verifier := authz.NewStaticTokenVerifier()
+	verifier.Add(cfg.AuthToken, authz.Identity{Subject: "telemetry-ingest", ClientID: "telemetry-ingest"})
+	ingestAuth := auth.NewMiddleware(verifier, true, []string{"/healthz", "/metrics"}, log.Default())
+	grpcAuth := authz.NewAuthenticator(verifier, nil, true)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
@@ -190,6 +205,14 @@ func main() {
 	grpcServerOptions := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(256 * 1024 * 1024),
 		grpc.MaxSendMsgSize(256 * 1024 * 1024),
+		grpc.UnaryInterceptor(grpcAuth.UnaryServerInterceptor()),
+	}
+	if cfg.GRPCTLSCertFile != "" || cfg.GRPCTLSKeyFile != "" {
+		creds, credsErr := credentials.NewServerTLSFromFile(cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile)
+		if credsErr != nil {
+			log.Fatalf("load gRPC TLS credentials: %v", credsErr)
+		}
+		grpcServerOptions = append(grpcServerOptions, grpc.Creds(creds))
 	}
 	grpcServer := grpc.NewServer(grpcServerOptions...)
 	if telemetryHandle.Enabled() {
@@ -197,8 +220,12 @@ func main() {
 	}
 	service.RegisterGRPC(grpcServer)
 	httpServer := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: service.Handler(),
+		Addr:              cfg.HTTPAddr,
+		Handler:           ingestAuth.Wrap(service.Handler()),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
 	}
 	if telemetryHandle.Enabled() {
 		httpServer.Handler = otelhttp.NewHandler(httpServer.Handler, "doctor-ingest-http")
@@ -209,6 +236,10 @@ func main() {
 		errCh <- grpcServer.Serve(lis)
 	}()
 	go func() {
+		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+			errCh <- httpServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+			return
+		}
 		errCh <- httpServer.ListenAndServe()
 	}()
 

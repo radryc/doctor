@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/doctor/internal/federation"
+	"github.com/radryc/monofs/pkg/authz"
 )
 
 func newFederationCatalog(t *testing.T) *federation.Manager {

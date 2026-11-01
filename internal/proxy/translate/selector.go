@@ -5,11 +5,17 @@ package translate
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
 // ErrUnsupported reports a construct the translator cannot express.
 var ErrUnsupported = errors.New("translate: unsupported query construct")
+
+// labelNamePattern rejects characters that would break out of an ES|QL field,
+// a BigQuery column, or a CloudWatch Insights condition. Dots, @, /, and -
+// are valid in the OTel/AWS label vocabulary.
+var labelNamePattern = regexp.MustCompile(`^[A-Za-z_@][A-Za-z0-9_.@/-]*$`)
 
 // Matcher is one parsed stream-selector label matcher.
 type Matcher struct {
@@ -80,6 +86,9 @@ func parseMatcher(part string) (Matcher, error) {
 			value := strings.TrimSpace(part[idx+len(op):])
 			if name == "" {
 				return Matcher{}, fmt.Errorf("%w: empty label name in %q", ErrUnsupported, part)
+			}
+			if !labelNamePattern.MatchString(name) {
+				return Matcher{}, fmt.Errorf("%w: invalid label name %q", ErrUnsupported, name)
 			}
 			unquoted, err := unquote(value)
 			if err != nil {

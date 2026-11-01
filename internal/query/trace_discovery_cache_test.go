@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/monofs/pkg/authz"
 )
 
 func TestTraceTagValuesCacheIsIdentityScopedAndExpires(t *testing.T) {

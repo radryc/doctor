@@ -9,11 +9,10 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/doctor/internal/segment"
+	pb "github.com/radryc/monofs/api/proto"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // LogEngineClient wraps the MonoFSRouter gRPC client specifically for
@@ -29,9 +28,13 @@ func NewLogEngineClient(ctx context.Context, routerAddr string) (*LogEngineClien
 	if routerAddr == "" {
 		return nil, fmt.Errorf("monofs router address is required")
 	}
+	creds, err := TLSConfigFromEnv().Credentials()
+	if err != nil {
+		return nil, fmt.Errorf("configure monofs logengine TLS: %w", err)
+	}
 	conn, err := grpc.NewClient(
 		routerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(256*1024*1024),

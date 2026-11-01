@@ -38,7 +38,7 @@ func (s *Service) handleListDashboards(w http.ResponseWriter, r *http.Request) {
 
 	docs, err := s.dashboardStore.List(r.Context(), tenant, tag, search)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"dashboards": docs})
@@ -62,7 +62,7 @@ func (s *Service) handleGetDashboard(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, dashboards.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "dashboard not found"})
 		} else {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeInternalError(w, r, err)
 		}
 		return
 	}
@@ -74,7 +74,7 @@ func (s *Service) handleGetDashboard(w http.ResponseWriter, r *http.Request) {
 	case "yaml":
 		data, err := doc.MarshalYAMLBytes()
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		if download {
@@ -126,7 +126,7 @@ func (s *Service) handlePutDashboard(w http.ResponseWriter, r *http.Request) {
 		case dashboards.ErrConflict:
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "version conflict: dashboard was modified concurrently"})
 		default:
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeInternalError(w, r, err)
 		}
 		return
 	}
@@ -152,7 +152,7 @@ func (s *Service) handleDeleteDashboard(w http.ResponseWriter, r *http.Request) 
 		case dashboards.ErrNotFound:
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "dashboard not found"})
 		default:
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeInternalError(w, r, err)
 		}
 		return
 	}
@@ -177,7 +177,7 @@ func (s *Service) handleDashboardVersions(w http.ResponseWriter, r *http.Request
 
 	versions, err := s.dashboardStore.ListVersions(r.Context(), tenant, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
@@ -201,43 +201,98 @@ func (s *Service) handleImportDashboards(w http.ResponseWriter, r *http.Request)
 	if tenant == "" {
 		tenant = s.tenantFromRequest(r)
 	}
+	mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("on_conflict")))
+	}
+	if mode == "" {
+		mode = "fail-on-conflict"
+	}
+	switch mode {
+	case "fail-on-conflict", "skip-existing", "overwrite":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be fail-on-conflict, skip-existing, or overwrite"})
+		return
+	}
 
-	imported := 0
-
-	// Try bundle first.
-	if bundle, err := dashboards.ParseBundle(body); err == nil {
-		for _, doc := range bundle.Dashboards {
-			t := doc.Tenant
-			if t == "" || t == "*" {
-				t = tenant
-			}
-			doc.Tenant = t
-			if putErr := s.dashboardStore.Put(r.Context(), t, doc.ID, &doc, ""); putErr != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("import %s: %s", doc.ID, putErr.Error())})
-				return
-			}
-			imported++
-		}
+	docs := make([]dashboards.DashboardDocument, 0, 1)
+	if bundle, parseErr := dashboards.ParseBundle(body); parseErr == nil {
+		docs = append(docs, bundle.Dashboards...)
 	} else {
-		// Single document.
-		doc, parseErr := dashboards.ParseDocument(body)
-		if parseErr != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": parseErr.Error()})
+		doc, parseDocErr := dashboards.ParseDocument(body)
+		if parseDocErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": parseDocErr.Error()})
 			return
 		}
+		docs = append(docs, *doc)
+	}
+
+	imported := 0
+	skipped := 0
+	conflicts := make([]map[string]string, 0)
+	for idx := range docs {
+		doc := &docs[idx]
 		t := doc.Tenant
 		if t == "" || t == "*" {
 			t = tenant
 		}
 		doc.Tenant = t
-		if putErr := s.dashboardStore.Put(r.Context(), t, doc.ID, doc, ""); putErr != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": putErr.Error()})
+		existing, getErr := s.dashboardStore.Get(r.Context(), t, doc.ID)
+		if getErr != nil && !errors.Is(getErr, dashboards.ErrNotFound) {
+			writeInternalError(w, r, getErr)
 			return
+		}
+		if getErr == nil {
+			switch mode {
+			case "skip-existing":
+				skipped++
+				continue
+			case "fail-on-conflict":
+				conflicts = append(conflicts, map[string]string{
+					"tenant": t,
+					"id":     doc.ID,
+					"error":  "dashboard already exists",
+				})
+				continue
+			}
+		}
+		ifMatch := "absent"
+		if existing != nil && existing.Meta != nil && existing.Meta.VersionID != "" {
+			ifMatch = existing.Meta.VersionID
+		} else if existing != nil {
+			// Overwrite an existing dashboard whose version could not be read.
+			ifMatch = ""
+		}
+		if putErr := s.dashboardStore.Put(r.Context(), t, doc.ID, doc, ifMatch); putErr != nil {
+			switch {
+			case errors.Is(putErr, dashboards.ErrConflict):
+				conflicts = append(conflicts, map[string]string{
+					"tenant": t,
+					"id":     doc.ID,
+					"error":  "version conflict: dashboard was modified concurrently",
+				})
+				continue
+			case errors.Is(putErr, dashboards.ErrBuiltIn):
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "cannot modify a built-in preset; clone it first"})
+				return
+			default:
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("import %s: %s", doc.ID, putErr.Error())})
+				return
+			}
 		}
 		imported++
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"imported": imported})
+	response := map[string]any{"imported": imported, "mode": mode}
+	if skipped > 0 {
+		response["skipped"] = skipped
+	}
+	if len(conflicts) > 0 {
+		response["conflicts"] = conflicts
+		writeJSON(w, http.StatusConflict, response)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // handleExportDashboards serves GET /v1/dashboards/export?tenant=<t>&ids=a,b,c&format=json|yaml
@@ -255,7 +310,7 @@ func (s *Service) handleExportDashboards(w http.ResponseWriter, r *http.Request)
 
 	docs, err := s.dashboardStore.List(r.Context(), tenant, "", "")
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 
@@ -283,7 +338,7 @@ func (s *Service) handleExportDashboards(w http.ResponseWriter, r *http.Request)
 	case "yaml":
 		data, err := yaml.Marshal(bundle)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		w.Header().Set("Content-Disposition", `attachment; filename="dashboards-bundle.yaml"`)
@@ -292,7 +347,7 @@ func (s *Service) handleExportDashboards(w http.ResponseWriter, r *http.Request)
 	default:
 		data, err := json.Marshal(bundle)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		w.Header().Set("Content-Disposition", `attachment; filename="dashboards-bundle.json"`)

@@ -147,8 +147,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 				}
 			}
 			group := heap.Pop(pending).(*scheduledGroup)
-			for !group.next.After(now) {
-				group.next = group.next.Add(group.interval)
+			// Skip missed intervals instead of walking every interval that
+			// elapsed while the process was paused. Recording rules should run
+			// at the next future boundary, not replay hours of catch-up work.
+			if !group.next.After(now) {
+				group.next = now.Add(group.interval)
 			}
 			heap.Push(pending, group)
 

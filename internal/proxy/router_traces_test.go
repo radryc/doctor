@@ -125,29 +125,38 @@ func TestRouterGetTraceShardsOverlap(t *testing.T) {
 	}
 }
 
-func TestRouterTraceQLRoutesOnlyToCapableBackends(t *testing.T) {
+func TestRouterTraceQLUsesCapableAndSubsetBackends(t *testing.T) {
 	tempo := &fakeTraceQLUpstream{
 		fakeTracesUpstream: fakeTracesUpstream{name: "tempo-a"},
 		traceql:            []TraceSummary{{TraceID: "trace-1"}},
 	}
-	plain := &fakeTracesUpstream{name: "tempo-b", summaries: []TraceSummary{{TraceID: "ignored"}}}
+	plain := &fakeTracesUpstream{name: "tempo-b", summaries: []TraceSummary{{TraceID: "trace-2"}}}
 	router := newTraceRouter(t,
 		map[string]TracesUpstream{"tempo-a": tempo, "tempo-b": plain},
 		map[string]string{"tempo-a": KindTempo, "tempo-b": KindTempo},
 	)
 
-	summaries, _, err := router.SearchTraces(context.Background(), "default", TraceSearch{TraceQL: `{ .name = "x" }`})
+	summaries, warnings, err := router.SearchTraces(context.Background(), "default", TraceSearch{TraceQL: `{ .name = "x" }`})
 	if err != nil {
 		t.Fatalf("SearchTraces: %v", err)
 	}
-	if len(summaries) != 1 || summaries[0].TraceID != "trace-1" {
-		t.Fatalf("summaries = %#v", summaries)
+	if len(summaries) != 2 {
+		t.Fatalf("summaries = %#v, want both capable and subset backends", summaries)
 	}
 	if len(tempo.queries) != 1 {
 		t.Fatalf("traceql queries = %#v", tempo.queries)
 	}
-	if len(plain.searchSeen) != 0 {
-		t.Fatalf("plain backend received a TraceQL search: %#v", plain.searchSeen)
+	if len(plain.searchSeen) != 1 {
+		t.Fatalf("plain backend searches = %#v, want one subset search", plain.searchSeen)
+	}
+	if plain.searchSeen[0].TraceQL != "" {
+		t.Fatalf("plain backend received raw TraceQL %q", plain.searchSeen[0].TraceQL)
+	}
+	if len(plain.searchSeen[0].Tags) == 0 || plain.searchSeen[0].Tags[0].Key != "name" {
+		t.Fatalf("plain backend subset = %#v, want a name matcher", plain.searchSeen[0])
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", warnings)
 	}
 }
 

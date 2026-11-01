@@ -26,7 +26,6 @@ type Catalog struct {
 	byLogGroup  map[string][]string
 	byService   map[string][]string
 	byMetric    map[string][]string
-	byTrace     map[string]string
 }
 
 // LoadCatalogFile loads a static YAML or JSON catalog. The file may be either
@@ -93,7 +92,6 @@ func NewCatalog(targets []Target, version string) (*Catalog, error) {
 		byLogGroup:  make(map[string][]string),
 		byService:   make(map[string][]string),
 		byMetric:    make(map[string][]string),
-		byTrace:     make(map[string]string),
 	}
 
 	for _, t := range targets {
@@ -334,21 +332,6 @@ func (c *Catalog) LogGroupsMatching(pattern string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// ByTrace resolves a trace ID when a trace index is present.
-func (c *Catalog) ByTrace(traceID string) (Target, bool) {
-	if c == nil {
-		return Target{}, false
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	id, ok := c.byTrace[strings.TrimSpace(traceID)]
-	if !ok {
-		return Target{}, false
-	}
-	t, ok := c.targets[id]
-	return t, ok
 }
 
 func (c *Catalog) byValues(index map[string][]string, values []string) []Target {

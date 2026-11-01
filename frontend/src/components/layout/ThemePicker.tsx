@@ -3,6 +3,7 @@ import {
   THEMES,
   applyTheme,
   readStoredTheme,
+  watchSystemTheme,
   type Theme,
 } from "../../lib/theme";
 
@@ -10,7 +11,8 @@ export default function ThemePicker() {
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
 
   useEffect(() => {
-    applyTheme(theme, false);
+    applyTheme(theme);
+    watchSystemTheme();
   }, [theme]);
 
   return (
@@ -22,7 +24,6 @@ export default function ThemePicker() {
         onChange={(event) => {
           const next = event.target.value as Theme;
           setTheme(next);
-          applyTheme(next);
         }}
       >
         {THEMES.map((item) => (

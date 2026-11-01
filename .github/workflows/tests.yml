@@ -36,6 +36,28 @@ jobs:
         with:
           go-version-file: doctor/go.mod
           cache-dependency-path: doctor/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: doctor/frontend/package-lock.json
+      - name: Build frontend
+        working-directory: doctor/frontend
+        run: npm ci && npm run build
+      - name: Frontend tests
+        working-directory: doctor/frontend
+        run: npm test
+      - name: Frontend typecheck
+        working-directory: doctor/frontend
+        run: npm run typecheck
       - name: Run tests
         working-directory: doctor
         run: go test ./...
+      - name: Vet
+        working-directory: doctor
+        run: go vet ./...
+      - name: Vulnerability scan
+        uses: golang/govulncheck-action@v1
+        with:
+          repo-checkout: false
+          work-dir: doctor

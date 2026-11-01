@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/radryc/doctor/internal/netguard"
 )
 
 func TestParseBackendsValid(t *testing.T) {
@@ -119,6 +121,28 @@ backends:
 	}
 	if got := len(registry.Snapshot()); got != 2 {
 		t.Fatalf("invalid reload changed snapshot: %d", got)
+	}
+}
+
+func TestStaticRegistryAppliesURLPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backends.yaml")
+	content := []byte(`
+version: 1
+backends:
+  - name: metadata
+    kind: prometheus
+    baseUrl: http://169.254.169.254/
+    signals: [metrics]
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewStaticRegistry(StaticRegistryConfig{
+		Path:      path,
+		URLPolicy: netguard.Policy{AllowPrivate: true},
+	})
+	if err == nil {
+		t.Fatal("static registry accepted a metadata endpoint")
 	}
 }
 
