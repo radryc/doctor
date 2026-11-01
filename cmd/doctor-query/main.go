@@ -18,6 +18,7 @@ import (
 	"github.com/radryc/doctor/internal/config"
 	"github.com/radryc/doctor/internal/dashboards"
 	"github.com/radryc/doctor/internal/federation"
+	"github.com/radryc/doctor/internal/netguard"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/query"
 	"github.com/radryc/doctor/internal/ruler"
@@ -83,6 +84,10 @@ func main() {
 	svc.SetGuardianAPIURL(cfg.GuardianAPIURL)
 	svc.SetDefaultPartition(cfg.DefaultPartition)
 	svc.SetRulesURL(cfg.RulesURL)
+	svc.SetRulesToken(cfg.RulesAPIToken)
+	if strings.TrimSpace(cfg.RulesURL) != "" && strings.TrimSpace(cfg.RulesAPIToken) == "" {
+		log.Printf("rules proxy is configured without DOCTOR_RULES_API_TOKEN; doctor-rules requires it and proxy requests will fail")
+	}
 	if strings.TrimSpace(cfg.RulesURL) != "" {
 		log.Printf("recording rules UI enabled via %s", cfg.RulesURL)
 	}
@@ -106,13 +111,11 @@ func main() {
 				Writable:    true,
 			})
 			if err != nil {
-				log.Printf("dashboards: could not connect MonoFS file store: %v — using in-memory store", err)
-				sharedFS = ruler.NewMemoryStore()
-			} else {
-				defer dashClient.Close()
-				sharedFS = dashClient
-				log.Printf("file store: using MonoFS at %s", cfg.MonoFSLogEngineAddr)
+				log.Fatalf("dashboards: connect MonoFS file store: %v", err)
 			}
+			defer dashClient.Close()
+			sharedFS = dashClient
+			log.Printf("file store: using MonoFS at %s", cfg.MonoFSLogEngineAddr)
 		} else {
 			sharedFS = ruler.NewMemoryStore()
 			log.Printf("file store: DOCTOR_MONOFS_TOKEN unset — using in-memory store")
@@ -224,6 +227,11 @@ func main() {
 		handler = policyGate.Middleware(handler)
 	}
 	handler = authMiddleware.Wrap(handler)
+	tenantGuard := auth.NewTenantGuard(cfg.TenantHeader, cfg.DefaultTenant, cfg.AllowedTenants, cfg.SingleTenant)
+	handler = tenantGuard.Wrap(handler)
+	if len(cfg.AllowedTenants) > 0 || cfg.SingleTenant != "" {
+		log.Printf("tenant guard enabled (single=%q allowed=%v)", cfg.SingleTenant, cfg.AllowedTenants)
+	}
 	if cfg.AccessTrustTenantHeader {
 		trust := auth.NewTenantTrust(cfg.TenantHeader, log.Default())
 		handler = trust.Wrap(handler)
@@ -234,8 +242,12 @@ func main() {
 	}
 
 	server := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: handler,
+		Addr:              cfg.HTTPAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
 	}
 	if telemetryHandle.Enabled() {
 		server.Handler = otelhttp.NewHandler(server.Handler, "doctor-query-http")
@@ -244,8 +256,14 @@ func main() {
 		<-ctx.Done()
 		_ = server.Shutdown(context.Background())
 	}()
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	var serveErr error
+	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+		serveErr = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	} else {
+		serveErr = server.ListenAndServe()
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		log.Fatal(serveErr)
 	}
 }
 
@@ -381,12 +399,19 @@ func loadTeamMapping(raw string) (authz.TeamMapping, error) {
 // fallback policy, and additional backends come from the static file and
 // Guardian discovery.
 func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient proxy.AWSClient, gate *access.Gate) {
+	urlPolicy := netguard.Policy{
+		RequireHTTPS:  cfg.BackendRequireHTTPS,
+		AllowLoopback: cfg.BackendAllowLoopback,
+		AllowPrivate:  cfg.BackendAllowPrivate,
+		AllowedHosts:  cfg.BackendAllowedHosts,
+	}
 	registries := make([]proxy.Registry, 0, 2)
 	if cfg.ProxyBackendsFile != "" {
 		static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
-			Path:     cfg.ProxyBackendsFile,
-			Interval: cfg.ProxyRegistryInterval,
-			Logger:   log.Default(),
+			Path:      cfg.ProxyBackendsFile,
+			Interval:  cfg.ProxyRegistryInterval,
+			Logger:    log.Default(),
+			URLPolicy: urlPolicy,
 		})
 		if err != nil {
 			log.Fatalf("load proxy backends: %v", err)
@@ -400,10 +425,11 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 			log.Printf("guardian discovery enabled but DOCTOR_GUARDIAN_API_URL is unset; discovery disabled")
 		} else {
 			discovery := proxy.NewGuardianDiscovery(proxy.GuardianDiscoveryConfig{
-				BaseURL:  cfg.GuardianAPIURL,
-				Token:    cfg.GuardianToken,
-				Interval: cfg.GuardianDiscoveryInterval,
-				Logger:   log.Default(),
+				BaseURL:   cfg.GuardianAPIURL,
+				Token:     cfg.GuardianToken,
+				Interval:  cfg.GuardianDiscoveryInterval,
+				URLPolicy: urlPolicy,
+				Logger:    log.Default(),
 			})
 			registries = append(registries, discovery)
 			go discovery.Run(ctx)
@@ -488,13 +514,15 @@ func buildFederationTokenResolver(cfg config.QueryConfig, files ruler.FileStore)
 	}
 	var bundle federation.TokenResolver
 	if files != nil && strings.TrimSpace(cfg.MonoFSFileToken) != "" {
-		bundle = federation.NewBundleTokenResolver(federation.BundleTokenResolverOptions{
+		bundleResolver := federation.NewBundleTokenResolver(federation.BundleTokenResolverOptions{
 			Files:      files,
 			Root:       cfg.FederationTokenBundleRoot,
 			Tenant:     cfg.FederationSnapshotTenant,
 			ShardCount: cfg.FederationTokenShardCount,
 			CacheTTL:   cfg.FederationTokenCacheTTL,
 		})
+		bundleResolver.Key = []byte(cfg.FederationTokenKey)
+		bundle = bundleResolver
 	}
 
 	switch mode {

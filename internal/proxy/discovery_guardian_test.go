@@ -6,7 +6,47 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/radryc/doctor/internal/netguard"
 )
+
+func TestGuardianDiscoveryRejectsSSRFTargets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pushers":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pushers": []map[string]any{
+					{
+						"name":           "metadata",
+						"observedApiUrl": "http://169.254.169.254/latest",
+						"labels":         map[string]string{"kind": "prometheus", "signals": "metrics"},
+					},
+					{
+						"name":           "loopback",
+						"observedApiUrl": "http://127.0.0.1:9090",
+						"labels":         map[string]string{"kind": "prometheus", "signals": "metrics"},
+					},
+				},
+			})
+		case "/api/m2m/partitions":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	discovery := NewGuardianDiscovery(GuardianDiscoveryConfig{
+		BaseURL:   server.URL,
+		URLPolicy: netguard.Policy{AllowPrivate: true},
+	})
+	if err := discovery.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := discovery.Snapshot(); len(got) != 0 {
+		t.Fatalf("SSRF backends were accepted: %#v", got)
+	}
+}
 
 func TestGuardianDiscoveryParsesPushersAndPartitions(t *testing.T) {
 	var gotToken string

@@ -10,7 +10,13 @@ import (
 	"github.com/radryc/doctor/internal/tempo"
 )
 
-const defaultTraceDiscoveryCacheTTL = 30 * time.Second
+const (
+	defaultTraceDiscoveryCacheTTL = 30 * time.Second
+	// maxTraceDiscoveryCacheEntries bounds each per-identity discovery cache.
+	// The cache is keyed by tenant+identity+tag; without a cap a large user
+	// population creates unbounded maps.
+	maxTraceDiscoveryCacheEntries = 10_000
+)
 
 type traceTagValuesCacheEntry struct {
 	values   map[string]struct{}
@@ -87,6 +93,45 @@ func cloneWarnings(in []proxy.Warning) []proxy.Warning {
 	return append([]proxy.Warning(nil), in...)
 }
 
+// pruneTraceDiscoveryLocked evicts expired entries and, if a cache is still at
+// its bound, drops one arbitrary entry to make room. The caller must hold
+// traceDiscoveryMu.
+func (s *Service) pruneTraceDiscoveryLocked(now time.Time) {
+	for key, entry := range s.traceTagValuesCache {
+		if now.After(entry.expires) {
+			delete(s.traceTagValuesCache, key)
+		}
+	}
+	for key, entry := range s.traceTagsCache {
+		if now.After(entry.expires) {
+			delete(s.traceTagsCache, key)
+		}
+	}
+	for key, entry := range s.traceScopesCache {
+		if now.After(entry.expires) {
+			delete(s.traceScopesCache, key)
+		}
+	}
+	if len(s.traceTagValuesCache) >= maxTraceDiscoveryCacheEntries {
+		for key := range s.traceTagValuesCache {
+			delete(s.traceTagValuesCache, key)
+			break
+		}
+	}
+	if len(s.traceTagsCache) >= maxTraceDiscoveryCacheEntries {
+		for key := range s.traceTagsCache {
+			delete(s.traceTagsCache, key)
+			break
+		}
+	}
+	if len(s.traceScopesCache) >= maxTraceDiscoveryCacheEntries {
+		for key := range s.traceScopesCache {
+			delete(s.traceScopesCache, key)
+			break
+		}
+	}
+}
+
 func (s *Service) cachedTraceTagValues(ctx context.Context, tenant, tag string) (map[string]struct{}, []proxy.Warning, bool) {
 	if s == nil {
 		return nil, nil, false
@@ -112,13 +157,15 @@ func (s *Service) storeTraceTagValues(ctx context.Context, tenant, tag string, v
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "tag-values", tag)
 	s.traceDiscoveryMu.Lock()
 	defer s.traceDiscoveryMu.Unlock()
+	now := time.Now()
+	s.pruneTraceDiscoveryLocked(now)
 	if s.traceTagValuesCache == nil {
 		s.traceTagValuesCache = make(map[string]traceTagValuesCacheEntry)
 	}
 	s.traceTagValuesCache[key] = traceTagValuesCacheEntry{
 		values:   cloneStringSet(values),
 		warnings: cloneWarnings(warnings),
-		expires:  time.Now().Add(s.traceDiscoveryTTL()),
+		expires:  now.Add(s.traceDiscoveryTTL()),
 	}
 }
 
@@ -147,13 +194,15 @@ func (s *Service) storeTraceTags(ctx context.Context, tenant string, tags map[st
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "tags", "")
 	s.traceDiscoveryMu.Lock()
 	defer s.traceDiscoveryMu.Unlock()
+	now := time.Now()
+	s.pruneTraceDiscoveryLocked(now)
 	if s.traceTagsCache == nil {
 		s.traceTagsCache = make(map[string]traceTagsCacheEntry)
 	}
 	s.traceTagsCache[key] = traceTagsCacheEntry{
 		tags:     cloneStringSet(tags),
 		warnings: cloneWarnings(warnings),
-		expires:  time.Now().Add(s.traceDiscoveryTTL()),
+		expires:  now.Add(s.traceDiscoveryTTL()),
 	}
 }
 
@@ -182,12 +231,14 @@ func (s *Service) storeTraceScopes(ctx context.Context, tenant string, scopes []
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "scopes", "")
 	s.traceDiscoveryMu.Lock()
 	defer s.traceDiscoveryMu.Unlock()
+	now := time.Now()
+	s.pruneTraceDiscoveryLocked(now)
 	if s.traceScopesCache == nil {
 		s.traceScopesCache = make(map[string]traceScopesCacheEntry)
 	}
 	s.traceScopesCache[key] = traceScopesCacheEntry{
 		scopes:   append([]tempo.TagScope(nil), scopes...),
 		warnings: cloneWarnings(warnings),
-		expires:  time.Now().Add(s.traceDiscoveryTTL()),
+		expires:  now.Add(s.traceDiscoveryTTL()),
 	}
 }

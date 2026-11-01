@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -61,7 +62,7 @@ func (s *Service) serveTempoTraceByID(w http.ResponseWriter, r *http.Request, pr
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeInternalError(w, r, err)
 		return
 	}
 	if traceID == "" {
@@ -783,5 +784,9 @@ func tempoSearchResponse(summaries []proxy.TraceSummary, spanSets map[string]tem
 }
 
 func writeTempoError(w http.ResponseWriter, statusCode int, message string) {
+	if statusCode >= http.StatusInternalServerError {
+		log.Printf("tempo error: %s", message)
+		message = internalErrorMessage
+	}
 	writeJSON(w, statusCode, map[string]any{"status": "error", "error": message})
 }

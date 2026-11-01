@@ -602,7 +602,7 @@ export default function MetricsPage() {
   const chartTo = Number.isNaN(parsedTo.getTime()) ? new Date() : parsedTo;
   const activeDescription = selectedMetric
     ? metricHint(selectedMetric)
-    : "Custom PromQL expression. Hover the chart for values and click a legend item to hide or show a series.";
+    : "Custom PromQL expression. Click a legend item to show only that series; click it again (or Ctrl/Cmd-click to toggle) to change the view.";
   const intentOptions = metricIntent && !intentValues.includes(metricIntent)
     ? [metricIntent, ...intentValues]
     : intentValues;

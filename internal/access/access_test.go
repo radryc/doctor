@@ -110,6 +110,19 @@ func TestStaticResolver(t *testing.T) {
 	}
 }
 
+func TestStaticResolverIsCaseInsensitive(t *testing.T) {
+	resolver := NewStatic("Alice", "Platform-Team", "Mallory")
+	if decision, _ := resolver.Allowed(context.Background(), authz.Identity{Subject: "alice"}, Endpoint{Name: "x"}, SignalLogs); !decision.Allowed {
+		t.Fatal("mixed-case allow subject was not matched case-insensitively")
+	}
+	if decision, _ := resolver.Allowed(context.Background(), authz.Identity{Subject: "carol", Groups: []string{"platform-team"}}, Endpoint{Name: "x"}, SignalLogs); !decision.Allowed {
+		t.Fatal("mixed-case allow group was not matched case-insensitively")
+	}
+	if decision, _ := resolver.Allowed(context.Background(), authz.Identity{Subject: "MALLORY"}, Endpoint{Name: "x"}, SignalLogs); decision.Allowed {
+		t.Fatal("mixed-case deny subject was not matched case-insensitively")
+	}
+}
+
 func TestChainFirstAllowWins(t *testing.T) {
 	chain := NewChain(
 		NewStatic("", "", ""),

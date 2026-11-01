@@ -81,7 +81,7 @@ func toSet(raw string) map[string]struct{} {
 	out := make(map[string]struct{})
 	for _, part := range strings.Split(raw, ",") {
 		if trimmed := strings.TrimSpace(part); trimmed != "" {
-			out[trimmed] = struct{}{}
+			out[strings.ToLower(trimmed)] = struct{}{}
 		}
 	}
 	return out

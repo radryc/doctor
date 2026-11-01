@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/federation"
 	"github.com/radryc/doctor/internal/proxy"
@@ -51,6 +52,7 @@ type Service struct {
 	guardianClient   *http.Client
 	rulesProxy       *httputil.ReverseProxy
 	sentinelProxy    *httputil.ReverseProxy
+	rulesToken       string
 	policyGate       *access.PolicyGate
 	dashboardStore   DashboardStore
 
@@ -149,7 +151,7 @@ func (s *Service) handleFederationPlan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
 		return
 	}
-	if s.policyGate != nil && s.policyGate.Enforced() && !s.policyGate.IsAdmin(identityFromContext(r.Context())) {
+	if s.policyGate != nil && !s.policyGate.IsAdmin(identityFromContext(r.Context())) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "federation plan is admin only"})
 		return
 	}
@@ -247,6 +249,13 @@ func (s *Service) SetRulesURL(raw string) {
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	director := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		director(req)
+		if token := strings.TrimSpace(s.rulesToken); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "rules service unavailable: " + err.Error()})
 	}
@@ -272,6 +281,13 @@ func (s *Service) SetSentinelURL(raw string) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "sentinel service unavailable: " + err.Error()})
 	}
 	s.sentinelProxy = proxy
+}
+
+// SetRulesToken configures the service credential the query proxy presents to
+// the rules API. The rules binary requires this token for every route except
+// /healthz.
+func (s *Service) SetRulesToken(token string) {
+	s.rulesToken = strings.TrimSpace(token)
 }
 
 // guardianTimelineEntry mirrors Guardian's TimelineEntry JSON structure.
@@ -626,6 +642,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/ready", s.handleLokiReady)
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/api/v1/query", s.handlePrometheusQuery)
 	mux.HandleFunc("/api/v1/query_range", s.handlePrometheusQueryRange)
 	mux.HandleFunc("/api/v1/labels", s.handlePrometheusLabels)
@@ -684,7 +701,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
 	mux.HandleFunc("/", s.handleUI)
-	return withWarningHeaders(s.guardianTokenMiddleware(mux))
+	return withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLogging(withWarningHeaders(s.guardianTokenMiddleware(mux)))))))
 }
 
 // guardianTokenKey carries the caller's OIDC token to server-side Guardian
@@ -851,7 +868,7 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeInternalError(w, r, err)
 		return
 	}
 	if traceID == "" {
@@ -867,7 +884,7 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 		if len(records) == 0 {
@@ -880,7 +897,7 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 		var err error
 		spans, err = s.logEngine.QueryTraces(r.Context(), tenant, traceID, "", from, to, 1000)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 		if len(spans) == 0 {
@@ -919,14 +936,14 @@ func (s *Service) handleSpanSearch(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 	} else {
 		var err error
 		spans, err = s.logEngine.QueryTraces(r.Context(), tenant, traceID, service, from, to, limit)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 	}
@@ -987,7 +1004,7 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 		// The proxy router serves native storage and, when configured, the
@@ -1028,7 +1045,7 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			results, err = s.logEngine.QueryLogs(r.Context(), tenant, query, service, from, to, limit)
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 	}
@@ -1089,7 +1106,7 @@ func (s *Service) handleMetricRange(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "metric has too many points; narrow the time range", http.StatusUnprocessableEntity)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeInternalError(w, r, err)
 		return
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].Timestamp.Before(points[j].Timestamp) })
@@ -1237,9 +1254,12 @@ func (s *Service) fetchAllGuardianTopologies(ctx context.Context) ([]augmentedTo
 		edges []guardianTopologyEdge
 	}
 	ch := make(chan result, len(partitions))
+	sem := make(chan struct{}, 8)
 
 	for _, p := range partitions {
 		go func(part string) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			topo, err := s.fetchGuardianTopology(ctx, part)
 			if err != nil || topo == nil {
 				ch <- result{}
@@ -1691,7 +1711,7 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 
 	summaries, next, hasMore, err := s.recentTracePage(r.Context(), tenant, service, identity, from, to, limit, cursor)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeInternalError(w, r, err)
 		return
 	}
 

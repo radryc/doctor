@@ -1,0 +1,327 @@
+# Doctor reference Kubernetes manifests
+#
+# These manifests are a starting point, not a turnkey production deployment.
+# Replace image names, the MonoFS address, and the Secret before applying.
+# They deliberately run every container as non-root with a read-only root
+# filesystem and no Linux capabilities.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: doctor
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doctor-config
+  namespace: doctor
+data:
+  DOCTOR_MONOFS_LOGENGINE_ADDR: "monofs-router.monofs.svc.cluster.local:9090"
+  DOCTOR_GUARDIAN_API_URL: "http://guardian.guardian.svc.cluster.local:8090"
+  DOCTOR_TENANT_HEADER: "X-Doctor-Tenant"
+  DOCTOR_DEFAULT_TENANT: "default"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: doctor-secrets
+  namespace: doctor
+type: Opaque
+stringData:
+  # Replace before applying. Prefer an external secret manager in production.
+  DOCTOR_MONOFS_TOKEN: "replace-me"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doctor-ingest
+  namespace: doctor
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: doctor-ingest }
+  template:
+    metadata:
+      labels: { app: doctor-ingest }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: ingest
+          image: doctor-ingest:latest
+          envFrom:
+            - configMapRef: { name: doctor-config }
+            - secretRef: { name: doctor-secrets }
+          ports:
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: otlp-http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: otlp-http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "2", memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doctor-ingest
+  namespace: doctor
+spec:
+  selector: { app: doctor-ingest }
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: otlp-grpc }
+    - { name: otlp-http, port: 4318, targetPort: otlp-http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doctor-query
+  namespace: doctor
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: doctor-query }
+  template:
+    metadata:
+      labels: { app: doctor-query }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: query
+          image: doctor-query:latest
+          envFrom:
+            - configMapRef: { name: doctor-config }
+            - secretRef: { name: doctor-secrets }
+          env:
+            - { name: DOCTOR_RULES_URL, value: "http://doctor-rules.doctor.svc.cluster.local:18081" }
+            - { name: DOCTOR_SENTINEL_URL, value: "http://doctor-sentinel.doctor.svc.cluster.local:18082" }
+          ports:
+            - { name: http, containerPort: 18080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { cpu: "2", memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doctor-query
+  namespace: doctor
+spec:
+  selector: { app: doctor-query }
+  ports:
+    - { name: http, port: 18080, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doctor-rules
+  namespace: doctor
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: doctor-rules }
+  template:
+    metadata:
+      labels: { app: doctor-rules }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: rules
+          image: doctor-rules:latest
+          envFrom:
+            - configMapRef: { name: doctor-config }
+            - secretRef: { name: doctor-secrets }
+          ports:
+            - { name: http, containerPort: 18081 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doctor-rules
+  namespace: doctor
+spec:
+  selector: { app: doctor-rules }
+  ports:
+    - { name: http, port: 18081, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doctor-sentinel
+  namespace: doctor
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: doctor-sentinel }
+  template:
+    metadata:
+      labels: { app: doctor-sentinel }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: sentinel
+          image: doctor-sentinel:latest
+          envFrom:
+            - configMapRef: { name: doctor-config }
+            - secretRef: { name: doctor-secrets }
+          ports:
+            - { name: http, containerPort: 18082 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doctor-sentinel
+  namespace: doctor
+spec:
+  selector: { app: doctor-sentinel }
+  ports:
+    - { name: http, port: 18082, targetPort: http }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: doctor-default-deny
+  namespace: doctor
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: doctor-allow-otel-and-monofs
+  namespace: doctor
+spec:
+  podSelector:
+    matchLabels: { app: doctor-ingest }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: otel } }
+      ports:
+        - { protocol: TCP, port: 4317 }
+        - { protocol: TCP, port: 4318 }
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monofs } }
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: doctor-allow-dns-and-dependencies
+  namespace: doctor
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monofs } }
+      ports:
+        - { protocol: TCP, port: 9090 }
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: guardian } }
+      ports:
+        - { protocol: TCP, port: 8090 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: doctor-allow-ui-ingress
+  namespace: doctor
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [doctor-query, doctor-rules, doctor-sentinel]
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 18080 }
+        - { protocol: TCP, port: 18081 }
+        - { protocol: TCP, port: 18082 }

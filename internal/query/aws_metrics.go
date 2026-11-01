@@ -41,6 +41,15 @@ func mergePrometheusQueryData(local, aws map[string]any, defaultType string) map
 // merged result, including federated AWS series that are not served by the
 // local PromQL engine.
 func filterPrometheusDataByPartition(data map[string]any, partition string) map[string]any {
+	return filterPrometheusDataByPartitionWith(data, partition, nil)
+}
+
+// filterPrometheusDataByPartitionWith optionally canonicalizes AWS
+// account/region labels through the access policy. Without a canonicalizer
+// (for example a deployment with no policy gate) dimension-only AWS series are
+// retained for compatibility. With a gate, they are kept only when the binding
+// resolves to the requested partition.
+func filterPrometheusDataByPartitionWith(data map[string]any, partition string, canonicalize func(account, region, current string) string) map[string]any {
 	partition = strings.TrimSpace(partition)
 	if data == nil || partition == "" {
 		return data
@@ -59,11 +68,25 @@ func filterPrometheusDataByPartition(data map[string]any, partition string) map[
 			labels["@aws.tag.strata.io/partition"],
 			labels["partition"],
 		)
-		// Dimension-only AWS series may not carry a partition tag. The AWS
-		// backend is account-scoped, so keep them instead of silently dropping
-		// every CloudWatch metric when a partition filter is active.
-		if value == partition || (value == "" && source == proxy.SourceAWS) {
+		if value == partition {
 			filtered = append(filtered, item)
+			continue
+		}
+		// Dimension-only AWS series may not carry a partition tag. Keep them
+		// only when the policy binding proves they belong to the selected
+		// partition; otherwise a partition filter would leak other accounts.
+		if value == "" && source == proxy.SourceAWS {
+			if canonicalize == nil {
+				filtered = append(filtered, item)
+				continue
+			}
+			account := firstNonEmpty(labels["@aws.account"], labels["aws_account"], labels["account"])
+			region := firstNonEmpty(labels["@aws.region"], labels["aws_region"], labels["region"])
+			if account != "" || region != "" {
+				if canonicalize(account, region, "") == partition {
+					filtered = append(filtered, item)
+				}
+			}
 		}
 	}
 	data["result"] = filtered
@@ -104,10 +127,24 @@ var (
 
 // filterPrometheusDataByIdentity applies the UI's partition/intent/asset
 // filters to a merged Prometheus result. It runs for local, federated, and
-// router-backed queries so every signal uses the same identity fields.
+// router-backed queries so every signal uses the same identity fields. The
+// package-level helper keeps the compatibility behavior for tests; the service
+// method additionally canonicalizes AWS account/region bindings.
 func filterPrometheusDataByIdentity(r *http.Request, data map[string]any) map[string]any {
+	return filterPrometheusDataByIdentityWith(r, data, nil)
+}
+
+func (s *Service) filterPrometheusDataForRequest(r *http.Request, data map[string]any) map[string]any {
+	var canonicalize func(account, region, current string) string
+	if s != nil && s.policyGate != nil {
+		canonicalize = s.policyGate.CanonicalPartition
+	}
+	return filterPrometheusDataByIdentityWith(r, data, canonicalize)
+}
+
+func filterPrometheusDataByIdentityWith(r *http.Request, data map[string]any, canonicalize func(account, region, current string) string) map[string]any {
 	identity := identityFromRequest(r)
-	data = filterPrometheusDataByPartition(data, identity.Partition)
+	data = filterPrometheusDataByPartitionWith(data, identity.Partition, canonicalize)
 	data = filterPrometheusDataByLabel(data, identity.Intent, prometheusIntentLabels...)
 	data = filterPrometheusDataByLabel(data, identity.Asset, prometheusAssetLabels...)
 	return data

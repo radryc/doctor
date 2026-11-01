@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/doctor/internal/store"
+	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -69,6 +69,7 @@ type GRPCClient struct {
 
 	routerConn  *grpc.ClientConn
 	router      routerClient
+	creds       credentials.TransportCredentials
 	nodeConns   map[string]*grpc.ClientConn
 	nodeClients map[string]pb.MonoFSClient
 
@@ -112,9 +113,13 @@ func NewGRPCClient(ctx context.Context, cfg ClientConfig) (*GRPCClient, error) {
 		cfg.Hostname = hostname
 	}
 
+	creds, err := TLSConfigFromEnv().Credentials()
+	if err != nil {
+		return nil, fmt.Errorf("configure monofs TLS: %w", err)
+	}
 	conn, err := grpc.NewClient(
 		cfg.RouterAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(256*1024*1024),
 			grpc.MaxCallSendMsgSize(256*1024*1024),
@@ -140,6 +145,7 @@ func NewGRPCClient(ctx context.Context, cfg ClientConfig) (*GRPCClient, error) {
 		writable:             cfg.Writable,
 		routerConn:           conn,
 		router:               pb.NewMonoFSRouterClient(conn),
+		creds:                creds,
 		nodeConns:            map[string]*grpc.ClientConn{},
 		nodeClients:          map[string]pb.MonoFSClient{},
 		stopHeartbeat:        make(chan struct{}),
@@ -563,7 +569,7 @@ func (c *GRPCClient) refreshNodes(ctx context.Context) error {
 		address := c.rewriteNodeAddress(node.GetAddress())
 		nodeConn, dialErr := grpc.NewClient(
 			address,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithTransportCredentials(c.creds),
 			grpc.WithDefaultCallOptions(
 				grpc.MaxCallRecvMsgSize(256*1024*1024),
 				grpc.MaxCallSendMsgSize(256*1024*1024),

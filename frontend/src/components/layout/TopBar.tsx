@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { api } from "../../api/client";
-import ThemePicker from "./ThemePicker";
 import GlobalTimePicker from "./GlobalTimePicker";
 import FederationStatusPill from "./FederationStatusPill";
+import UserMenu from "./UserMenu";
+import { Menu } from "lucide-react";
+import AskDrawer from "./AskDrawer";
 
 const PAGE_TITLES: Record<string, string> = {
   "/": "On-call",
@@ -29,32 +29,14 @@ function pageTitle(pathname: string): string {
   return PAGE_TITLES[pathname] ?? "Doctor";
 }
 
-export default function TopBar() {
+export default function TopBar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const { pathname } = useLocation();
-  const [user, setUser] = useState("");
-
-  useEffect(() => {
-    let active = true;
-    api
-      .getUser()
-      .then((identity) => {
-        if (!active) return;
-        setUser(
-          identity.display ||
-            identity.email ||
-            identity.subject ||
-            identity.client_id ||
-            ""
-        );
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, []);
 
   return (
     <header className="app-topbar">
+      <button type="button" className="s-icon-btn app-topbar__toggle" onClick={onToggleSidebar} aria-label="Toggle navigation">
+        <Menu size={16} />
+      </button>
       <div className="app-topbar__crumb">
         <span>Doctor</span>
         <span className="app-topbar__sep">/</span>
@@ -64,16 +46,9 @@ export default function TopBar() {
         <GlobalTimePicker />
         <FederationStatusPill />
       </div>
-      <div className="flex items-center gap-3">
-        {user && (
-          <span className="text-xs opacity-70" title="Signed in">
-            {user}
-          </span>
-        )}
-        <ThemePicker />
-        <a href="/auth/logout" className="text-xs font-medium opacity-70 hover:opacity-100" title="Sign out">
-          Sign out
-        </a>
+      <div className="flex items-center gap-2">
+        <AskDrawer />
+        <UserMenu />
       </div>
     </header>
   );

@@ -56,6 +56,7 @@ func newControllerForTest(t *testing.T) (*Controller, *ruler.MemoryStore, *fakeG
 		MetadataTimeout: time.Second,
 		Interval:        time.Minute,
 		Holder:          "test-controller",
+		TokenKey:        "test-federation-key",
 	}, files)
 	if err != nil {
 		t.Fatalf("NewController: %v", err)
@@ -101,6 +102,7 @@ func TestControllerSyncPublishesCatalogTokensAndMetadata(t *testing.T) {
 		Tenant:     "default",
 		ShardCount: controller.Config.TokenShardCount,
 	})
+	resolver.Key = []byte("test-federation-key")
 	for _, target := range snapshot.Targets {
 		token, err := resolver.Resolve(context.Background(), target)
 		if err != nil {

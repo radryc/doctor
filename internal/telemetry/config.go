@@ -46,7 +46,9 @@ func LoadConfig(component string) (Config, error) {
 	}
 	insecure := envFirst("OTEL_EXPORTER_OTLP_INSECURE", "DOCTOR_OTEL_INSECURE")
 	if insecure == "" {
-		cfg.Insecure = true
+		// Preserve plaintext for local host:port endpoints, but do not
+		// silently downgrade an explicitly HTTPS exporter URL.
+		cfg.Insecure = !strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://")
 	} else {
 		value, err := strconv.ParseBool(insecure)
 		if err != nil {

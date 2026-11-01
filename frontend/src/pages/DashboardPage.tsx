@@ -1,17 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  Legend,
-} from "recharts";
+import type { EChartsCoreOption } from "echarts/core";
 import {
   Activity,
   AlertTriangle,
@@ -29,6 +18,8 @@ import {
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import { copyText } from "../lib/clipboard";
+import EChart from "../components/charts/EChart";
+import { escapeHtml, useChartTheme } from "../lib/chartTheme";
 import type { GuardianOverview } from "../types/api";
 
 const HEALTH_GREEN = "var(--ui-green)";
@@ -110,8 +101,6 @@ function StatCard({
   );
 }
 
-const PIE_COLORS = [HEALTH_GREEN, HEALTH_AMBER, HEALTH_RED];
-
 function appUrl(hash: string): string {
   return `${window.location.origin}${window.location.pathname}#${hash}`;
 }
@@ -123,6 +112,7 @@ function reconciledLabel(value: string | undefined): string {
 
 export default function DashboardPage() {
   const { config } = useConfig();
+  const theme = useChartTheme();
   const [overview, setOverview] = useState<GuardianOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -179,13 +169,17 @@ export default function DashboardPage() {
   const overallTone: Tone =
     failingPartitions > 0 ? "failing" : attentionPartitions > 0 ? "attention" : "healthy";
 
-  const pieData = s
-    ? [
-        { name: "Healthy", value: s.healthyAssets },
-        { name: "Attention", value: s.attentionAssets },
-        { name: "Failing", value: s.failingAssets },
-      ].filter((d) => d.value > 0)
-    : [];
+  const pieData = useMemo(
+    () =>
+      s
+        ? [
+            { name: "Healthy", value: s.healthyAssets },
+            { name: "Attention", value: s.attentionAssets },
+            { name: "Failing", value: s.failingAssets },
+          ].filter((d) => d.value > 0)
+        : [],
+    [s]
+  );
 
   const barData = useMemo(
     () =>
@@ -196,7 +190,6 @@ export default function DashboardPage() {
           return b.assetCount - a.assetCount;
         })
         .map((p) => ({
-          name: p.name.length > 14 ? p.name.slice(0, 12) + "\u2026" : p.name,
           fullName: p.name,
           Healthy: p.healthyAssets,
           Attention: p.attentionAssets,
@@ -204,6 +197,125 @@ export default function DashboardPage() {
         })),
     [partitions]
   );
+
+  const pieOption = useMemo<EChartsCoreOption>(() => {
+    const toneColor: Record<string, string> = {
+      Healthy: theme.green,
+      Attention: theme.amber,
+      Failing: theme.red,
+    };
+    return {
+      animation: false,
+      color: [theme.green, theme.amber, theme.red],
+      tooltip: {
+        trigger: "item",
+        confine: true,
+        backgroundColor: theme.elevated,
+        borderColor: theme.borderStrong,
+        borderWidth: 1,
+        padding: [6, 8],
+        textStyle: { color: theme.text, fontSize: 11 },
+        extraCssText: "border-radius:6px;",
+        formatter: (params: unknown) => {
+          const item = params as { name?: string; value?: number; percent?: number; color?: string };
+          return (
+            `<div class="ts-tooltip"><div class="ts-tooltip__row">` +
+            `<span class="ts-tooltip__swatch" style="background:${escapeHtml(item.color ?? theme.accent)}"></span>` +
+            `<span class="ts-tooltip__name">${escapeHtml(item.name ?? "")}</span>` +
+            `<span class="ts-tooltip__value">${item.value ?? 0} (${item.percent ?? 0}%)</span>` +
+            `</div></div>`
+          );
+        },
+      },
+      legend: {
+        bottom: 0,
+        icon: "circle",
+        itemWidth: 8,
+        itemHeight: 8,
+        itemGap: 12,
+        textStyle: { color: theme.muted, fontSize: 11 },
+      },
+      series: [
+        {
+          type: "pie",
+          radius: ["52%", "78%"],
+          center: ["50%", "43%"],
+          avoidLabelOverlap: true,
+          padAngle: 3,
+          itemStyle: { borderColor: theme.panel, borderWidth: 1 },
+          label: { show: false },
+          emphasis: { scale: true, label: { show: false } },
+          data: pieData.map((entry) => ({
+            ...entry,
+            itemStyle: { color: toneColor[entry.name] ?? theme.accent },
+          })),
+        },
+      ],
+    };
+  }, [pieData, theme]);
+
+  const barOption = useMemo<EChartsCoreOption>(() => {
+    const axisLabel = {
+      color: theme.text,
+      fontSize: 10,
+      hideOverlap: true,
+      interval: 0,
+      rotate: barData.length > 6 ? 30 : 0,
+      formatter: (value: string) => (value.length > 14 ? `${value.slice(0, 12)}…` : value),
+    };
+    return {
+      animation: false,
+      color: [theme.green, theme.amber, theme.red],
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        backgroundColor: theme.elevated,
+        borderColor: theme.borderStrong,
+        borderWidth: 1,
+        padding: [6, 8],
+        textStyle: { color: theme.text, fontSize: 11 },
+        extraCssText: "border-radius:6px;",
+        axisPointer: { type: "shadow", shadowStyle: { color: theme.grid } },
+      },
+      legend: {
+        top: 0,
+        right: 0,
+        icon: "roundRect",
+        itemWidth: 8,
+        itemHeight: 8,
+        itemGap: 10,
+        textStyle: { color: theme.muted, fontSize: 10 },
+      },
+      grid: { left: 4, right: 8, top: 26, bottom: 4, containLabel: true },
+      xAxis: {
+        type: "category",
+        data: barData.map((entry) => entry.fullName),
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel,
+      },
+      yAxis: {
+        type: "value",
+        minInterval: 1,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: { color: theme.text, fontSize: 10 },
+        splitLine: { lineStyle: { color: theme.grid, type: "dashed" } },
+      },
+      series: [
+        { key: "Healthy", color: theme.green },
+        { key: "Attention", color: theme.amber },
+        { key: "Failing", color: theme.red },
+      ].map((entry) => ({
+        type: "bar" as const,
+        name: entry.key,
+        data: barData.map((row) => Number(row[entry.key as "Healthy" | "Attention" | "Failing"])),
+        barMaxWidth: 14,
+        itemStyle: { color: entry.color, borderRadius: [3, 3, 0, 0] },
+        emphasis: { focus: "series" as const },
+      })),
+    };
+  }, [barData, theme]);
 
   const copyTriage = useCallback(async (partition: GuardianOverview["partitions"][number]) => {
     const encoded = encodeURIComponent(partition.name);
@@ -444,39 +556,9 @@ export default function DashboardPage() {
               Asset health
             </h2>
             {pieData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <PieChart>
-                  <Pie
-                    data={pieData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={55}
-                    outerRadius={80}
-                    paddingAngle={3}
-                    dataKey="value"
-                  >
-                    {pieData.map((_, i) => (
-                      <Cell key={i} fill={PIE_COLORS[i]} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "var(--ui-elevated)",
-                      border: "1px solid var(--ui-border)",
-                      borderRadius: 8,
-                      fontSize: 12,
-                      color: "var(--ui-text)",
-                    }}
-                  />
-                  <Legend
-                    iconType="circle"
-                    iconSize={8}
-                    formatter={(v) => (
-                      <span className="text-xs text-gray-400">{v}</span>
-                    )}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
+              <div style={{ height: 200 }}>
+                <EChart option={pieOption} ariaLabel="Asset health distribution" />
+              </div>
             ) : (
               <div className="h-[200px] flex items-center justify-center text-gray-600 text-sm">
                 No data
@@ -490,44 +572,9 @@ export default function DashboardPage() {
               Assets per partition
             </h2>
             {barData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart
-                  data={barData}
-                  margin={{ top: 4, right: 8, left: -24, bottom: 0 }}
-                  barSize={14}
-                  barGap={2}
-                >
-                  <XAxis
-                    dataKey="name"
-                    tick={{ fill: "var(--chart-text)", fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tick={{ fill: "var(--chart-text)", fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                    allowDecimals={false}
-                  />
-                  <Tooltip
-                    cursor={{ fill: "var(--ui-hover)" }}
-                    contentStyle={{
-                      backgroundColor: "var(--ui-elevated)",
-                      border: "1px solid var(--ui-border)",
-                      borderRadius: 8,
-                      fontSize: 12,
-                      color: "var(--ui-text)",
-                    }}
-                    formatter={(v: number, name: string) => [v, name]}
-                    labelFormatter={(label, payload) =>
-                      payload?.[0]?.payload?.fullName ?? label
-                    }
-                  />
-                  <Bar dataKey="Healthy" fill={HEALTH_GREEN} radius={[3, 3, 0, 0]} />
-                  <Bar dataKey="Attention" fill={HEALTH_AMBER} radius={[3, 3, 0, 0]} />
-                  <Bar dataKey="Failing" fill={HEALTH_RED} radius={[3, 3, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              <div style={{ height: 200 }}>
+                <EChart option={barOption} ariaLabel="Assets per partition by health" />
+              </div>
             ) : (
               <div className="h-[200px] flex items-center justify-center text-gray-600 text-sm">
                 No data

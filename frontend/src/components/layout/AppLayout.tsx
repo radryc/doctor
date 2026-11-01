@@ -35,6 +35,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 export default function AppLayout() {
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const closePalette = useCallback(() => setPaletteOpen(false), []);
 
@@ -84,9 +85,13 @@ export default function AppLayout() {
     <TimeRangeProvider>
       <InspectorProvider>
         <div className="app">
-          <Sidebar onOpenPalette={() => setPaletteOpen(true)} />
-          <main className="main">
-            <TopBar />
+          <a className="s-skip-link" href="#main-content">
+            Skip to content
+          </a>
+          <Sidebar onOpenPalette={() => setPaletteOpen(true)} mobileOpen={sidebarOpen} />
+          {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
+          <main className="main" id="main-content">
+            <TopBar onToggleSidebar={() => setSidebarOpen((open) => !open)} />
             <div className="main-view">
               <Outlet />
             </div>

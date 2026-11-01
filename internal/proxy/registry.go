@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/radryc/doctor/internal/netguard"
 	"sigs.k8s.io/yaml"
 )
 
@@ -56,14 +57,17 @@ type StaticRegistryConfig struct {
 	Path     string
 	Interval time.Duration
 	Logger   *log.Logger
+	// URLPolicy validates every backend endpoint before it is activated.
+	URLPolicy netguard.Policy
 }
 
 // StaticRegistry loads a backend list from a YAML/JSON file and reloads it when
 // the file changes. Invalid reloads keep the previous snapshot.
 type StaticRegistry struct {
-	path     string
-	interval time.Duration
-	logger   *log.Logger
+	path      string
+	interval  time.Duration
+	logger    *log.Logger
+	urlPolicy netguard.Policy
 
 	mu          sync.Mutex
 	snapshot    atomic.Pointer[[]Backend]
@@ -82,9 +86,10 @@ func NewStaticRegistry(cfg StaticRegistryConfig) (*StaticRegistry, error) {
 		interval = 30 * time.Second
 	}
 	r := &StaticRegistry{
-		path:     path,
-		interval: interval,
-		logger:   cfg.Logger,
+		path:      path,
+		interval:  interval,
+		logger:    cfg.Logger,
+		urlPolicy: cfg.URLPolicy,
 	}
 	if err := r.Reload(); err != nil {
 		return nil, err
@@ -149,6 +154,11 @@ func (r *StaticRegistry) Reload() error {
 	backends, err := ParseBackends(data)
 	if err != nil {
 		return err
+	}
+	for _, backend := range backends {
+		if err := r.urlPolicy.Validate(backend.BaseURL); err != nil {
+			return fmt.Errorf("proxy: backend %q: %w", backend.Name, err)
+		}
 	}
 	info, err := os.Stat(r.path)
 	if err == nil {

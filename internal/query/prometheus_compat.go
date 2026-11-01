@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"math"
 	"net/http"
@@ -1036,7 +1037,7 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	writePrometheusSuccess(w, filterPrometheusDataByIdentity(r, mergePrometheusQueryData(localData, awsData, "vector")))
+	writePrometheusSuccess(w, s.filterPrometheusDataForRequest(r, mergePrometheusQueryData(localData, awsData, "vector")))
 }
 
 func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Request) {
@@ -1113,7 +1114,7 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	writePrometheusSuccess(w, filterPrometheusDataByIdentity(r, mergePrometheusQueryData(localData, awsData, "matrix")))
+	writePrometheusSuccess(w, s.filterPrometheusDataForRequest(r, mergePrometheusQueryData(localData, awsData, "matrix")))
 }
 
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {
@@ -1632,6 +1633,10 @@ func writePrometheusSuccess(w http.ResponseWriter, data any) {
 }
 
 func writePrometheusError(w http.ResponseWriter, statusCode int, errorType, message string) {
+	if statusCode >= http.StatusInternalServerError {
+		log.Printf("prometheus error: %s", message)
+		message = internalErrorMessage
+	}
 	writeJSON(w, statusCode, map[string]any{
 		"status":    "error",
 		"errorType": errorType,

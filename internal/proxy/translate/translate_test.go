@@ -84,6 +84,12 @@ func TestParseSelectorHandlesEscapes(t *testing.T) {
 	}
 }
 
+func TestParseSelectorRejectsInjectedLabelName(t *testing.T) {
+	if _, err := ParseSelector(`{foo OR 1=1 --="x"}`); err == nil {
+		t.Fatal("expected an invalid label name error")
+	}
+}
+
 func TestLogQLToBigQuery(t *testing.T) {
 	from := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	query, err := LogQLToBigQuery(LogQuery{
