@@ -59,4 +59,5 @@ jobs:
       - name: Vulnerability scan
         uses: golang/govulncheck-action@v1
         with:
+          repo-checkout: false
           work-dir: doctor
