@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -410,6 +411,10 @@ func writeLokiQueryError(w http.ResponseWriter, err error) {
 }
 
 func writeLokiError(w http.ResponseWriter, statusCode int, message string) {
+	if statusCode >= http.StatusInternalServerError {
+		log.Printf("loki error: %s", message)
+		message = internalErrorMessage
+	}
 	writeJSON(w, statusCode, map[string]any{
 		"status": "error",
 		"error":  message,

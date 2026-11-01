@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/doctor/internal/access"
+	"github.com/radryc/monofs/pkg/authz"
 )
 
 func accessContext(subject string) context.Context {
@@ -68,6 +68,32 @@ func TestRouterLogsAllowedBackendPasses(t *testing.T) {
 	}
 	if local.calls != 1 {
 		t.Fatalf("calls = %d, want 1", local.calls)
+	}
+}
+
+func TestEndpointsPageSummaryHonorsVisibility(t *testing.T) {
+	gate := access.NewGate(access.NewStatic("", "", "alice"), map[access.Signal]bool{access.SignalLogs: true}, nil, nil)
+	router := NewRouter(RouterConfig{Access: gate}, NewCompositeRegistry())
+	for _, name := range []string{"loki-a", "loki-b"} {
+		if err := router.Register(Backend{Name: name, Kind: KindLoki, BaseURL: "http://" + name, Signals: []Signal{SignalLogs}}, Upstreams{Logs: &fakeLogsUpstream{name: name}}); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	page := router.EndpointsPage(accessContext("alice"), EndpointPageFilter{})
+	if page.Summary.Total != 0 || page.Summary.ByKind["loki"] != 0 {
+		t.Fatalf("summary leaked denied endpoints: %#v", page.Summary)
+	}
+
+	allowed := access.NewGate(access.NewStatic("bob", "", ""), map[access.Signal]bool{access.SignalLogs: true}, nil, nil)
+	allowedRouter := NewRouter(RouterConfig{Access: allowed}, NewCompositeRegistry())
+	for _, name := range []string{"loki-a", "loki-b"} {
+		if err := allowedRouter.Register(Backend{Name: name, Kind: KindLoki, BaseURL: "http://" + name, Signals: []Signal{SignalLogs}}, Upstreams{Logs: &fakeLogsUpstream{name: name}}); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	page = allowedRouter.EndpointsPage(accessContext("bob"), EndpointPageFilter{})
+	if page.Summary.Total != 2 || page.Summary.ByKind["loki"] != 2 {
+		t.Fatalf("summary = %#v, want both allowed endpoints", page.Summary)
 	}
 }
 

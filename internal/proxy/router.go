@@ -205,11 +205,26 @@ type EndpointPage struct {
 }
 
 // SummarizeEndpoints computes fleet-wide counts in O(N) memory-only pass.
+// It is unfiltered; HTTP handlers should use SummarizeEndpointsFor so the
+// summary obeys the same per-identity visibility as the endpoint page.
 func (r *Router) SummarizeEndpoints() EndpointSummary {
+	return r.summarizeEndpoints(nil)
+}
+
+// SummarizeEndpointsFor computes fleet-wide counts using the same access
+// decisions as the endpoint page. Observe-mode denials remain visible because
+// the gate has not been enforced for that signal.
+func (r *Router) SummarizeEndpointsFor(ctx context.Context) EndpointSummary {
+	return r.summarizeEndpoints(func(backend Backend) bool {
+		allowed, _, _ := r.accessDecision(ctx, backend, gatedSignal(backend))
+		return allowed
+	})
+}
+
+func (r *Router) summarizeEndpoints(include func(Backend) bool) EndpointSummary {
 	now := time.Now()
 	backends := r.snapshot()
 	summary := EndpointSummary{
-		Total:     len(backends),
 		ByKind:    make(map[string]int),
 		ByStatus:  make(map[string]int),
 		ByRegion:  make(map[string]int),
@@ -218,6 +233,10 @@ func (r *Router) SummarizeEndpoints() EndpointSummary {
 		ByVersion: make(map[string]int),
 	}
 	for _, b := range backends {
+		if include != nil && !include(b) {
+			continue
+		}
+		summary.Total++
 		if r.backendHealthy(b, now) {
 			summary.Healthy++
 		} else {
@@ -252,7 +271,7 @@ func (r *Router) SummarizeEndpoints() EndpointSummary {
 func (r *Router) EndpointsPage(ctx context.Context, filter EndpointPageFilter) EndpointPage {
 	now := time.Now()
 	backends := r.snapshot()
-	summary := r.SummarizeEndpoints()
+	summary := r.SummarizeEndpointsFor(ctx)
 
 	kindFilter := strings.ToLower(strings.TrimSpace(filter.Kind))
 	statusFilter := strings.ToLower(strings.TrimSpace(filter.Status))

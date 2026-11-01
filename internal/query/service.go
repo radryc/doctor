@@ -701,7 +701,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
 	mux.HandleFunc("/", s.handleUI)
-	return withWarningHeaders(s.guardianTokenMiddleware(mux))
+	return withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLogging(withWarningHeaders(s.guardianTokenMiddleware(mux)))))))
 }
 
 // guardianTokenKey carries the caller's OIDC token to server-side Guardian
@@ -868,7 +868,7 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeInternalError(w, r, err)
 		return
 	}
 	if traceID == "" {
@@ -884,7 +884,7 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 		if len(records) == 0 {
@@ -897,7 +897,7 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 		var err error
 		spans, err = s.logEngine.QueryTraces(r.Context(), tenant, traceID, "", from, to, 1000)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 		if len(spans) == 0 {
@@ -936,14 +936,14 @@ func (s *Service) handleSpanSearch(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 	} else {
 		var err error
 		spans, err = s.logEngine.QueryTraces(r.Context(), tenant, traceID, service, from, to, limit)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 	}
@@ -1004,7 +1004,7 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 		// The proxy router serves native storage and, when configured, the
@@ -1045,7 +1045,7 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			results, err = s.logEngine.QueryLogs(r.Context(), tenant, query, service, from, to, limit)
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeInternalError(w, r, err)
 			return
 		}
 	}
@@ -1106,7 +1106,7 @@ func (s *Service) handleMetricRange(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "metric has too many points; narrow the time range", http.StatusUnprocessableEntity)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeInternalError(w, r, err)
 		return
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].Timestamp.Before(points[j].Timestamp) })
@@ -1711,7 +1711,7 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 
 	summaries, next, hasMore, err := s.recentTracePage(r.Context(), tenant, service, identity, from, to, limit, cursor)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeInternalError(w, r, err)
 		return
 	}
 

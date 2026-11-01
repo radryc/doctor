@@ -121,11 +121,19 @@ type QueryConfig struct {
 	TraceDiscoveryCacheTTL         time.Duration
 	TraceDiscoveryWindow           time.Duration
 
-	ProxyEnabled              bool
-	ProxyBackendsFile         string
-	ProxyRegistryInterval     time.Duration
-	ProxyMaxInflight          int
-	ProxyBackendTimeout       time.Duration
+	ProxyEnabled          bool
+	ProxyBackendsFile     string
+	ProxyRegistryInterval time.Duration
+	ProxyMaxInflight      int
+	ProxyBackendTimeout   time.Duration
+	BackendRequireHTTPS   bool
+	BackendAllowLoopback  bool
+	BackendAllowPrivate   bool
+	BackendAllowedHosts   []string
+	// AllowedTenants bounds query tenant names. Empty accepts all names.
+	AllowedTenants []string
+	// SingleTenant forces every query to one tenant. Empty disables it.
+	SingleTenant              string
 	GuardianDiscoveryEnabled  bool
 	GuardianDiscoveryInterval time.Duration
 	GuardianToken             string
@@ -412,6 +420,12 @@ func LoadQuery(service string) QueryConfig {
 		ProxyRegistryInterval:     envDuration("DOCTOR_PROXY_REGISTRY_INTERVAL", 30*time.Second),
 		ProxyMaxInflight:          int(envInt64("DOCTOR_PROXY_MAX_INFLIGHT", 32)),
 		ProxyBackendTimeout:       envDuration("DOCTOR_PROXY_BACKEND_TIMEOUT", 15*time.Second),
+		BackendRequireHTTPS:       envBool("DOCTOR_BACKEND_REQUIRE_HTTPS", false),
+		BackendAllowLoopback:      envBool("DOCTOR_BACKEND_ALLOW_LOOPBACK", false),
+		BackendAllowPrivate:       envBool("DOCTOR_BACKEND_ALLOW_PRIVATE", true),
+		BackendAllowedHosts:       envCSV("DOCTOR_BACKEND_ALLOWED_HOSTS", nil),
+		AllowedTenants:            envCSV("DOCTOR_QUERY_ALLOWED_TENANTS", nil),
+		SingleTenant:              envString("DOCTOR_QUERY_SINGLE_TENANT", ""),
 		GuardianDiscoveryEnabled:  envBool("DOCTOR_GUARDIAN_DISCOVERY_ENABLED", false),
 		GuardianDiscoveryInterval: envDuration("DOCTOR_GUARDIAN_DISCOVERY_INTERVAL", 30*time.Second),
 		GuardianToken:             envString("DOCTOR_GUARDIAN_TOKEN", ""),

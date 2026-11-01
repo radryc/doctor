@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/radryc/monofs/pkg/authz"
-	"github.com/radryc/monofs/pkg/authz/policy"
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/monofs/pkg/authz"
+	"github.com/radryc/monofs/pkg/authz/policy"
 )
 
 // policyBackend decorates the logengine backend with access-policy filtering.

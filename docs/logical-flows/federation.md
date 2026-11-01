@@ -215,8 +215,8 @@ an AWS client with a `targetTokenSource` backed by the resolver. The AWS client 
    - traces on a small catalog (≤ max fanout) → pull all targets;
    - otherwise reject with `scope required`;
 4. resolve:
-   - trace ID: use `byTrace` index if present (it is never populated), else fan out only if catalog ≤
-     max fanout;
+   - trace ID: there is no trace-ID index; fan out only if catalog ≤ max fanout, otherwise reject
+     with `scope required`;
    - log groups without a cached index: parse `guardian/<account>/<region>/<partition>/...` into
      account/region/partition;
    - intersect index results for accounts, regions, partitions, log groups, services, metrics;
@@ -274,7 +274,7 @@ Potential issues:
 - `ListMetrics` dedupe omits account, so the same namespace/metric/region in multiple accounts
   collapses.
 - `ListMetrics` can return every cached metric name for a 50k-target catalog in one response.
-- `byTrace` is dead, so trace-ID planning is always a catalog scan/fallback.
+- Trace IDs are intentionally unindexed; trace-ID planning is a bounded catalog scan/fallback.
 
 ## 6. Status and admin views
 

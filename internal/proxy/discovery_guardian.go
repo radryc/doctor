@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/radryc/doctor/internal/netguard"
 )
 
 const (
@@ -35,6 +37,8 @@ type GuardianDiscoveryConfig struct {
 	OwnersRoot string
 	// HTTPClient overrides the default client (used by tests).
 	HTTPClient *http.Client
+	// URLPolicy validates discovered backend endpoints before activation.
+	URLPolicy netguard.Policy
 	// Logger receives discovery errors.
 	Logger *log.Logger
 }
@@ -48,6 +52,7 @@ type GuardianDiscovery struct {
 	ownersRoot string
 	client     *http.Client
 	logger     *log.Logger
+	urlPolicy  netguard.Policy
 
 	snapshot    atomic.Pointer[[]Backend]
 	lastRefresh atomic.Int64
@@ -80,6 +85,7 @@ func NewGuardianDiscovery(cfg GuardianDiscoveryConfig) *GuardianDiscovery {
 		ownersRoot: ownersRoot,
 		client:     client,
 		logger:     cfg.Logger,
+		urlPolicy:  cfg.URLPolicy,
 	}
 }
 
@@ -350,6 +356,9 @@ func (d *GuardianDiscovery) backendFromPusher(pusher guardianPusher) (Backend, e
 	if err := backend.Validate(); err != nil {
 		return Backend{}, err
 	}
+	if err := d.urlPolicy.Validate(backend.BaseURL); err != nil {
+		return Backend{}, fmt.Errorf("pusher %q: %w", pusher.Name, err)
+	}
 	return backend, nil
 }
 
@@ -379,6 +388,12 @@ func (d *GuardianDiscovery) backendFromPartition(partition guardianPartition) (B
 		Origin:     "guardian-partition",
 	}
 	if err := backend.Validate(); err != nil {
+		return Backend{}, false
+	}
+	if err := d.urlPolicy.Validate(backend.BaseURL); err != nil {
+		if d.logger != nil {
+			d.logger.Printf("proxy: skipping partition %q endpoint: %v", partition.Name, err)
+		}
 		return Backend{}, false
 	}
 	return backend, true
