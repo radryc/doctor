@@ -414,6 +414,14 @@ func (a *API) handleReceivers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// Keep the API shape stable for clients: an empty config is an empty
+		// list, not JSON null.
+		if cfg.Receivers == nil {
+			cfg.Receivers = []Receiver{}
+		}
+		if cfg.Routes == nil {
+			cfg.Routes = []Route{}
+		}
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPut:
 		if !identity.Can(CapReceiversWrite, tenant, partition) {

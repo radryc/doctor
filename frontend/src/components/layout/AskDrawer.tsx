@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ExternalLink, Sparkles, X } from "lucide-react";
 import { useLocation } from "react-router-dom";
 
 function agentBase(): string {
-  return (
-    (import.meta.env.VITE_AGENT_URL as string | undefined) ||
-    "http://localhost:3000"
-  ).replace(/\/$/, "");
+  const runtime = (window as unknown as { STRATA_AGENT_URL?: string })
+    .STRATA_AGENT_URL;
+  const configured =
+    runtime || (import.meta.env.VITE_AGENT_URL as string | undefined);
+  const host = window.location.hostname || "localhost";
+  const proto = window.location.protocol === "https:" ? "https:" : "http:";
+  return (configured || `${proto}//${host}:9191`).replace(/\/$/, "");
 }
 
 export default function AskDrawer() {
@@ -57,60 +61,64 @@ export default function AskDrawer() {
       <button
         type="button"
         className="s-btn s-btn-secondary"
-        onClick={() => setOpen(true)}
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
         title="Ask Strata about this view"
       >
         <Sparkles size={14} className="text-accent-purple" />
         Ask
       </button>
-      {open && (
-        <div className="s-drawer-backdrop" onClick={() => setOpen(false)}>
-          <aside
-            ref={drawerRef}
-            className="s-drawer"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Ask Strata"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <header className="s-drawer__header">
-              <div className="flex items-center gap-2">
-                <Sparkles size={16} className="text-accent-purple" />
-                <span className="s-drawer__title">Ask Strata</span>
+      {open &&
+        createPortal(
+          <div className="s-drawer-backdrop" onClick={() => setOpen(false)}>
+            <aside
+              ref={drawerRef}
+              className="s-drawer"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Ask Strata"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <header className="s-drawer__header">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={16} className="text-accent-purple" />
+                  <span className="s-drawer__title">Ask Strata</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <a
+                    className="s-icon-btn"
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Open in Agent"
+                    aria-label="Open in Agent"
+                  >
+                    <ExternalLink size={15} />
+                  </a>
+                  <button
+                    ref={closeRef}
+                    type="button"
+                    className="s-icon-btn"
+                    onClick={() => setOpen(false)}
+                    aria-label="Close Ask Strata"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+              </header>
+              <div className="s-drawer__body">
+                <iframe
+                  title="Ask Strata"
+                  src={url}
+                  className="h-full w-full border-0"
+                  allow="clipboard-read; clipboard-write"
+                />
               </div>
-              <div className="flex items-center gap-1">
-                <a
-                  className="s-icon-btn"
-                  href={url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title="Open in Agent"
-                  aria-label="Open in Agent"
-                >
-                  <ExternalLink size={15} />
-                </a>
-                <button
-                  ref={closeRef}
-                  type="button"
-                  className="s-icon-btn"
-                  onClick={() => setOpen(false)}
-                  aria-label="Close Ask Strata"
-                >
-                  <X size={16} />
-                </button>
-              </div>
-            </header>
-            <div className="s-drawer__body">
-              <iframe
-                title="Ask Strata"
-                src={url}
-                className="h-full w-full border-0"
-                allow="clipboard-read; clipboard-write"
-              />
-            </div>
-          </aside>
-        </div>
-      )}
+            </aside>
+          </div>,
+          document.body
+        )}
     </>
   );
 }

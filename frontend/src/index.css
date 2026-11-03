@@ -1837,8 +1837,8 @@ pre {
 }
 .btn:hover { border-color: var(--ui-accent); background: var(--ui-overlay); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn--primary { border-color: var(--ui-overlay-border); color: var(--ui-accent); background: var(--ui-overlay); }
-.btn--link { min-height: 0; padding: 0; border: 0; background: transparent; color: var(--ui-accent); }
+.btn--primary { border-color: var(--ui-overlay-border); color: var(--ui-accent-text); background: var(--ui-overlay); }
+.btn--link { min-height: 0; padding: 0; border: 0; background: transparent; color: var(--ui-accent-text); }
 
 /* ── Global time picker ───────────────────────────────────────────── */
 .app-topbar__controls { display: flex; align-items: center; gap: 0.4rem; }
