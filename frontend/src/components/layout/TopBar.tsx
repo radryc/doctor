@@ -1,6 +1,7 @@
 import { useLocation } from "react-router-dom";
 import GlobalTimePicker from "./GlobalTimePicker";
 import FederationStatusPill from "./FederationStatusPill";
+import ThemePicker from "./ThemePicker";
 import UserMenu from "./UserMenu";
 import { Menu } from "lucide-react";
 import AskDrawer from "./AskDrawer";
@@ -48,6 +49,7 @@ export default function TopBar({ onToggleSidebar }: { onToggleSidebar?: () => vo
       </div>
       <div className="flex items-center gap-2">
         <AskDrawer />
+        <ThemePicker />
         <UserMenu />
       </div>
     </header>

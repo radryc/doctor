@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, LogOut, UserRound } from "lucide-react";
 import { api } from "../../api/client";
-import ThemePicker from "./ThemePicker";
 
 export default function UserMenu() {
   const [open, setOpen] = useState(false);
@@ -64,9 +63,6 @@ export default function UserMenu() {
               {user || "Signed in"}
             </div>
             <div className="text-[11px] text-gray-500">Strata platform</div>
-          </div>
-          <div className="px-2 py-2 border-b border-dark-600">
-            <ThemePicker />
           </div>
           <a className="s-menu__item" href="/auth/logout">
             <LogOut size={14} />

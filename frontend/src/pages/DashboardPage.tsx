@@ -6,6 +6,8 @@ import {
   AlertTriangle,
   ArrowUpRight,
   BarChart3,
+  Bell,
+  BellOff,
   CheckCircle,
   Copy,
   FileText,
@@ -21,6 +23,7 @@ import { copyText } from "../lib/clipboard";
 import EChart from "../components/charts/EChart";
 import { escapeHtml, useChartTheme } from "../lib/chartTheme";
 import type { GuardianOverview } from "../types/api";
+import type { Alert } from "../types/alerts";
 
 const HEALTH_GREEN = "var(--ui-green)";
 const HEALTH_AMBER = "var(--ui-amber)";
@@ -110,6 +113,39 @@ function reconciledLabel(value: string | undefined): string {
   return `reconciled ${new Date(value).toLocaleTimeString()}`;
 }
 
+function alertAge(value: string | undefined): string {
+  if (!value) return "now";
+  const ms = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "now";
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+function severityRank(value: string): number {
+  switch (value.toLowerCase()) {
+    case "critical":
+      return 0;
+    case "warning":
+      return 1;
+    default:
+      return 2;
+  }
+}
+
+function severityBadgeClass(value: string): string {
+  switch (value.toLowerCase()) {
+    case "critical":
+      return "border-red-500/40 bg-red-500/10 text-red-300";
+    case "warning":
+      return "border-amber-500/40 bg-amber-500/10 text-amber-300";
+    default:
+      return "border-sky-500/40 bg-sky-500/10 text-sky-300";
+  }
+}
+
 export default function DashboardPage() {
   const { config } = useConfig();
   const theme = useChartTheme();
@@ -119,6 +155,56 @@ export default function DashboardPage() {
   const [refreshedAt, setRefreshedAt] = useState<Date>(new Date());
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [copiedPartition, setCopiedPartition] = useState("");
+  const [firingAlerts, setFiringAlerts] = useState<Alert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+
+  const loadAlerts = useCallback(
+    async (partitions: GuardianOverview["partitions"]) => {
+      const tenant = config.default_tenant || "default";
+      if (partitions.length === 0) {
+        setFiringAlerts([]);
+        setAlertsError(null);
+        return;
+      }
+      setAlertsLoading(true);
+      setAlertsError(null);
+      try {
+        const results = await Promise.allSettled(
+          partitions.map((partition) => {
+            const params = new URLSearchParams({
+              tenant,
+              partition: partition.name,
+              status: "firing",
+            });
+            return api.getAlerts(params);
+          })
+        );
+        const byFingerprint = new Map<string, Alert>();
+        for (const result of results) {
+          if (result.status !== "fulfilled") continue;
+          for (const alert of result.value.alerts ?? []) {
+            byFingerprint.set(alert.fingerprint, alert);
+          }
+        }
+        const next = [...byFingerprint.values()].sort((a, b) => {
+          const severity = severityRank(a.severity) - severityRank(b.severity);
+          if (severity !== 0) return severity;
+          return new Date(b.startsAt).getTime() - new Date(a.startsAt).getTime();
+        });
+        setFiringAlerts(next);
+        const failed = results.filter((result) => result.status === "rejected").length;
+        if (failed === results.length) {
+          setAlertsError("Could not load firing alerts for your partitions.");
+        }
+      } catch (e: unknown) {
+        setAlertsError(e instanceof Error ? e.message : "Failed to load firing alerts");
+      } finally {
+        setAlertsLoading(false);
+      }
+    },
+    [config.default_tenant]
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -127,12 +213,13 @@ export default function DashboardPage() {
       const data = await api.guardianOverview();
       setOverview(data);
       setRefreshedAt(new Date());
+      void loadAlerts(data.partitions ?? []);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load overview");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadAlerts]);
 
   useEffect(() => {
     void load();
@@ -399,11 +486,96 @@ export default function DashboardPage() {
               {s
                 ? `${s.assets} assets across ${s.partitions} partitions · ${healthPct ?? 0}% healthy · ${s.failingAssets} failing assets`
                 : "Waiting for Guardian overview…"}
+              {firingAlerts.length > 0
+                ? ` · ${firingAlerts.length} firing alert${firingAlerts.length === 1 ? "" : "s"}`
+                : ""}
             </span>
           </div>
           <Link className="triage-action triage-action--primary" to="/fleet">
             Open fleet <ArrowUpRight size={12} />
           </Link>
+        </section>
+
+        <section className="glass rounded-xl p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+              <Bell size={15} className="text-red-400" />
+              Firing alerts
+              {firingAlerts.length > 0 && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 font-bold">
+                  {firingAlerts.length}
+                </span>
+              )}
+            </h2>
+            <div className="flex items-center gap-3">
+              {alertsLoading && (
+                <span className="text-[11px] text-gray-500">Refreshing alerts…</span>
+              )}
+              <Link
+                className="triage-action triage-action--primary"
+                to={`/alerts?partition=${encodeURIComponent(
+                  config.default_partition || firingAlerts[0]?.partition || "doctor"
+                )}`}
+              >
+                Open alerts <ArrowUpRight size={12} />
+              </Link>
+            </div>
+          </div>
+
+          {alertsError ? (
+            <p className="text-xs text-red-400">{alertsError}</p>
+          ) : firingAlerts.length === 0 ? (
+            <div className="py-8 text-center">
+              <BellOff size={20} className="mx-auto text-gray-600" />
+              <p className="mt-2 text-sm text-gray-300">No firing alerts for your partitions.</p>
+              <p className="mt-1 text-xs text-gray-500">
+                Alerts are scoped to the partitions your account can access.
+              </p>
+            </div>
+          ) : (
+            <div className="max-h-80 overflow-y-auto divide-y divide-dark-600">
+              {firingAlerts.map((alert) => {
+                const title = alert.labels?.alertname || "Alert";
+                const summary =
+                  alert.annotations?.summary || alert.annotations?.description || "";
+                return (
+                  <Link
+                    key={`${alert.partition}/${alert.fingerprint}`}
+                    to={`/alerts?partition=${encodeURIComponent(
+                      alert.partition
+                    )}&alert=${encodeURIComponent(alert.fingerprint)}`}
+                    className="flex items-start gap-3 px-1 py-2.5 transition-colors hover:bg-dark-700/50"
+                  >
+                    <span
+                      className={`mt-0.5 inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${severityBadgeClass(
+                        alert.severity
+                      )}`}
+                    >
+                      {alert.severity}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <strong className="truncate text-xs font-semibold text-gray-200">
+                          {title}
+                        </strong>
+                        <span className="text-[10px] text-gray-500">{alert.partition}</span>
+                        {alert.acked && (
+                          <span className="text-[10px] text-emerald-400">acked</span>
+                        )}
+                      </div>
+                      {summary && summary !== title && (
+                        <p className="truncate text-[11px] text-gray-500">{summary}</p>
+                      )}
+                    </div>
+                    <span className="shrink-0 text-[10px] tabular-nums text-gray-500">
+                      {alertAge(alert.startsAt)}
+                    </span>
+                    <ArrowUpRight size={12} className="mt-0.5 shrink-0 text-gray-600" />
+                  </Link>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
@@ -546,6 +718,13 @@ export default function DashboardPage() {
             value={s?.driftedIntents ?? "\u2014"}
             sub={`${s?.healthyIntents ?? 0} healthy intents`}
             color="text-amber-500"
+          />
+          <StatCard
+            icon={Bell}
+            label="Firing alerts"
+            value={firingAlerts.length}
+            sub={firingAlerts.length === 0 ? "none firing" : "visible to your account"}
+            color={firingAlerts.length > 0 ? "text-red-500" : "text-gray-500"}
           />
         </div>
 
