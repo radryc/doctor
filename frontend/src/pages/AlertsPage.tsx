@@ -89,8 +89,17 @@ export default function AlertsPage() {
   const navigate = useNavigate();
   const tab = initialTab(location.pathname);
 
-  const [tenant, setTenant] = useState(config.default_tenant || "default");
-  const [partition, setPartition] = useState(config.default_partition || "");
+  const searchParams = useMemo(
+    () => new URLSearchParams(location.search),
+    [location.search]
+  );
+  const linkedPartition = searchParams.get("partition") || "";
+  const linkedAlert = searchParams.get("alert") || "";
+
+  const [tenant, setTenant] = useState(
+    searchParams.get("tenant") || config.default_tenant || "default"
+  );
+  const [partition, setPartition] = useState(linkedPartition);
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [subspaceAlerts, setSubspaceAlerts] = useState<Alert[]>([]);
@@ -126,6 +135,20 @@ export default function AlertsPage() {
   const [broadcastDedupe, setBroadcastDedupe] = useState("");
   const [broadcastMinutes, setBroadcastMinutes] = useState("60");
 
+  useEffect(() => {
+    if (!partition && config.default_partition) {
+      setPartition(config.default_partition);
+    }
+    // Fill the default once config arrives; a user-cleared field stays empty.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config.default_partition]);
+
+  useEffect(() => {
+    if (linkedPartition && linkedPartition !== partition) {
+      setPartition(linkedPartition);
+    }
+  }, [linkedPartition, partition]);
+
   const params = useMemo(() => {
     const p = new URLSearchParams();
     if (tenant) p.set("tenant", tenant);
@@ -156,12 +179,17 @@ export default function AlertsPage() {
     if (sourceFilter !== "all") p.set("source", sourceFilter);
     try {
       const data: AlertListResponse = await api.getAlerts(p);
-      setAlerts(data.alerts ?? []);
+      const list = data.alerts ?? [];
+      setAlerts(list);
+      if (linkedAlert) {
+        const match = list.find((alert) => alert.fingerprint === linkedAlert);
+        if (match) setSelected(match);
+      }
       setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not load alerts");
     }
-  }, [params, partition, severityFilter, sourceFilter, statusFilter, tenant]);
+  }, [linkedAlert, params, partition, severityFilter, sourceFilter, statusFilter, tenant]);
 
   const loadTab = useCallback(async () => {
     setLoading(true);
@@ -195,8 +223,12 @@ export default function AlertsPage() {
       }
       if (tab === "receivers") {
         const data = await api.getReceivers(params);
-        setReceivers(data);
-        setReceiverText(JSON.stringify(data, null, 2));
+        const normalized: ReceiverConfig = {
+          receivers: Array.isArray(data?.receivers) ? data.receivers : [],
+          routes: Array.isArray(data?.routes) ? data.routes : [],
+        };
+        setReceivers(normalized);
+        setReceiverText(JSON.stringify(normalized, null, 2));
       }
       if (tab === "delivery") {
         const data = await api.getDelivery(params);
@@ -305,8 +337,13 @@ export default function AlertsPage() {
   const saveReceivers = async () => {
     try {
       const parsed = JSON.parse(receiverText) as ReceiverConfig;
-      await api.putReceivers(params, parsed);
-      setReceivers(parsed);
+      const normalized: ReceiverConfig = {
+        receivers: Array.isArray(parsed?.receivers) ? parsed.receivers : [],
+        routes: Array.isArray(parsed?.routes) ? parsed.routes : [],
+      };
+      await api.putReceivers(params, normalized);
+      setReceivers(normalized);
+      setReceiverText(JSON.stringify(normalized, null, 2));
       setNotice("Receiver configuration saved");
     } catch (e) {
       setError(e instanceof Error ? e.message : "invalid receiver JSON");
@@ -427,7 +464,7 @@ groups:
         <header className="border-b border-slate-800 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-cyan-400/80">Sentinel</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--strata-accent-text)]">Sentinel</p>
               <h1 className="mt-1 text-xl font-semibold">Alerts & delivery</h1>
               <p className="mt-1 text-xs text-slate-500">
                 Partition-scoped alert state, silences, sources, receivers, and delivery log.
@@ -455,16 +492,20 @@ groups:
               </button>
             </div>
           </div>
-          <nav className="mt-4 flex flex-wrap gap-1">
+          <nav
+            className="mt-4 flex flex-wrap items-center gap-0.5 border-b border-[var(--strata-border)]"
+            aria-label="Alert sections"
+          >
             {TABS.map((item) => (
               <button
                 key={item.key}
                 type="button"
                 onClick={() => switchTab(item.key)}
-                className={`rounded px-3 py-1.5 text-xs font-medium ${
+                aria-current={tab === item.key ? "page" : undefined}
+                className={`-mb-px border-b-2 px-3 py-2 text-xs font-semibold transition-colors ${
                   tab === item.key
-                    ? "bg-cyan-500/15 text-cyan-300"
-                    : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
+                    ? "border-[var(--strata-accent)] text-[var(--strata-accent-text)]"
+                    : "border-transparent text-[var(--strata-text-secondary)] hover:border-[var(--strata-border-strong)] hover:text-[var(--strata-text)]"
                 }`}
               >
                 {item.label}
@@ -729,7 +770,7 @@ groups:
                     {silences.map((silence) => (
                       <tr key={silence.id}>
                         <td className="px-3 py-2">{silence.scope || "matcher"}</td>
-                        <td className="px-3 py-2 text-[10px] text-slate-400">{silence.matchers.map((m) => `${m.name}${m.operator}${m.value}`).join(", ")}</td>
+                        <td className="px-3 py-2 text-[10px] text-slate-400">{(silence.matchers ?? []).map((m) => `${m.name}${m.operator}${m.value}`).join(", ")}</td>
                         <td className="px-3 py-2 text-slate-400">{silence.createdBy || "—"}</td>
                         <td className="px-3 py-2 text-slate-400">{new Date(silence.endsAt).toLocaleString()}</td>
                         <td className="px-3 py-2 text-right">
@@ -793,7 +834,11 @@ groups:
                 className="mt-3 h-80 w-full rounded border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] text-slate-300"
                 spellCheck={false}
               />
-              {receivers && <p className="mt-2 text-[11px] text-slate-500">{receivers.receivers.length} receivers · {receivers.routes.length} routes</p>}
+              {receivers && (
+                <p className="mt-2 text-[11px] text-slate-500">
+                  {receivers.receivers?.length ?? 0} receivers · {receivers.routes?.length ?? 0} routes
+                </p>
+              )}
             </section>
           )}
 

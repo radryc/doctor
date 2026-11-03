@@ -3,6 +3,7 @@ package query
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +17,8 @@ func TestSecurityHeadersOnAPIAndUI(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		if got := rec.Header().Get("Content-Security-Policy"); got == "" {
 			t.Fatalf("%s: missing CSP", path)
+		} else if !strings.Contains(got, "frame-src") || !strings.Contains(got, "http://*:9191") {
+			t.Fatalf("%s: CSP does not allow the Ask Strata embed: %q", path, got)
 		}
 		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 			t.Fatalf("%s: X-Content-Type-Options = %q", path, got)
