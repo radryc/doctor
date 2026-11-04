@@ -26,6 +26,8 @@ import (
 	"github.com/prometheus/prometheus/util/annotations"
 	"github.com/radryc/doctor/internal/buildinfo"
 	"github.com/radryc/doctor/internal/segment"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -389,40 +391,36 @@ func (q *doctorPromQuerier) seriesLabelMaps(ctx context.Context, matchers []*pro
 
 func (q *doctorPromQuerier) discoverMetricNames(ctx context.Context) ([]string, annotations.Annotations, error) {
 	values := make(map[string]struct{})
+	query := doctorDiscoveryQuery(doctorMetricDiscoveryModeNames, nil)
 	if q.partition != "" {
-		err := q.forEachSeriesLabels(ctx, nil, func(labelSet promlabels.Labels) {
-			if name := labelSet.Get(promlabels.MetricName); name != "" {
-				values[name] = struct{}{}
-			}
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		out := make([]string, 0, len(values))
-		for value := range values {
-			out = append(out, value)
-		}
-		sort.Strings(out)
-		return out, nil, nil
-	}
-
-	points, err := q.backend.QueryMetrics(ctx, q.tenant, segment.MetricQuery{
-		LabelMatchers: []segment.MetricLabelMatcher{{
-			Name:  doctorMetricDiscoveryMatcherName,
-			Value: doctorMetricDiscoveryModeNames,
+		// Manifest discovery prunes chunks by the stored (dotted) partition
+		// label. MonoFS then produces the exact partition-scoped name set from
+		// the per-chunk series index without retaining full label maps.
+		query.LabelMatchers = append(query.LabelMatchers, segment.MetricLabelMatcher{
+			Name:  attrGuardianPartition,
+			Value: q.partition,
 			Type:  segment.MetricMatchEqual,
-		}},
-	}, timeFromPromMillis(q.mint), timeFromPromMillis(q.maxt))
-	if err != nil {
-		return nil, nil, err
+		})
 	}
 
-	for _, point := range points {
-		name := normalizePrometheusMetricName(point.MetricName)
+	scanned := 0
+	err := q.backend.StreamMetrics(ctx, q.tenant, query, timeFromPromMillis(q.mint), timeFromPromMillis(q.maxt), func(record segment.MetricPointRecord) error {
+		if scanned >= maxDiscoveryScannedRecords {
+			return errDiscoveryScanLimit
+		}
+		scanned++
+		name := normalizePrometheusMetricName(record.MetricName)
 		if name == "" {
-			continue
+			return nil
 		}
 		values[name] = struct{}{}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errDiscoveryScanLimit) {
+		if status.Code(err) == codes.ResourceExhausted {
+			return nil, nil, errMetricQueryTooBroad
+		}
+		return nil, nil, err
 	}
 
 	out := make([]string, 0, len(values))

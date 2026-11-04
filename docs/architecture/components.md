@@ -614,3 +614,13 @@ Recording rules:
 | `DOCTOR_OTEL_METRIC_INTERVAL` | `15s` |
 | `HOSTNAME` | instance ID |
 | `DOCTOR_PARTITION` | resource partition |
+
+### DuckDB SQL console
+
+`internal/query/sql.go` serves `POST /v1/sql/query`. It validates the request,
+resolves the caller's signal-specific partition scope through the access policy,
+and calls the MonoFS router's `QueryDuckDBSQL` RPC. The router fans the query
+out to every healthy storage node, intersects the requested partitions with its
+own policy scope, and returns per-node results. The DuckDB view in MonoFS applies
+the partition predicate before user SQL runs. The console is read-only and
+rejects DDL/DML and external file access.

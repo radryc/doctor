@@ -3,11 +3,13 @@ package query
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 )
@@ -75,6 +77,27 @@ func (b *policyBackend) QueryTraces(ctx context.Context, tenant, traceID, servic
 		return spans, err
 	}
 	return b.gate.FilterSpans(identityFromContext(ctx), spans), nil
+}
+
+// QueryDuckDBSQL runs a read-only SQL statement against the caller's visible
+// partitions. The policy gate computes the partition list before the request
+// reaches MonoFS; the MonoFS router intersects it with its own scope again.
+func (b *policyBackend) QueryDuckDBSQL(ctx context.Context, tenant, dataset, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) (monofsstore.DuckDBSQLResponse, error) {
+	signal := policy.SignalLogs
+	switch strings.ToLower(strings.TrimSpace(dataset)) {
+	case "logs":
+		signal = policy.SignalLogs
+	case "traces":
+		signal = policy.SignalTraces
+	case "metrics":
+		signal = policy.SignalMetrics
+	default:
+		return monofsstore.DuckDBSQLResponse{}, fmt.Errorf("unsupported SQL dataset %q", dataset)
+	}
+	if b.gate != nil {
+		visiblePartitions, restricted = b.gate.VisiblePartitions(identityFromContext(ctx), signal)
+	}
+	return b.inner.QueryDuckDBSQL(ctx, tenant, dataset, query, from, to, limit, visiblePartitions, restricted)
 }
 
 // AWSUpstream adapts the AWS client with the same access-policy filters as

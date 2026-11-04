@@ -23,6 +23,29 @@ type LogEngineClient struct {
 	router pb.MonoFSRouterClient
 }
 
+// DuckDBSQLResult is the row result returned by one MonoFS node.
+type DuckDBSQLResult struct {
+	Dataset    string   `json:"dataset"`
+	Columns    []string `json:"columns"`
+	Rows       [][]any  `json:"rows"`
+	RowCount   int      `json:"row_count"`
+	Truncated  bool     `json:"truncated"`
+	DurationMs int64    `json:"duration_ms"`
+}
+
+// DuckDBSQLNodeResult is the per-node envelope returned by the router.
+type DuckDBSQLNodeResult struct {
+	NodeID  string           `json:"node_id"`
+	Address string           `json:"address"`
+	Result  *DuckDBSQLResult `json:"result,omitempty"`
+	Error   string           `json:"error,omitempty"`
+}
+
+// DuckDBSQLResponse contains results from every healthy MonoFS node.
+type DuckDBSQLResponse struct {
+	Nodes []DuckDBSQLNodeResult `json:"nodes"`
+}
+
 // NewLogEngineClient dials the monofs router and returns a client.
 func NewLogEngineClient(ctx context.Context, routerAddr string) (*LogEngineClient, error) {
 	if routerAddr == "" {
@@ -167,6 +190,33 @@ func (c *LogEngineClient) QueryLogsRaw(ctx context.Context, tenant, query string
 		return nil, fmt.Errorf("unmarshal log results: %w", err)
 	}
 	return records, nil
+}
+
+// QueryDuckDBSQL runs a read-only SQL statement on every healthy MonoFS node.
+// visiblePartitions is the caller's already-authorized partition set; the
+// router intersects it with its own policy scope before forwarding.
+func (c *LogEngineClient) QueryDuckDBSQL(ctx context.Context, tenant, dataset, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) (DuckDBSQLResponse, error) {
+	_ = tenant
+	req := &pb.QueryDuckDBSQLRequest{
+		Dataset:      dataset,
+		Query:        query,
+		FromUnixNano: timeToNano(from),
+		ToUnixNano:   timeToNano(to),
+		Limit:        int32(limit),
+	}
+	if restricted {
+		req.VisiblePartitions = append([]string(nil), visiblePartitions...)
+		req.VisiblePartitionsSet = true
+	}
+	resp, err := c.router.QueryDuckDBSQL(ctx, req)
+	if err != nil {
+		return DuckDBSQLResponse{}, err
+	}
+	var out DuckDBSQLResponse
+	if err := json.Unmarshal([]byte(resp.GetResultsJson()), &out); err != nil {
+		return out, fmt.Errorf("unmarshal duckdb sql results: %w", err)
+	}
+	return out, nil
 }
 
 // QueryMetrics returns metric data points for the given query and time range.

@@ -7,6 +7,7 @@ import {
   Cloud,
   Copy,
   Cpu,
+  Database,
   FileText,
   GitBranch,
   Layers,
@@ -163,6 +164,15 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         keywords: "promql prometheus graphs",
         icon: BarChart3,
         run: go("/metrics"),
+      },
+      {
+        id: "nav-sql",
+        group: "Go to",
+        label: "SQL console",
+        hint: "g q",
+        keywords: "duckdb parquet select query",
+        icon: Database,
+        run: go("/sql"),
       },
       {
         id: "nav-fleet",

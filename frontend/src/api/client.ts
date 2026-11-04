@@ -24,6 +24,7 @@ import type {
   TempoSearchResponse,
   TempoQueryRangeResponse,
   LokiQueryResponse,
+  DuckDBSQLResponse,
 } from "../types/api";
 import type { DashboardDocument, DashboardVersion, DashboardBundle } from "../types/dashboard";
 import type {
@@ -138,6 +139,14 @@ export const api = {
 
   searchLogs: (params: URLSearchParams) =>
     fetchJSON<LogSearchResponse>(`/v1/logs/search?${params}`),
+
+  queryDuckDBSQL: (body: {
+    dataset: "logs" | "metrics" | "traces";
+    query: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  }) => fetchJSONBody<DuckDBSQLResponse>("/v1/sql/query", "POST", body),
 
   getMetricRange: (params: URLSearchParams) =>
     fetchJSON<MetricRangeResponse>(`/v1/metrics/range?${params}`),

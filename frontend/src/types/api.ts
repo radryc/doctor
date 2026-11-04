@@ -561,3 +561,27 @@ export interface RecordingRulesStatus {
     lastError?: string;
   };
 }
+
+// ── DuckDB SQL console ───────────────────────────────────────────────────────
+export interface DuckDBSQLResult {
+  dataset: string;
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  truncated: boolean;
+  duration_ms: number;
+}
+
+export interface DuckDBSQLNodeResult {
+  node_id: string;
+  address: string;
+  result?: DuckDBSQLResult;
+  error?: string;
+}
+
+export interface DuckDBSQLResponse {
+  dataset: string;
+  nodes: DuckDBSQLNodeResult[];
+  restricted: boolean;
+  visible_partitions?: string[];
+}

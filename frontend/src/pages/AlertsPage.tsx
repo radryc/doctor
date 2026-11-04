@@ -708,8 +708,8 @@ groups:
           )}
 
           {tab === "rules" && partition && (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-              <section className="rounded-lg border border-slate-800 bg-slate-900/50">
+            <div className="grid min-h-full grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+              <section className="flex flex-col rounded-lg border border-slate-800 bg-slate-900/50">
                 <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
                   <div>
                     <h2 className="text-sm font-semibold">Sentinel rules</h2>
@@ -717,7 +717,7 @@ groups:
                   </div>
                   {can(caps, "alerts.rules.write") && <button type="button" onClick={newRule} className="btn text-xs">New</button>}
                 </div>
-                <div className="divide-y divide-slate-800">
+                <div className="min-h-0 flex-1 divide-y divide-slate-800 overflow-auto">
                   {ruleGroups.map((group) => (
                     <button key={`${group.tenant}/${group.partition}/${group.group}`} type="button" onClick={() => void openRule(group)} className={`block w-full px-4 py-3 text-left hover:bg-slate-800/60 ${ruleSelected?.group === group.group ? "bg-slate-800/70" : ""}`}>
                       <div className="flex items-center justify-between gap-2">
@@ -730,9 +730,9 @@ groups:
                   {ruleGroups.length === 0 && <div className="px-4 py-10 text-center text-xs text-slate-500">No Sentinel rules in this partition.</div>}
                 </div>
               </section>
-              <section className="rounded-lg border border-slate-800 bg-slate-900/50">
+              <section className="flex flex-col rounded-lg border border-slate-800 bg-slate-900/50">
                 {ruleSelected ? (
-                  <div className="flex h-full flex-col">
+                  <div className="flex min-h-[480px] flex-1 flex-col">
                     <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
                       <input value={ruleSelected.group} onChange={(e) => setRuleSelected({ ...ruleSelected, group: e.target.value })} className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs" />
                       <span className="text-[10px] text-slate-500">{ruleSelected.tenant} · {ruleSelected.partition}</span>
@@ -742,11 +742,11 @@ groups:
                         <button type="button" onClick={() => void deleteRule()} disabled={!can(caps, "alerts.rules.write")} className="btn text-xs text-rose-300">Delete</button>
                       </div>
                     </div>
-                    <textarea value={ruleYaml} onChange={(e) => setRuleYaml(e.target.value)} className="min-h-[260px] flex-1 resize-none bg-slate-950 p-4 font-mono text-[11px] text-slate-300" spellCheck={false} />
+                    <textarea value={ruleYaml} onChange={(e) => setRuleYaml(e.target.value)} className="min-h-[360px] flex-1 resize-y bg-slate-950 p-4 font-mono text-[11px] text-slate-300" spellCheck={false} />
                     {ruleResult && <pre className="max-h-48 overflow-auto border-t border-slate-800 bg-slate-950 p-3 text-[10px] text-slate-300">{ruleResult}</pre>}
                   </div>
                 ) : (
-                  <div className="flex h-full min-h-[240px] items-center justify-center p-6 text-xs text-slate-500">Select a rule group or create a new one.</div>
+                  <div className="flex min-h-[480px] flex-1 items-center justify-center p-6 text-xs text-slate-500">Select a rule group or create a new one.</div>
                 )}
               </section>
             </div>
