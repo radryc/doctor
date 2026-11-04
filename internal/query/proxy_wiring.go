@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	promstorage "github.com/prometheus/prometheus/storage"
@@ -39,22 +40,141 @@ type localMetricsUpstream struct {
 func (l localMetricsUpstream) Name() string { return proxy.SourceDoctor }
 
 func (l localMetricsUpstream) PromInstant(ctx context.Context, tenant, query string, at time.Time) (map[string]any, error) {
-	data, err, parse := l.svc.execPrometheusInstant(ctx, tenant, "", query, at)
-	if err != nil {
-		return nil, &proxy.QueryError{Err: err, Parse: parse}
+	cache := l.svc.getMetricsCache()
+	if cache == nil {
+		data, err, parse := l.svc.execPrometheusInstant(ctx, tenant, "", query, at)
+		if err != nil {
+			return nil, &proxy.QueryError{Err: err, Parse: parse}
+		}
+		return data, nil
 	}
-	return data, nil
+	key := fmt.Sprintf("prom-instant\x00%s\x00%s\x00%s", tenant, query, cacheBucket(at))
+	value, err := cache.getOrLoad(ctx, key, func(ctx context.Context) (any, error) {
+		data, execErr, parse := l.svc.execPrometheusInstant(ctx, tenant, "", query, at)
+		if execErr != nil {
+			return nil, &proxy.QueryError{Err: execErr, Parse: parse}
+		}
+		return data, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	data, _ := value.(map[string]any)
+	return copyPrometheusData(data), nil
 }
 
 func (l localMetricsUpstream) PromRange(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration) (map[string]any, error) {
-	data, err, parse := l.svc.execPrometheusRange(ctx, tenant, "", query, start, end, step)
-	if err != nil {
-		return nil, &proxy.QueryError{Err: err, Parse: parse}
+	cache := l.svc.getMetricsCache()
+	if cache == nil {
+		data, err, parse := l.svc.execPrometheusRange(ctx, tenant, "", query, start, end, step)
+		if err != nil {
+			return nil, &proxy.QueryError{Err: err, Parse: parse}
+		}
+		return data, nil
 	}
-	return data, nil
+	key := fmt.Sprintf("prom-range\x00%s\x00%s\x00%s\x00%s", tenant, query, cacheBucket(start), step.String())
+	if !end.IsZero() {
+		key += "\x00" + cacheBucket(end)
+	}
+	value, err := cache.getOrLoad(ctx, key, func(ctx context.Context) (any, error) {
+		data, execErr, parse := l.svc.execPrometheusRange(ctx, tenant, "", query, start, end, step)
+		if execErr != nil {
+			return nil, &proxy.QueryError{Err: execErr, Parse: parse}
+		}
+		return data, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	data, _ := value.(map[string]any)
+	return copyPrometheusData(data), nil
+}
+
+func copyPrometheusData(data map[string]any) map[string]any {
+	if data == nil {
+		return nil
+	}
+	out, _ := copyPrometheusValue(data).(map[string]any)
+	return out
+}
+
+// copyPrometheusValue deep-copies the JSON-like Prometheus result structures.
+// Request-level identity filtering and multi-backend merging mutate result
+// entries in place, so cached values must not be shared with callers.
+func copyPrometheusValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = copyPrometheusValue(item)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, item := range typed {
+			out[key] = item
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = copyPrometheusValue(item)
+		}
+		return out
+	case []map[string]string:
+		out := make([]map[string]string, len(typed))
+		for i, item := range typed {
+			out[i], _ = copyPrometheusValue(item).(map[string]string)
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(typed))
+		for i, item := range typed {
+			out[i], _ = copyPrometheusValue(item).(map[string]any)
+		}
+		return out
+	case []byte:
+		return append([]byte(nil), typed...)
+	default:
+		return value
+	}
+}
+
+func cachedStringResult(ctx context.Context, cache *resultCache, key string, load func(context.Context) ([]string, error)) ([]string, error) {
+	if cache == nil {
+		return load(ctx)
+	}
+	value, err := cache.getOrLoad(ctx, key, func(ctx context.Context) (any, error) {
+		return load(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	out, _ := value.([]string)
+	return append([]string(nil), out...), nil
 }
 
 func (l localMetricsUpstream) PromSeries(ctx context.Context, tenant string, match []string, start, end time.Time) ([]map[string]string, error) {
+	cache := l.svc.getMetricsCache()
+	if cache == nil {
+		return l.promSeriesUncached(ctx, tenant, match, start, end)
+	}
+	key := fmt.Sprintf("prom-series\x00%s\x00%s\x00%s\x00%s", tenant, strings.Join(match, "\x00"), cacheBucket(start), cacheBucket(end))
+	value, err := cache.getOrLoad(ctx, key, func(ctx context.Context) (any, error) {
+		return l.promSeriesUncached(ctx, tenant, match, start, end)
+	})
+	if err != nil {
+		return nil, err
+	}
+	out, _ := value.([]map[string]string)
+	copied := make([]map[string]string, len(out))
+	for i, labels := range out {
+		copied[i] = labels
+	}
+	return copied, nil
+}
+
+func (l localMetricsUpstream) promSeriesUncached(ctx context.Context, tenant string, match []string, start, end time.Time) ([]map[string]string, error) {
 	selectorSets, err := parsePrometheusSelectorSets(match)
 	if err != nil {
 		return nil, err
@@ -86,6 +206,14 @@ func (l localMetricsUpstream) PromSeries(ctx context.Context, tenant string, mat
 }
 
 func (l localMetricsUpstream) PromLabels(ctx context.Context, tenant string, match []string, start, end time.Time) ([]string, error) {
+	cache := l.svc.getMetricsCache()
+	key := fmt.Sprintf("prom-labels\x00%s\x00%s\x00%s\x00%s", tenant, strings.Join(match, "\x00"), cacheBucket(start), cacheBucket(end))
+	return cachedStringResult(ctx, cache, key, func(ctx context.Context) ([]string, error) {
+		return l.promLabelsUncached(ctx, tenant, match, start, end)
+	})
+}
+
+func (l localMetricsUpstream) promLabelsUncached(ctx context.Context, tenant string, match []string, start, end time.Time) ([]string, error) {
 	selectorSets, err := parsePrometheusSelectorSets(match)
 	if err != nil {
 		return nil, err
@@ -120,6 +248,14 @@ func (l localMetricsUpstream) PromLabels(ctx context.Context, tenant string, mat
 }
 
 func (l localMetricsUpstream) PromLabelValues(ctx context.Context, tenant, label string, match []string, start, end time.Time) ([]string, error) {
+	cache := l.svc.getMetricsCache()
+	key := fmt.Sprintf("prom-label-values\x00%s\x00%s\x00%s\x00%s\x00%s", tenant, label, strings.Join(match, "\x00"), cacheBucket(start), cacheBucket(end))
+	return cachedStringResult(ctx, cache, key, func(ctx context.Context) ([]string, error) {
+		return l.promLabelValuesUncached(ctx, tenant, label, match, start, end)
+	})
+}
+
+func (l localMetricsUpstream) promLabelValuesUncached(ctx context.Context, tenant, label string, match []string, start, end time.Time) ([]string, error) {
 	selectorSets, err := parsePrometheusSelectorSets(match)
 	if err != nil {
 		return nil, err

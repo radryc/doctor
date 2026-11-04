@@ -120,6 +120,37 @@ func (g *PolicyGate) IsAdmin(id authz.Identity) bool {
 	return p != nil && p.IsAdmin(id)
 }
 
+// VisiblePartitions returns the partitions the caller may read for a signal.
+// Unlike record filtering, this runs even in observe mode: the SQL console is
+// a new read surface and fails closed while the policy is unavailable. Metrics
+// are always visible under the Strata policy.
+func (g *PolicyGate) VisiblePartitions(id authz.Identity, signal policy.Signal) ([]string, bool) {
+	if g == nil || signal == policy.SignalMetrics {
+		return nil, false
+	}
+	if g.IsAdmin(id) {
+		return nil, false
+	}
+	p := g.policy()
+	if p == nil {
+		return []string{}, true
+	}
+	names, all := p.VisiblePartitions(id)
+	if all {
+		if p.CanReadSignal(id, "*", signal) {
+			return nil, false
+		}
+		return []string{}, true
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if p.CanReadSignal(id, name, signal) {
+			out = append(out, name)
+		}
+	}
+	return out, true
+}
+
 // Allowed is the request-level gate: metrics always pass; disabled and
 // observe modes pass; enforce fails closed for anonymous callers and while no
 // policy has loaded. Record-level filtering still applies after this.

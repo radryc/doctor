@@ -281,3 +281,25 @@ func TestMiddleware(t *testing.T) {
 		t.Fatalf("authenticated trace request: got %d, want 200", rec.Code)
 	}
 }
+
+func TestVisiblePartitionsForSQLRespectsSignalScopes(t *testing.T) {
+	for _, enforce := range []bool{true, false} {
+		gate := newTestGate(t, enforce)
+		logs, restricted := gate.VisiblePartitions(foo(), policy.SignalLogs)
+		if !restricted || len(logs) != 1 || logs[0] != "aws-x" {
+			t.Fatalf("enforce=%v logs = %v, restricted=%v; want [aws-x] restricted", enforce, logs, restricted)
+		}
+		traces, restricted := gate.VisiblePartitions(foo(), policy.SignalTraces)
+		if !restricted || len(traces) != 1 || traces[0] != "k8s-z" {
+			t.Fatalf("enforce=%v traces = %v, restricted=%v; want [k8s-z] restricted", enforce, traces, restricted)
+		}
+		metrics, restricted := gate.VisiblePartitions(foo(), policy.SignalMetrics)
+		if restricted || metrics != nil {
+			t.Fatalf("enforce=%v metrics = %v, restricted=%v; want unrestricted", enforce, metrics, restricted)
+		}
+		adminLogs, restricted := gate.VisiblePartitions(admin(), policy.SignalLogs)
+		if restricted || adminLogs != nil {
+			t.Fatalf("enforce=%v admin logs = %v, restricted=%v; want unrestricted", enforce, adminLogs, restricted)
+		}
+	}
+}
