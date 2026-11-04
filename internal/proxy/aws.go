@@ -294,7 +294,7 @@ func AWSLogRecords(records []awsstore.LogRecord, tenant, defaultLogGroup, defaul
 func awsLogGroupPartition(logGroup string) string {
 	logGroup = strings.TrimSpace(logGroup)
 	// CloudWatch log records from the AWS read API are prefixed with the
-	// account id (for example "780603797542:guardian/.../web").
+	// account id (for example "222222222222:guardian/.../web").
 	if idx := strings.Index(logGroup, "guardian/"); idx >= 0 {
 		logGroup = logGroup[idx:]
 	}
