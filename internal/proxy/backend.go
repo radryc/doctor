@@ -89,6 +89,7 @@ var backendNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 type Backend struct {
 	Name       string // stable id; becomes the shard label
 	Kind       string // prometheus|loki|tempo|elasticsearch|bigquery|monofs|aws
+	Engine     string // monofs storage engine: logengine or clickhouse
 	BaseURL    string
 	Token      string
 	Tenant     string

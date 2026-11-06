@@ -117,14 +117,15 @@ service token.
 - widget queries with datasource (`prometheus`, `loki`, `tempo`, `native_logs`, `native_traces`);
 - visualization options (line/area/bars, stacked, exemplars, unit, decimals, thresholds, markdown).
 
-Six built-in presets are compiled into the binary:
+Seven built-in presets are compiled into the binary:
 
 1. Strata & Guardian Fleet Overview
 2. Service RED Overview (APM template)
 3. Synthetic Probes & SLO
 4. MonoFS & LogEngine Storage
-5. Doctor Self-Observability
-6. AWS CloudWatch & X-Ray Federation
+5. ClickHouse - Health & Status
+6. Doctor Self-Observability
+7. AWS CloudWatch & X-Ray Federation
 
 Built-ins are read-only and take precedence over stored documents with the same ID. The UI “clone”
 action creates an editable copy with `builtIn:false`.

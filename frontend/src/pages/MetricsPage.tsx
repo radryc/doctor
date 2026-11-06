@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  X,
 } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
@@ -19,8 +20,11 @@ import { copyText } from "../lib/clipboard";
 import MetricLineChart from "../components/charts/MetricLineChart";
 import ChartExpandModal from "../components/charts/ChartExpandModal";
 import { formatDateTimeFull } from "../components/charts/TimeSeriesChart";
+import type { ChartDisplayMode } from "../components/charts/TimeSeriesChart";
 import DataTable from "../components/ui/DataTable";
+import Tabs from "../components/ui/Tabs";
 import type {
+  MetricLabelFilter,
   MetricPoint,
   MetricSeries,
   PrometheusMatrixResult,
@@ -201,6 +205,34 @@ function matrixToSeries(result?: PrometheusMatrixResult[]): MetricSeries[] {
     .sort((left, right) => left.label.localeCompare(right.label));
 }
 
+/** Instant vectors become one-point series so bar and gauge views work too. */
+function vectorToSeries(result?: PrometheusVectorResult[]): MetricSeries[] {
+  if (!result) return [];
+  return result
+    .map((sample) => {
+      const timestamp = sample.value?.[0] ?? sample.histogram?.[0];
+      const value = sample.value
+        ? Number(sample.value[1])
+        : histogramScalar(sample.histogram?.[1]);
+      const points: MetricPoint[] =
+        timestamp !== undefined && value !== null && Number.isFinite(value)
+          ? [
+              {
+                timestamp: new Date(timestamp * 1000).toISOString(),
+                value,
+                labels: sample.metric,
+              },
+            ]
+          : [];
+      return {
+        label: metricLabel(sample.metric),
+        labels: sample.metric,
+        points,
+      };
+    })
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
 function resultStats(response: PrometheusQueryResponse | null) {
   if (!response) return { series: 0, samples: 0 };
   const data = response.data;
@@ -226,50 +258,76 @@ function metricLabelFields(metric: PrometheusSeriesMetric): Record<string, strin
   return fields;
 }
 
-function tableRows(response: PrometheusQueryResponse | null): Record<string, unknown>[] {
+function metricMatchesLabelFilters(
+  metric: PrometheusSeriesMetric,
+  filters: MetricLabelFilter[]
+): boolean {
+  return filters.every((filter) => metric[filter.key] === filter.value);
+}
+
+function tableRows(
+  response: PrometheusQueryResponse | null,
+  filters: MetricLabelFilter[] = []
+): Record<string, unknown>[] {
   if (!response) return [];
   const data = response.data;
   if (data.resultType === "matrix") {
-    return data.result.flatMap((series) => {
-      const labels = metricLabelFields(series.metric);
-      const rows = (series.values ?? []).map(([timestamp, value]) => ({
-        time: new Date(timestamp * 1000).toLocaleString(),
-        series: metricLabel(series.metric),
-        value: formatNumber(Number(value)),
-        ...labels,
-      }));
-      for (const [timestamp, histogram] of series.histograms ?? []) {
-        rows.push({
+    return data.result
+      .filter((series) => metricMatchesLabelFilters(series.metric, filters))
+      .flatMap((series) => {
+        const labels = metricLabelFields(series.metric);
+        const metric = series.metric.__name__ ?? "";
+        const rows = (series.values ?? []).map(([timestamp, value]) => ({
           time: new Date(timestamp * 1000).toLocaleString(),
+          metric,
           series: metricLabel(series.metric),
-          value: histogramSummary(histogram),
+          value: formatNumber(Number(value)),
           ...labels,
-        });
-      }
-      return rows;
-    });
+        }));
+        for (const [timestamp, histogram] of series.histograms ?? []) {
+          rows.push({
+            time: new Date(timestamp * 1000).toLocaleString(),
+            metric,
+            series: metricLabel(series.metric),
+            value: histogramSummary(histogram),
+            ...labels,
+          });
+        }
+        return rows;
+      });
   }
   if (data.resultType === "vector") {
-    return data.result.map((sample: PrometheusVectorResult) => ({
-      time: new Date((sample.value?.[0] ?? sample.histogram?.[0] ?? 0) * 1000).toLocaleString(),
-      series: metricLabel(sample.metric),
-      value: sample.value
-        ? formatNumber(Number(sample.value[1]))
-        : histogramSummary(sample.histogram?.[1]),
-      ...metricLabelFields(sample.metric),
-    }));
+    return data.result
+      .filter((sample) => metricMatchesLabelFilters(sample.metric, filters))
+      .map((sample: PrometheusVectorResult) => ({
+        time: new Date((sample.value?.[0] ?? sample.histogram?.[0] ?? 0) * 1000).toLocaleString(),
+        metric: sample.metric.__name__ ?? "",
+        series: metricLabel(sample.metric),
+        value: sample.value
+          ? formatNumber(Number(sample.value[1]))
+          : histogramSummary(sample.histogram?.[1]),
+        ...metricLabelFields(sample.metric),
+      }));
   }
   return [
     {
       time: new Date(data.result[0] * 1000).toLocaleString(),
+      metric: data.resultType,
       series: data.resultType,
       value: data.result[1],
     },
   ];
 }
 
-function tableColumns(response: PrometheusQueryResponse | null): { label: string; key: string }[] {
-  const columns: { label: string; key: string }[] = [{ label: "Time", key: "time" }];
+function tableColumns(
+  response: PrometheusQueryResponse | null,
+  filters: MetricLabelFilter[],
+  onToggleLabel?: (key: string, value: string) => void
+): { label: string; key: string; render?: (row: Record<string, unknown>) => ReactNode }[] {
+  const columns: { label: string; key: string; render?: (row: Record<string, unknown>) => ReactNode }[] = [
+    { label: "Time", key: "time" },
+    { label: "Metric", key: "metric" },
+  ];
   const data = response?.data;
   const labelKeys = new Set<string>();
   if (data && (data.resultType === "matrix" || data.resultType === "vector")) {
@@ -280,7 +338,27 @@ function tableColumns(response: PrometheusQueryResponse | null): { label: string
     }
   }
   for (const key of [...labelKeys].sort()) {
-    columns.push({ label: key, key: `label_${key}` });
+    columns.push({
+      label: key,
+      key: `label_${key}`,
+      render: (row) => {
+        const value = String(row[`label_${key}`] ?? "");
+        if (!value) return "–";
+        const active = filters.some((filter) => filter.key === key && filter.value === value);
+        return (
+          <button
+            type="button"
+            className={"table-label-cell" + (active ? " is-active" : "")}
+            title={`${key}="${value}"${onToggleLabel ? " — click to filter by this label" : ""}`}
+            aria-pressed={active}
+            disabled={!onToggleLabel}
+            onClick={() => onToggleLabel?.(key, value)}
+          >
+            {value}
+          </button>
+        );
+      },
+    });
   }
   columns.push({ label: "Value", key: "value" });
   columns.push({ label: "Series", key: "series" });
@@ -341,6 +419,8 @@ export default function MetricsPage() {
   const [statusMsg, setStatusMsg] = useState("Choose a quick start, a metric, or write a PromQL expression.");
   const [copiedQuery, setCopiedQuery] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [chartMode, setChartMode] = useState<ChartDisplayMode>("line");
+  const [labelFilters, setLabelFilters] = useState<MetricLabelFilter[]>([]);
 
   // Follow the global time picker. The page used to keep an isolated
   // 60-minute window, so selecting 5m in the top bar still queried one hour.
@@ -512,6 +592,7 @@ export default function MetricsPage() {
       }
 
       setRequestUrl(`${url}?${params}`);
+      setLabelFilters([]);
       setStatusKind("loading");
       setStatusMsg(
         queryTimeout
@@ -557,6 +638,21 @@ export default function MetricsPage() {
     void execute(initial);
   }, [execute, searchParams]);
 
+  const toggleLabelFilter = useCallback((key: string, value: string) => {
+    setLabelFilters((previous) => {
+      const exists = previous.some((filter) => filter.key === key && filter.value === value);
+      if (exists) {
+        return previous.filter((filter) => !(filter.key === key && filter.value === value));
+      }
+      // A label dimension can only have one value at a time, so choosing a
+      // different value for an already-filtered key replaces that matcher
+      // instead of stacking an impossible AND.
+      return [...previous.filter((filter) => filter.key !== key), { key, value }];
+    });
+  }, []);
+
+  const clearLabelFilters = useCallback(() => setLabelFilters([]), []);
+
   const filteredMetricNames = useMemo(() => {
     const needle = metricFilter.trim().toLowerCase();
     const names = needle
@@ -589,9 +685,23 @@ export default function MetricsPage() {
   }, [execute, metricLoading, metricNames, partition, query, selectedMetric, tenant]);
 
   const stats = resultStats(response);
-  const graphSeries = response?.data.resultType === "matrix" ? matrixToSeries(response.data.result) : [];
-  const hasGraphSeries = graphSeries.some((series) => series.points.length >= 2);
-  const rows = tableRows(response);
+  const allGraphSeries = useMemo(() => {
+    if (!response) return [];
+    if (response.data.resultType === "matrix") return matrixToSeries(response.data.result);
+    if (response.data.resultType === "vector") return vectorToSeries(response.data.result);
+    return [];
+  }, [response]);
+  const graphSeries = useMemo(
+    () =>
+      labelFilters.length === 0
+        ? allGraphSeries
+        : allGraphSeries.filter((series) =>
+            labelFilters.every((filter) => series.labels?.[filter.key] === filter.value)
+          ),
+    [allGraphSeries, labelFilters]
+  );
+  const hasGraphSeries = graphSeries.some((series) => series.points.length > 0);
+  const rows = tableRows(response, labelFilters);
   const tableRowLimit = 2000;
   const visibleRows = rows.length > tableRowLimit ? rows.slice(0, tableRowLimit) : rows;
   const activeExpression = query.trim() || selectedMetric.trim();
@@ -1010,26 +1120,51 @@ export default function MetricsPage() {
 
             <div className="overflow-hidden rounded-xl border border-dark-600 bg-dark-800">
               <div className="flex flex-wrap items-center gap-3 border-b border-dark-600 px-4 py-2.5">
-                <div className="prom-tabs m-0 border-0" role="tablist" aria-label="Metric result view">
-                  {(["graph", "table", "json"] as ViewMode[]).map((item) => (
-                    <button
-                      type="button"
-                      key={item}
-                      className={"prom-tab" + (view === item ? " is-active" : "")}
-                      onClick={() => setView(item)}
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
+                <Tabs
+                  className="s-tabs--flush"
+                  items={[
+                    { key: "graph", label: "Graph" },
+                    { key: "table", label: "Table" },
+                    { key: "json", label: "JSON" },
+                  ] as const}
+                  value={view}
+                  onChange={setView}
+                  ariaLabel="Metric result view"
+                />
                 <div className="flex flex-1 flex-wrap items-center justify-end gap-1.5">
                   <span className="pill">series: {stats.series}</span>
                   <span className="pill">samples: {stats.samples}</span>
                   {response?.data.resultType && <span className="pill">type: {response.data.resultType}</span>}
+                  {labelFilters.length > 0 && (
+                    <span className="pill">
+                      filtered: {response?.data.resultType === "matrix" ? `${graphSeries.length}/${allGraphSeries.length}` : `${rows.length}`}
+                    </span>
+                  )}
                   <span className="pill">step: {step}</span>
                   <span className="pill">{formatDateTimeFull(chartFrom)} → {formatDateTimeFull(chartTo)}</span>
                 </div>
               </div>
+
+              {labelFilters.length > 0 && (
+                <div className="metric-active-filters metric-active-filters--panel" aria-label="Active label filters">
+                  <span className="metric-active-filters__label">Filtered by</span>
+                  {labelFilters.map((filter) => (
+                    <button
+                      key={`${filter.key}=${filter.value}`}
+                      type="button"
+                      className="metric-filter-chip"
+                      title={`Remove filter ${filter.key}="${filter.value}"`}
+                      onClick={() => toggleLabelFilter(filter.key, filter.value)}
+                    >
+                      <span className="metric-filter-chip__key">{filter.key}</span>=<span>{filter.value}</span>
+                      <X size={10} />
+                    </button>
+                  ))}
+                  <button type="button" className="metric-active-filters__clear" onClick={clearLabelFilters}>
+                    Clear all
+                  </button>
+                </div>
+              )}
 
               <div className="min-h-[340px] p-4">
                 {statusKind === "loading" ? (
@@ -1055,20 +1190,40 @@ export default function MetricsPage() {
                       to={chartTo}
                       step={step}
                       description={activeDescription}
+                      displayMode={chartMode}
+                      onDisplayModeChange={setChartMode}
+                      labelFilters={labelFilters}
+                      onToggleLabel={toggleLabelFilter}
+                      totalSeries={allGraphSeries.length}
+                      labelSeries={allGraphSeries}
                     />
+                  ) : labelFilters.length > 0 && allGraphSeries.length > 0 ? (
+                    <div className="flex h-[300px] flex-col items-center justify-center gap-2 text-center">
+                      <p className="text-sm font-medium text-gray-300">No series match the selected labels</p>
+                      <p className="max-w-md text-xs leading-relaxed text-gray-500">
+                        {allGraphSeries.length} series were returned, but none carry every selected label value.
+                      </p>
+                      <button
+                        type="button"
+                        className="rounded-md border border-dark-600 px-3 py-1.5 text-xs font-semibold text-gray-300 hover:bg-dark-700"
+                        onClick={clearLabelFilters}
+                      >
+                        Clear label filters
+                      </button>
+                    </div>
                   ) : (
                     <div className="flex h-[300px] flex-col items-center justify-center gap-2 text-center">
                       <p className="text-sm font-medium text-gray-300">No graphable series</p>
                       <p className="max-w-md text-xs leading-relaxed text-gray-500">
-                        The query returned {stats.series} series. Use the table view for instant queries, or widen the
+                        The query returned {stats.series} series without numeric samples. Try another query or widen the
                         time range and run it again.
                       </p>
                     </div>
                   )
                 ) : view === "table" ? (
                   <DataTable
-                    title={`Samples${rows.length > tableRowLimit ? ` (first ${tableRowLimit} of ${rows.length})` : ""}`}
-                    columns={tableColumns(response)}
+                    title={`Samples${rows.length > tableRowLimit ? ` (first ${tableRowLimit} of ${rows.length})` : ""}${labelFilters.length > 0 ? " · filtered by labels" : ""}`}
+                    columns={tableColumns(response, labelFilters, toggleLabelFilter)}
                     rows={visibleRows}
                   />
                 ) : (
@@ -1095,7 +1250,10 @@ export default function MetricsPage() {
               queries={activeExpression ? [activeExpression] : []}
               from={chartFrom}
               to={chartTo}
+              displayMode={chartMode}
               maxSeries={30}
+              labelFilters={labelFilters}
+              onToggleLabel={toggleLabelFilter}
               onClose={() => setChartExpanded(false)}
             />
           </section>

@@ -351,7 +351,8 @@ func estimateMetricRecordSize(r segment.MetricPointRecord) int {
 	// Go struct, map bucket, string header, and json.Unmarshal allocations.
 	// Empirically the in-memory footprint is ~10x the raw string content.
 	size := len(r.Tenant) + len(r.Service) + len(r.MetricName) + len(r.Unit) +
-		len(r.Type) + len(r.Temporality) + len(r.TraceID) + len(r.SpanID) + 80
+		len(r.Description) + len(r.Type) + len(r.MetricType) + len(r.Temporality) +
+		len(r.TraceID) + len(r.SpanID) + 80
 	for k, v := range r.ResourceAttributes {
 		size += len(k) + len(v)
 	}

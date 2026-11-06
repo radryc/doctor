@@ -9,6 +9,7 @@ import FederationCatalogPage from "./pages/FederationCatalogPage";
 import TracesPage from "./pages/TracesPage";
 import LogsPage from "./pages/LogsPage";
 import MetricsPage from "./pages/MetricsPage";
+import SqlPage from "./pages/SqlPage";
 import FleetDashboard from "./pages/FleetDashboard";
 import RecordingRulesPage from "./pages/RecordingRulesPage";
 import AlertsPage from "./pages/AlertsPage";
@@ -34,6 +35,7 @@ export default function App() {
             <Route path="/traces" element={<TracesPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
+            <Route path="/sql" element={<SqlPage />} />
             <Route path="/fleet" element={<FleetDashboard />} />
             <Route path="/partition/:name" element={<PartitionViewPage />} />
             <Route path="/partition/:name/assets" element={<PartitionAssetsPage />} />

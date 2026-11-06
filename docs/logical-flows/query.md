@@ -333,7 +333,13 @@ separately filter the log-derived lists beyond the already-filtered records.
 ### Metrics
 
 `/v1/metrics/range` streams raw points for one metric name, caps at 200k points, returns
-`{metric, points}`. It is a legacy UI convenience, not a PromQL endpoint.
+`{metric, points}`. Points include the stored `metric_type`, `temporality`, `start_time`, `unit`,
+and `description`. It is a legacy UI convenience, not a PromQL endpoint.
+
+`/api/v1/metadata` serves real Prometheus types to Grafana from the chunk series index:
+`counter`, `gauge` (including `up_down_counter`), `histogram` (including
+`exponential_histogram`), `summary`, or `untyped`. Histogram and summary suffix series are collapsed
+onto the base family name, and stored help/unit are returned.
 
 ### Services
 
@@ -443,7 +449,7 @@ Access enforcement maps to 403; planner scope errors map to 422 in Prometheus/qu
   backends, reporting a warning when the subset is unsupported.
 - The proxy's Prometheus series/labels/label-values paths strip Doctor-only target labels before
   forwarding to AWS.
-- `handlePrometheusMetadata` reports every metric as `untyped` with empty help/unit.
+- `handlePrometheusMetadata` reports stored metric types; AWS-only metrics remain `untyped`.
 - `handlePrometheusRules` always returns no groups, even when doctor-rules has rules.
 - `/ready` checks the log engine and enforced policy state, but not federation freshness or Guardian.
 - The legacy direct and proxy paths can both query AWS unless `SetAWSViaRouter(true)` is used; the

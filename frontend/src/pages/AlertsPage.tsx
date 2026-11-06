@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   Bell,
@@ -12,6 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { api } from "../api/client";
+import Tabs from "../components/ui/Tabs";
 import { useConfig } from "../context/ConfigContext";
 import type {
   Alert,
@@ -100,6 +101,8 @@ export default function AlertsPage() {
     searchParams.get("tenant") || config.default_tenant || "default"
   );
   const [partition, setPartition] = useState(linkedPartition);
+  const [partitions, setPartitions] = useState<string[]>([]);
+  const lastLinkedPartition = useRef(linkedPartition);
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [subspaceAlerts, setSubspaceAlerts] = useState<Alert[]>([]);
@@ -143,11 +146,61 @@ export default function AlertsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config.default_partition]);
 
+  // Only follow partition changes that came from outside this component (for
+  // example a link into ?partition=...). Reacting to every `partition` change
+  // here races the URL-sync effect and makes the picker bounce back to the
+  // previous value for a frame.
   useEffect(() => {
-    if (linkedPartition && linkedPartition !== partition) {
+    if (linkedPartition === lastLinkedPartition.current) return;
+    lastLinkedPartition.current = linkedPartition;
+    if (linkedPartition) {
       setPartition(linkedPartition);
     }
-  }, [linkedPartition, partition]);
+  }, [linkedPartition]);
+
+  // Keep the partition picker in step with the other explorer pages: Guardian
+  // owns the catalog, and telemetry may know about a few extra partitions.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .guardianOverview()
+      .then((overview) => {
+        if (cancelled) return;
+        const names = overview.partitions?.map((p) => p.name).filter(Boolean) ?? [];
+        setPartitions(names);
+      })
+      .catch(() => {});
+    api
+      .getLogServices(config.default_tenant)
+      .then((data) => {
+        if (cancelled) return;
+        setPartitions((prev) => [...new Set([...prev, ...(data.partitions ?? [])])].sort());
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [config.default_tenant]);
+
+  const partitionOptions = useMemo(
+    () =>
+      [...new Set([...partitions, partition, config.default_partition].filter(Boolean))].sort(),
+    [partitions, partition, config.default_partition]
+  );
+
+  // Reflect the selected partition in the URL so the view is shareable and
+  // behaves like Logs, Metrics, and Traces.
+  useEffect(() => {
+    const next = new URLSearchParams(location.search);
+    if (partition) next.set("partition", partition);
+    else next.delete("partition");
+    const search = next.toString();
+    if (search === location.search.replace(/^\?/, "")) return;
+    navigate(
+      { pathname: location.pathname, search: search ? `?${search}` : "" },
+      { replace: true }
+    );
+  }, [partition, location.pathname, location.search, navigate]);
 
   const params = useMemo(() => {
     const p = new URLSearchParams();
@@ -471,18 +524,29 @@ groups:
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <input
-                value={tenant}
-                onChange={(event) => setTenant(event.target.value)}
-                className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
-                placeholder="tenant"
-              />
-              <input
-                value={partition}
-                onChange={(event) => setPartition(event.target.value)}
-                className="w-40 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
-                placeholder="partition"
-              />
+              <label className="filter-label">
+                Tenant
+                <input
+                  value={tenant}
+                  onChange={(event) => setTenant(event.target.value)}
+                  className="xp-search w-28"
+                  placeholder="tenant"
+                />
+              </label>
+              <label className="filter-label">
+                Partition
+                <select
+                  className="xp-select"
+                  value={partition}
+                  onChange={(event) => setPartition(event.target.value)}
+                >
+                  {partitionOptions.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button
                 type="button"
                 onClick={() => void loadTab()}
@@ -492,26 +556,13 @@ groups:
               </button>
             </div>
           </div>
-          <nav
-            className="mt-4 flex flex-wrap items-center gap-0.5 border-b border-[var(--strata-border)]"
-            aria-label="Alert sections"
-          >
-            {TABS.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => switchTab(item.key)}
-                aria-current={tab === item.key ? "page" : undefined}
-                className={`-mb-px border-b-2 px-3 py-2 text-xs font-semibold transition-colors ${
-                  tab === item.key
-                    ? "border-[var(--strata-accent)] text-[var(--strata-accent-text)]"
-                    : "border-transparent text-[var(--strata-text-secondary)] hover:border-[var(--strata-border-strong)] hover:text-[var(--strata-text)]"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </nav>
+          <Tabs
+            className="mt-4"
+            items={TABS}
+            value={tab}
+            onChange={switchTab}
+            ariaLabel="Alert sections"
+          />
         </header>
 
         {(error || notice) && (
@@ -708,8 +759,8 @@ groups:
           )}
 
           {tab === "rules" && partition && (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-              <section className="rounded-lg border border-slate-800 bg-slate-900/50">
+            <div className="grid min-h-full grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+              <section className="flex flex-col rounded-lg border border-slate-800 bg-slate-900/50">
                 <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
                   <div>
                     <h2 className="text-sm font-semibold">Sentinel rules</h2>
@@ -717,7 +768,7 @@ groups:
                   </div>
                   {can(caps, "alerts.rules.write") && <button type="button" onClick={newRule} className="btn text-xs">New</button>}
                 </div>
-                <div className="divide-y divide-slate-800">
+                <div className="min-h-0 flex-1 divide-y divide-slate-800 overflow-auto">
                   {ruleGroups.map((group) => (
                     <button key={`${group.tenant}/${group.partition}/${group.group}`} type="button" onClick={() => void openRule(group)} className={`block w-full px-4 py-3 text-left hover:bg-slate-800/60 ${ruleSelected?.group === group.group ? "bg-slate-800/70" : ""}`}>
                       <div className="flex items-center justify-between gap-2">
@@ -730,9 +781,9 @@ groups:
                   {ruleGroups.length === 0 && <div className="px-4 py-10 text-center text-xs text-slate-500">No Sentinel rules in this partition.</div>}
                 </div>
               </section>
-              <section className="rounded-lg border border-slate-800 bg-slate-900/50">
+              <section className="flex flex-col rounded-lg border border-slate-800 bg-slate-900/50">
                 {ruleSelected ? (
-                  <div className="flex h-full flex-col">
+                  <div className="flex min-h-[480px] flex-1 flex-col">
                     <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
                       <input value={ruleSelected.group} onChange={(e) => setRuleSelected({ ...ruleSelected, group: e.target.value })} className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs" />
                       <span className="text-[10px] text-slate-500">{ruleSelected.tenant} · {ruleSelected.partition}</span>
@@ -742,11 +793,11 @@ groups:
                         <button type="button" onClick={() => void deleteRule()} disabled={!can(caps, "alerts.rules.write")} className="btn text-xs text-rose-300">Delete</button>
                       </div>
                     </div>
-                    <textarea value={ruleYaml} onChange={(e) => setRuleYaml(e.target.value)} className="min-h-[260px] flex-1 resize-none bg-slate-950 p-4 font-mono text-[11px] text-slate-300" spellCheck={false} />
+                    <textarea value={ruleYaml} onChange={(e) => setRuleYaml(e.target.value)} className="min-h-[360px] flex-1 resize-y bg-slate-950 p-4 font-mono text-[11px] text-slate-300" spellCheck={false} />
                     {ruleResult && <pre className="max-h-48 overflow-auto border-t border-slate-800 bg-slate-950 p-3 text-[10px] text-slate-300">{ruleResult}</pre>}
                   </div>
                 ) : (
-                  <div className="flex h-full min-h-[240px] items-center justify-center p-6 text-xs text-slate-500">Select a rule group or create a new one.</div>
+                  <div className="flex min-h-[480px] flex-1 items-center justify-center p-6 text-xs text-slate-500">Select a rule group or create a new one.</div>
                 )}
               </section>
             </div>

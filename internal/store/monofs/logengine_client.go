@@ -23,6 +23,29 @@ type LogEngineClient struct {
 	router pb.MonoFSRouterClient
 }
 
+// DuckDBSQLResult is the row result returned by one MonoFS node.
+type DuckDBSQLResult struct {
+	Dataset    string   `json:"dataset"`
+	Columns    []string `json:"columns"`
+	Rows       [][]any  `json:"rows"`
+	RowCount   int      `json:"row_count"`
+	Truncated  bool     `json:"truncated"`
+	DurationMs int64    `json:"duration_ms"`
+}
+
+// DuckDBSQLNodeResult is the per-node envelope returned by the router.
+type DuckDBSQLNodeResult struct {
+	NodeID  string           `json:"node_id"`
+	Address string           `json:"address"`
+	Result  *DuckDBSQLResult `json:"result,omitempty"`
+	Error   string           `json:"error,omitempty"`
+}
+
+// DuckDBSQLResponse contains results from every healthy MonoFS node.
+type DuckDBSQLResponse struct {
+	Nodes []DuckDBSQLNodeResult `json:"nodes"`
+}
+
 // NewLogEngineClient dials the monofs router and returns a client.
 func NewLogEngineClient(ctx context.Context, routerAddr string) (*LogEngineClient, error) {
 	if routerAddr == "" {
@@ -55,6 +78,22 @@ func (c *LogEngineClient) Close() error {
 	return c.conn.Close()
 }
 
+// TelemetryEngine returns the storage engine selected by the MonoFS router
+// (logengine or clickhouse). The router publishes it in the GetClusterInfo node
+// metadata so Doctor can describe the local backend accurately.
+func (c *LogEngineClient) TelemetryEngine(ctx context.Context) (string, error) {
+	resp, err := c.router.GetClusterInfo(ctx, &pb.ClusterInfoRequest{})
+	if err != nil {
+		return "", err
+	}
+	for _, node := range resp.GetNodes() {
+		if engine := strings.TrimSpace(node.GetMetadata()["span_engine"]); engine != "" {
+			return engine, nil
+		}
+	}
+	return "", nil
+}
+
 // IngestLogs sends log records to the monofs logengine.
 func (c *LogEngineClient) IngestLogs(ctx context.Context, chunkID string, records []segment.LogRecord) error {
 	entries := make([]*pb.LogEntry, 0, len(records))
@@ -85,17 +124,25 @@ func (c *LogEngineClient) IngestLogs(ctx context.Context, chunkID string, record
 func (c *LogEngineClient) IngestMetrics(ctx context.Context, chunkID string, records []segment.MetricPointRecord) error {
 	entries := make([]*pb.MetricEntry, 0, len(records))
 	for _, r := range records {
-		entries = append(entries, &pb.MetricEntry{
+		entry := &pb.MetricEntry{
 			TimestampUnixNano: r.Timestamp.UnixNano(),
 			Service:           r.Service,
 			MetricName:        r.MetricName,
 			Value:             r.Value,
+			MetricType:        r.MetricType,
+			Temporality:       r.Temporality,
+			Unit:              r.Unit,
+			Description:       r.Description,
 			Labels: filterUnboundedMetricLabels(mergeLabels(
 				r.ResourceAttributes,
 				identityLabels(r.Partition, r.Intent, r.Asset),
 				r.Attributes,
 			)),
-		})
+		}
+		if !r.StartTime.IsZero() {
+			entry.StartTimeUnixNano = r.StartTime.UnixNano()
+		}
+		entries = append(entries, entry)
 	}
 	_, err := c.router.IngestMetrics(ctx, &pb.IngestMetricsRequest{
 		ChunkId: chunkID,
@@ -167,6 +214,33 @@ func (c *LogEngineClient) QueryLogsRaw(ctx context.Context, tenant, query string
 		return nil, fmt.Errorf("unmarshal log results: %w", err)
 	}
 	return records, nil
+}
+
+// QueryDuckDBSQL runs a read-only SQL statement on every healthy MonoFS node.
+// visiblePartitions is the caller's already-authorized partition set; the
+// router intersects it with its own policy scope before forwarding.
+func (c *LogEngineClient) QueryDuckDBSQL(ctx context.Context, tenant, dataset, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) (DuckDBSQLResponse, error) {
+	_ = tenant
+	req := &pb.QueryDuckDBSQLRequest{
+		Dataset:      dataset,
+		Query:        query,
+		FromUnixNano: timeToNano(from),
+		ToUnixNano:   timeToNano(to),
+		Limit:        int32(limit),
+	}
+	if restricted {
+		req.VisiblePartitions = append([]string(nil), visiblePartitions...)
+		req.VisiblePartitionsSet = true
+	}
+	resp, err := c.router.QueryDuckDBSQL(ctx, req)
+	if err != nil {
+		return DuckDBSQLResponse{}, err
+	}
+	var out DuckDBSQLResponse
+	if err := json.Unmarshal([]byte(resp.GetResultsJson()), &out); err != nil {
+		return out, fmt.Errorf("unmarshal duckdb sql results: %w", err)
+	}
+	return out, nil
 }
 
 // QueryMetrics returns metric data points for the given query and time range.
@@ -265,15 +339,18 @@ func metricSeriesMetaFromProto(tenant string, item *pb.MetricSeriesItem) segment
 	}
 	partition, intent, asset := labelsFromIdentity(labels)
 	return segment.MetricSeriesMeta{
-		Tenant:     tenant,
-		Service:    item.GetService(),
-		Partition:  partition,
-		Intent:     intent,
-		Asset:      asset,
-		MetricName: item.GetMetricName(),
-		Labels:     labels,
-		MinTime:    time.Unix(0, item.GetMinTimeUnixNano()).UTC(),
-		MaxTime:    time.Unix(0, item.GetMaxTimeUnixNano()).UTC(),
+		Tenant:      tenant,
+		Service:     item.GetService(),
+		Partition:   partition,
+		Intent:      intent,
+		Asset:       asset,
+		MetricName:  item.GetMetricName(),
+		MetricType:  item.GetMetricType(),
+		Unit:        item.GetUnit(),
+		Description: item.GetDescription(),
+		Labels:      labels,
+		MinTime:     time.Unix(0, item.GetMinTimeUnixNano()).UTC(),
+		MaxTime:     time.Unix(0, item.GetMaxTimeUnixNano()).UTC(),
 	}
 }
 
@@ -284,18 +361,23 @@ func metricPointFromStreamRecord(tenant string, record metricStreamRecord) segme
 	}
 	partition, intent, asset := labelsFromIdentity(labels)
 	return segment.MetricPointRecord{
-		Tenant:     tenant,
-		Service:    record.Service,
-		Partition:  partition,
-		Intent:     intent,
-		Asset:      asset,
-		MetricName: record.MetricName,
-		Timestamp:  record.Timestamp.UTC(),
-		TraceID:    labels["trace_id"],
-		SpanID:     labels["span_id"],
-		Attributes: labels,
-		HasValue:   true,
-		Value:      record.Value,
+		Tenant:      tenant,
+		Service:     record.Service,
+		Partition:   partition,
+		Intent:      intent,
+		Asset:       asset,
+		MetricName:  record.MetricName,
+		MetricType:  record.MetricType,
+		Description: record.Description,
+		Unit:        record.Unit,
+		Timestamp:   record.Timestamp.UTC(),
+		StartTime:   record.StartTime.UTC(),
+		Temporality: record.Temporality,
+		TraceID:     labels["trace_id"],
+		SpanID:      labels["span_id"],
+		Attributes:  labels,
+		HasValue:    true,
+		Value:       record.Value,
 	}
 }
 
@@ -392,11 +474,16 @@ func (c *LogEngineClient) QueryTraces(ctx context.Context, tenant, traceID, serv
 }
 
 type metricStreamRecord struct {
-	Timestamp  time.Time         `json:"Timestamp"`
-	Service    string            `json:"Service"`
-	MetricName string            `json:"MetricName"`
-	Value      float64           `json:"Value"`
-	Labels     map[string]string `json:"Labels"`
+	Timestamp   time.Time         `json:"Timestamp"`
+	StartTime   time.Time         `json:"StartTime"`
+	Service     string            `json:"Service"`
+	MetricName  string            `json:"MetricName"`
+	Value       float64           `json:"Value"`
+	MetricType  string            `json:"MetricType"`
+	Temporality string            `json:"Temporality"`
+	Unit        string            `json:"Unit"`
+	Description string            `json:"Description"`
+	Labels      map[string]string `json:"Labels"`
 }
 
 func unmarshalQueryItems[T any](stream grpc.ServerStreamingClient[pb.QueryResultItem]) ([]T, error) {

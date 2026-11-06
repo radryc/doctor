@@ -37,6 +37,7 @@ type LogEngineBackend interface {
 	// series index without reading sample data.
 	StreamMetricSeries(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricSeriesMeta) error) error
 	QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error)
+	QueryDuckDBSQL(ctx context.Context, tenant, dataset, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) (monofsstore.DuckDBSQLResponse, error)
 }
 
 type Service struct {
@@ -62,6 +63,70 @@ type Service struct {
 	traceTagValuesCache    map[string]traceTagValuesCacheEntry
 	traceTagsCache         map[string]traceTagsCacheEntry
 	traceScopesCache       map[string]traceScopesCacheEntry
+
+	discoveryCacheOnce sync.Once
+	discoveryCache     *discoveryCache
+
+	metricsCacheOnce sync.Once
+	metricsCache     *resultCache
+}
+
+// getDiscoveryCache lazily initializes the catalog cache so tests that build a
+// Service literal keep working without extra setup.
+func (s *Service) getDiscoveryCache() *discoveryCache {
+	s.discoveryCacheOnce.Do(func() {
+		s.discoveryCache = newDiscoveryCache(time.Minute)
+	})
+	return s.discoveryCache
+}
+
+// getMetricsCache returns the short-TTL PromQL result cache. Metrics are not
+// partition-filtered by the access policy, so caching the local engine's raw
+// result is safe; callers receive a shallow copy before request-level identity
+// filters are applied.
+func (s *Service) getMetricsCache() *resultCache {
+	s.metricsCacheOnce.Do(func() {
+		ttl := queryCacheTTLFromEnv()
+		if ttl > 0 {
+			// Bound memory: PromQL results can be wide, so keep a smaller
+			// number of distinct result sets than the log catalog cache.
+			s.metricsCache = newResultCacheWithLimit(ttl, 64)
+		}
+	})
+	return s.metricsCache
+}
+
+// discoveryScopeKey identifies the caller's effective log/trace visibility. It
+// lets the catalog cache serve users with the same partition access without
+// ever sharing a filtered response across different scopes.
+func (s *Service) discoveryScopeKey(ctx context.Context, signals ...policy.Signal) string {
+	if s.policyGate == nil || !s.policyGate.Enforced() {
+		return "all"
+	}
+	id := identityFromContext(ctx)
+	parts := make([]string, 0)
+	for _, signal := range signals {
+		visible, restricted := s.policyGate.VisiblePartitions(id, signal)
+		if !restricted {
+			return "all"
+		}
+		parts = append(parts, visible...)
+	}
+	sort.Strings(parts)
+	if len(parts) == 0 {
+		return "none"
+	}
+	out := parts[:0]
+	for _, partition := range parts {
+		if len(out) == 0 || out[len(out)-1] != partition {
+			out = append(out, partition)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+func discoveryBucket(now time.Time) string {
+	return now.UTC().Truncate(time.Minute).Format(time.RFC3339)
 }
 
 // SetPolicyGate installs the repo-managed access policy. Logs and traces are
@@ -629,9 +694,15 @@ func valueOrDefault(value, fallback string) string {
 
 // NewServiceLogEngine creates a query service backed by the monofs logengine.
 func NewServiceLogEngine(c *monofsstore.LogEngineClient, defaultTenant string) *Service {
+	var backend LogEngineBackend = c
+	if c != nil {
+		if ttl := queryCacheTTLFromEnv(); ttl > 0 {
+			backend = newCachingBackend(backend, ttl)
+		}
+	}
 	return &Service{
 		defaultTenant: defaultTenant,
-		logEngine:     c,
+		logEngine:     backend,
 		guardianClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -680,6 +751,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/traces/", s.handleTraceByID)
 	mux.HandleFunc("/v1/logs/services", s.handleLogServices)
 	mux.HandleFunc("/v1/logs/search", s.handleLogSearch)
+	mux.HandleFunc("/v1/sql/query", s.handleDuckDBSQL)
 	mux.HandleFunc("/v1/federation/status", s.handleFederationStatus)
 	mux.HandleFunc("/v1/federation/targets", s.handleFederationTargets)
 	mux.HandleFunc("/v1/federation/plan", s.handleFederationPlan)
@@ -1727,11 +1799,51 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
 	partition := partitionFromRequest(r)
+	include := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include")))
+	scope := s.discoveryScopeKey(r.Context(), policy.SignalLogs)
+	if strings.Contains(include, "aws") && s.aws != nil {
+		// AWS visibility can depend on account/region bindings that are not
+		// captured by partition names alone; keep those responses per-principal.
+		scope += "|id:" + identityFromContext(r.Context()).PrincipalID()
+	}
+	cacheKey := strings.Join([]string{
+		"log-services",
+		tenant,
+		partition,
+		include,
+		scope,
+		discoveryBucket(time.Now()),
+	}, "\x00")
+
+	body, cacheStatus, err := s.getDiscoveryCache().getOrLoad(r.Context(), cacheKey, 3*time.Second, func(ctx context.Context) ([]byte, error) {
+		return s.buildLogServices(ctx, tenant, partition, include)
+	})
+	if err != nil {
+		w.Header().Set("X-Doctor-Cache", "error")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tenant":     tenant,
+			"services":   []string{},
+			"partitions": []string{},
+			"identities": []logIdentityInfo{},
+			"log_groups": []string{},
+		})
+		return
+	}
+	w.Header().Set("X-Doctor-Cache", cacheStatus)
+	w.Header().Set("Cache-Control", "private, max-age=30")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(body)
+}
+
+func (s *Service) buildLogServices(ctx context.Context, tenant, partition, include string) ([]byte, error) {
 	from := time.Now().UTC().Add(-1 * time.Hour)
 	to := time.Now().UTC()
 
-	results, err := s.logEngine.QueryLogs(r.Context(), tenant, "", "", from, to, 2000)
+	results, err := s.logEngine.QueryLogs(ctx, tenant, "", "", from, to, 2000)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		results = nil
 	}
 
@@ -1778,9 +1890,12 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	// Trace services may have no log records in the scan window. Include them
 	// when the caller asks for a trace-oriented catalog so the traces page can
 	// offer the same partition-scoped service filter as the logs page.
-	include := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include")))
 	if strings.Contains(include, "traces") {
-		if spans, spanErr := s.logEngine.QueryTraces(r.Context(), tenant, "", "", from, to, traceDiscoverySpanLimit); spanErr == nil {
+		spans, spanErr := s.logEngine.QueryTraces(ctx, tenant, "", "", from, to, traceDiscoverySpanLimit)
+		if spanErr != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if spanErr == nil {
 			for _, span := range spans {
 				part, intent, asset := traceIdentityLabels(span)
 				if part != "" && !seenParts[part] {
@@ -1801,8 +1916,8 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 
 	// Federated X-Ray services have no local log records, but should still be
 	// selectable alongside native services and carry their AWS partition.
-	for _, svc := range s.awsServiceInfos(r.Context()) {
-		part, allowed := s.policyPartitionAllowed(r.Context(), svc.Account, svc.Region,
+	for _, svc := range s.awsServiceInfos(ctx) {
+		part, allowed := s.policyPartitionAllowed(ctx, svc.Account, svc.Region,
 			awsPartition(svc.Region, svc.Account), policy.SignalLogs)
 		if !allowed {
 			continue
@@ -1821,8 +1936,8 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 		addIdentity(part, "", "", svc.Name)
 	}
 	logGroups := make([]string, 0)
-	if strings.Contains(include, "aws") && s.awsDiscoveryReady(r.Context()) {
-		awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	if strings.Contains(include, "aws") && s.awsDiscoveryReady(ctx) {
+		awsCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		for _, group := range proxy.AWSLogGroups(awsCtx, s.aws) {
 			groupPartition := proxy.LogGroupPartition(group)
@@ -1832,7 +1947,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 			if partition != "" && groupPartition != partition {
 				continue
 			}
-			if _, allowed := s.policyPartitionAllowed(r.Context(), "", "", groupPartition, policy.SignalLogs); !allowed {
+			if _, allowed := s.policyPartitionAllowed(ctx, "", "", groupPartition, policy.SignalLogs); !allowed {
 				continue
 			}
 			logGroups = append(logGroups, group)
@@ -1855,7 +1970,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 		return left.Service < right.Service
 	})
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	return json.Marshal(map[string]any{
 		"tenant":     tenant,
 		"services":   components,
 		"partitions": partitions,
@@ -1993,6 +2108,54 @@ func mergeServiceIdentity(info *svcInfo, primary, secondary map[string]string, p
 }
 
 func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request) {
+	tenant := s.tenantFromRequest(r)
+	window := parseWindow(r.URL.Query().Get("window"))
+	if window == 0 {
+		window = 24 * time.Hour
+	}
+	includeAssets := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_assets")), "true")
+	scope := s.discoveryScopeKey(r.Context(), policy.SignalLogs, policy.SignalTraces)
+	if s.aws != nil {
+		// Federated AWS service visibility can depend on account/region
+		// bindings beyond the partition set, so keep it per-principal.
+		scope += "|id:" + identityFromContext(r.Context()).PrincipalID()
+	}
+	cacheKey := strings.Join([]string{
+		"service-discovery",
+		tenant,
+		window.String(),
+		fmt.Sprintf("%t", includeAssets),
+		scope,
+		discoveryBucket(time.Now()),
+	}, "\x00")
+
+	body, cacheStatus, err := s.getDiscoveryCache().getOrLoad(r.Context(), cacheKey, 5*time.Second, func(ctx context.Context) ([]byte, error) {
+		recorder := &bufferedResponse{}
+		s.serveServiceDiscovery(recorder, r.Clone(ctx))
+		if recorder.status != 0 && recorder.status != http.StatusOK {
+			return nil, fmt.Errorf("service discovery returned status %d", recorder.status)
+		}
+		return recorder.body.Bytes(), nil
+	})
+	if err != nil {
+		w.Header().Set("X-Doctor-Cache", "error")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tenant":         tenant,
+			"window":         window.String(),
+			"services":       []any{},
+			"total_services": 0,
+			"include_assets": includeAssets,
+			"discovered_at":  time.Now().UTC(),
+		})
+		return
+	}
+	w.Header().Set("X-Doctor-Cache", cacheStatus)
+	w.Header().Set("Cache-Control", "private, max-age=30")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(body)
+}
+
+func (s *Service) serveServiceDiscovery(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
 	window := parseWindow(r.URL.Query().Get("window"))
 	if window == 0 {

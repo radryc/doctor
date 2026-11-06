@@ -3,6 +3,7 @@ package otlp
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -108,25 +109,33 @@ func FlattenMetrics(req *colmetricspb.ExportMetricsServiceRequest, tenant string
 				base := metricBase(metric, tenant, service, partition, intent, asset, resourceAttrs, engine)
 				switch typed := metric.Data.(type) {
 				case *metricspb.Metric_Gauge:
+					base.metricType = MetricTypeGauge
 					for _, point := range typed.Gauge.GetDataPoints() {
 						out = append(out, normalizeMetricRecord(numberPointRecord(base, "gauge", point.GetTimeUnixNano(), point.GetStartTimeUnixNano(), "", point.GetAttributes(), point)))
 					}
 				case *metricspb.Metric_Sum:
-					temporality := typed.Sum.GetAggregationTemporality().String()
+					base.metricType = MetricTypeCounter
+					if !typed.Sum.GetIsMonotonic() {
+						base.metricType = MetricTypeUpDownCounter
+					}
+					temporality := temporalityString(typed.Sum.GetAggregationTemporality())
 					for _, point := range typed.Sum.GetDataPoints() {
 						out = append(out, normalizeMetricRecord(numberPointRecord(base, "sum", point.GetTimeUnixNano(), point.GetStartTimeUnixNano(), temporality, point.GetAttributes(), point)))
 					}
 				case *metricspb.Metric_Histogram:
-					temporality := typed.Histogram.GetAggregationTemporality().String()
+					base.metricType = MetricTypeHistogram
+					temporality := temporalityString(typed.Histogram.GetAggregationTemporality())
 					for _, point := range typed.Histogram.GetDataPoints() {
 						out = append(out, normalizeMetricRecords(histogramPointRecords(base, temporality, point))...)
 					}
 				case *metricspb.Metric_ExponentialHistogram:
-					temporality := typed.ExponentialHistogram.GetAggregationTemporality().String()
+					base.metricType = MetricTypeExponentialHistogram
+					temporality := temporalityString(typed.ExponentialHistogram.GetAggregationTemporality())
 					for _, point := range typed.ExponentialHistogram.GetDataPoints() {
 						out = append(out, normalizeMetricRecords(exponentialHistogramPointRecords(base, temporality, point))...)
 					}
 				case *metricspb.Metric_Summary:
+					base.metricType = MetricTypeSummary
 					for _, point := range typed.Summary.GetDataPoints() {
 						out = append(out, normalizeMetricRecords(summaryPointRecords(base, point))...)
 					}
@@ -137,6 +146,17 @@ func FlattenMetrics(req *colmetricspb.ExportMetricsServiceRequest, tenant string
 	return out
 }
 
+// OTLP aggregation kinds. The exporter does not carry the OTel API instrument
+// class, so observable and synchronous variants share the same stored type.
+const (
+	MetricTypeGauge                = "gauge"
+	MetricTypeCounter              = "counter"
+	MetricTypeUpDownCounter        = "up_down_counter"
+	MetricTypeHistogram            = "histogram"
+	MetricTypeExponentialHistogram = "exponential_histogram"
+	MetricTypeSummary              = "summary"
+)
+
 type metricBaseRecord struct {
 	tenant             string
 	service            string
@@ -146,6 +166,7 @@ type metricBaseRecord struct {
 	name               string
 	description        string
 	unit               string
+	metricType         string
 	resourceAttributes map[string]string
 	engine             *privacy.Engine
 }
@@ -518,6 +539,7 @@ func numberPointRecord(base metricBaseRecord, metricType string, ts, start uint6
 		Description:        base.description,
 		Unit:               base.unit,
 		Type:               metricType,
+		MetricType:         base.metricType,
 		Timestamp:          unixNano(ts),
 		StartTime:          unixNano(start),
 		Temporality:        temporality,
@@ -542,6 +564,7 @@ func rawPointRecord(base metricBaseRecord, metricType string, ts, start uint64, 
 		Description:        base.description,
 		Unit:               base.unit,
 		Type:               metricType,
+		MetricType:         base.metricType,
 		Timestamp:          unixNano(ts),
 		StartTime:          unixNano(start),
 		Temporality:        temporality,
@@ -582,13 +605,116 @@ func histogramPointRecords(base metricBaseRecord, temporality string, point *met
 	return records
 }
 
+// maxExpandedHistogramBuckets bounds the explicit buckets produced from one
+// exponential histogram point. Without a cap, a fine scale can turn one point
+// into hundreds of series.
+const maxExpandedHistogramBuckets = 160
+
+type histogramBucket struct {
+	upperBound float64
+	count      uint64
+}
+
 func exponentialHistogramPointRecords(base metricBaseRecord, temporality string, point *metricspb.ExponentialHistogramDataPoint) []segment.MetricPointRecord {
 	attrs := attributesMap(point.GetAttributes(), base.engine)
 	traceID, spanID := exemplarTraceSpan(point.GetExemplars())
-	return []segment.MetricPointRecord{
+	buckets := exponentialHistogramBuckets(point)
+	records := make([]segment.MetricPointRecord, 0, len(buckets)+3)
+
+	if len(buckets) == 0 && point.GetCount() > 0 {
+		attrs = copyAttributes(attrs)
+		attrs["guardian.histogram.buckets.truncated"] = "true"
+	}
+
+	var cumulative uint64
+	for _, bucket := range buckets {
+		cumulative += bucket.count
+		bucketAttrs := copyAttributes(attrs)
+		bucketAttrs["le"] = formatMetricLabelValue(bucket.upperBound)
+		records = append(records, floatPointRecord(
+			base,
+			base.name+"_bucket",
+			"histogram_bucket",
+			point.GetTimeUnixNano(),
+			point.GetStartTimeUnixNano(),
+			temporality,
+			bucketAttrs,
+			traceID,
+			spanID,
+			float64(cumulative),
+		))
+	}
+	if len(buckets) > 0 {
+		bucketAttrs := copyAttributes(attrs)
+		bucketAttrs["le"] = "+Inf"
+		records = append(records, floatPointRecord(
+			base,
+			base.name+"_bucket",
+			"histogram_bucket",
+			point.GetTimeUnixNano(),
+			point.GetStartTimeUnixNano(),
+			temporality,
+			bucketAttrs,
+			traceID,
+			spanID,
+			float64(point.GetCount()),
+		))
+	}
+
+	records = append(records,
 		floatPointRecord(base, base.name+"_count", "exp_histogram_count", point.GetTimeUnixNano(), point.GetStartTimeUnixNano(), temporality, attrs, traceID, spanID, float64(point.GetCount())),
 		floatPointRecord(base, base.name+"_sum", "exp_histogram_sum", point.GetTimeUnixNano(), point.GetStartTimeUnixNano(), temporality, attrs, traceID, spanID, point.GetSum()),
+	)
+	return records
+}
+
+// exponentialHistogramBuckets converts OTLP base-2 exponential buckets into
+// explicit, ascending upper boundaries. Negative buckets mirror the positive
+// scale and are emitted in reverse absolute-index order.
+func exponentialHistogramBuckets(point *metricspb.ExponentialHistogramDataPoint) []histogramBucket {
+	if point == nil {
+		return nil
 	}
+	scale := point.GetScale()
+	if scale > 20 || scale < -20 {
+		return nil
+	}
+	base := math.Pow(2, math.Pow(2, -float64(scale)))
+	if math.IsInf(base, 0) || math.IsNaN(base) || base <= 0 {
+		return nil
+	}
+
+	buckets := make([]histogramBucket, 0, len(point.GetPositive().GetBucketCounts())+len(point.GetNegative().GetBucketCounts())+1)
+	if negative := point.GetNegative(); negative != nil {
+		counts := negative.GetBucketCounts()
+		for i := len(counts) - 1; i >= 0; i-- {
+			abs := int64(negative.GetOffset()) + int64(i)
+			upper := -math.Pow(base, float64(abs))
+			if math.IsInf(upper, 0) || math.IsNaN(upper) {
+				return nil
+			}
+			buckets = append(buckets, histogramBucket{upperBound: upper, count: counts[i]})
+		}
+	}
+	if point.GetZeroCount() > 0 || point.GetZeroThreshold() > 0 {
+		buckets = append(buckets, histogramBucket{upperBound: point.GetZeroThreshold(), count: point.GetZeroCount()})
+	}
+	if positive := point.GetPositive(); positive != nil {
+		counts := positive.GetBucketCounts()
+		for i, count := range counts {
+			abs := int64(positive.GetOffset()) + int64(i)
+			upper := math.Pow(base, float64(abs+1))
+			if math.IsInf(upper, 0) || math.IsNaN(upper) {
+				return nil
+			}
+			buckets = append(buckets, histogramBucket{upperBound: upper, count: count})
+		}
+	}
+
+	if len(buckets) == 0 || len(buckets) > maxExpandedHistogramBuckets {
+		return nil
+	}
+	return buckets
 }
 
 func summaryPointRecords(base metricBaseRecord, point *metricspb.SummaryDataPoint) []segment.MetricPointRecord {
@@ -630,6 +756,7 @@ func floatPointRecord(base metricBaseRecord, metricName, metricType string, ts, 
 		Description:        base.description,
 		Unit:               base.unit,
 		Type:               metricType,
+		MetricType:         base.metricType,
 		Timestamp:          unixNano(ts),
 		StartTime:          unixNano(start),
 		Temporality:        temporality,
@@ -649,6 +776,17 @@ func copyAttributes(attrs map[string]string) map[string]string {
 		dup[key] = value
 	}
 	return dup
+}
+
+func temporalityString(temporality metricspb.AggregationTemporality) string {
+	switch temporality {
+	case metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE:
+		return "cumulative"
+	case metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA:
+		return "delta"
+	default:
+		return ""
+	}
 }
 
 func histogramBoundLabel(index int, explicitBounds []float64) string {

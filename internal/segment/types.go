@@ -69,6 +69,7 @@ type MetricPointRecord struct {
 	Description        string            `json:"description,omitempty"`
 	Unit               string            `json:"unit,omitempty"`
 	Type               string            `json:"type"`
+	MetricType         string            `json:"metric_type,omitempty"`
 	Timestamp          time.Time         `json:"timestamp"`
 	StartTime          time.Time         `json:"start_time,omitempty"`
 	Temporality        string            `json:"temporality,omitempty"`
@@ -84,15 +85,18 @@ type MetricPointRecord struct {
 // presence aggregations (count by __name__) and series discovery never scan
 // sample data.
 type MetricSeriesMeta struct {
-	Tenant     string            `json:"tenant"`
-	Service    string            `json:"service"`
-	Partition  string            `json:"partition,omitempty"`
-	Intent     string            `json:"intent,omitempty"`
-	Asset      string            `json:"asset,omitempty"`
-	MetricName string            `json:"metric_name"`
-	Labels     map[string]string `json:"labels,omitempty"`
-	MinTime    time.Time         `json:"min_time"`
-	MaxTime    time.Time         `json:"max_time"`
+	Tenant      string            `json:"tenant"`
+	Service     string            `json:"service"`
+	Partition   string            `json:"partition,omitempty"`
+	Intent      string            `json:"intent,omitempty"`
+	Asset       string            `json:"asset,omitempty"`
+	MetricName  string            `json:"metric_name"`
+	MetricType  string            `json:"metric_type,omitempty"`
+	Unit        string            `json:"unit,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	MinTime     time.Time         `json:"min_time"`
+	MaxTime     time.Time         `json:"max_time"`
 }
 
 // unboundedMetricLabels are per-record correlation identifiers. They must never

@@ -116,6 +116,12 @@ export interface MetricSeries {
   labels?: Record<string, string>;
 }
 
+/** A key/value label matcher selected from a metric result. */
+export interface MetricLabelFilter {
+  key: string;
+  value: string;
+}
+
 export interface MetricRangeResponse {
   metric: string;
   points: MetricPoint[];
@@ -306,6 +312,8 @@ export interface ProxyEndpointSummary {
 export interface ProxyEndpointInfo {
   name: string;
   kind: string;
+  /** Storage engine for monofs backends: logengine or clickhouse. */
+  engine?: string;
   signals: string[];
   ownersPath?: string;
   origin?: string;
@@ -560,4 +568,28 @@ export interface RecordingRulesStatus {
     lastLoad: string;
     lastError?: string;
   };
+}
+
+// ── DuckDB SQL console ───────────────────────────────────────────────────────
+export interface DuckDBSQLResult {
+  dataset: string;
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  truncated: boolean;
+  duration_ms: number;
+}
+
+export interface DuckDBSQLNodeResult {
+  node_id: string;
+  address: string;
+  result?: DuckDBSQLResult;
+  error?: string;
+}
+
+export interface DuckDBSQLResponse {
+  dataset: string;
+  nodes: DuckDBSQLNodeResult[];
+  restricted: boolean;
+  visible_partitions?: string[];
 }

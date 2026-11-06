@@ -74,6 +74,13 @@ func main() {
 		log.Fatalf("connect to monofs logengine at %s: %v", cfg.MonoFSLogEngineAddr, err)
 	}
 	defer leClient.Close()
+	telemetryEngine := ""
+	if engine, err := leClient.TelemetryEngine(ctx); err != nil {
+		log.Printf("could not detect MonoFS telemetry engine: %v", err)
+	} else {
+		telemetryEngine = engine
+		log.Printf("MonoFS telemetry engine: %s", engine)
+	}
 	log.Printf("using monofs logengine backend at %s", cfg.MonoFSLogEngineAddr)
 
 	svc := query.NewServiceLogEngine(leClient, cfg.DefaultTenant)
@@ -214,7 +221,7 @@ func main() {
 		defer cleanup()
 	}
 	if cfg.ProxyEnabled {
-		setupProxyRouter(ctx, cfg, svc, awsClient, gate)
+		setupProxyRouter(ctx, cfg, svc, awsClient, gate, telemetryEngine)
 		if awsClient != nil {
 			svc.SetAWSViaRouter(true)
 		}
@@ -300,10 +307,16 @@ func setupSecurity(ctx context.Context, cfg config.QueryConfig) (*access.Gate, *
 
 	webAuth, err := auth.NewWebAuthenticator(ctx, authCfg, verifier)
 	if err != nil {
+		if cfg.OIDCRequireLogin {
+			return nil, nil, nil, nil, fmt.Errorf("browser login is required but OIDC discovery failed: %w", err)
+		}
 		log.Printf("browser login disabled: %v", err)
 		webAuth = nil
 	} else if webAuth != nil {
 		log.Printf("browser login enabled (client=%q)", cfg.OIDCClientID)
+	}
+	if webAuth == nil && cfg.OIDCRequireLogin {
+		return nil, nil, nil, nil, errors.New("DOCTOR_OIDC_REQUIRE_LOGIN is set but browser login is not configured (issuer, client id, client secret, and redirect URL are required)")
 	}
 
 	resolver, cleanup, err := buildAccessResolver(ctx, cfg)
@@ -395,10 +408,10 @@ func loadTeamMapping(raw string) (authz.TeamMapping, error) {
 }
 
 // setupProxyRouter wires the multi-backend registry and router: local MonoFS
-// storage is always the "doctor" backend, AWS is registered with the legacy
+// storage is always the "monofs" backend, AWS is registered with the legacy
 // fallback policy, and additional backends come from the static file and
 // Guardian discovery.
-func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient proxy.AWSClient, gate *access.Gate) {
+func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient proxy.AWSClient, gate *access.Gate, telemetryEngine string) {
 	urlPolicy := netguard.Policy{
 		RequireHTTPS:  cfg.BackendRequireHTTPS,
 		AllowLoopback: cfg.BackendAllowLoopback,
@@ -445,8 +458,9 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 	}, proxy.NewCompositeRegistry(registries...))
 
 	localBackend := proxy.Backend{
-		Name:    "doctor",
+		Name:    "monofs",
 		Kind:    proxy.KindMonoFS,
+		Engine:  telemetryEngine,
 		Signals: []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs, proxy.SignalTraces},
 		Policy:  proxy.PolicyAlways,
 		Origin:  "local",

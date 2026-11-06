@@ -185,6 +185,7 @@ export default function FederationStatusPill() {
                 <tr>
                   <th>Name</th>
                   <th>Kind</th>
+                  <th>Backend</th>
                   <th>Signals</th>
                   <th>Status</th>
                 </tr>
@@ -196,6 +197,7 @@ export default function FederationStatusPill() {
                     <tr key={ep.name}>
                       <td title={ep.name}>{ep.name}</td>
                       <td>{ep.kind || "—"}</td>
+                      <td>{ep.engine || "—"}</td>
                       <td>{(ep.signals ?? []).join(", ") || "—"}</td>
                       <td>
                         <span className={`fed-pill__dot ${healthClass(epHealth)}`} />

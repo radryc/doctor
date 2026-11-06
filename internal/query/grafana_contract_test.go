@@ -514,3 +514,52 @@ func contractContainsString(values []string, needle string) bool {
 	}
 	return false
 }
+
+func TestGrafanaPrometheusMetadataTypes(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
+	backend := &fakeLogEngineBackend{metrics: []segment.MetricPointRecord{
+		{MetricName: "requests_total", Service: "api", MetricType: "counter", Unit: "1", Description: "Requests", HasValue: true, Value: 1, Timestamp: base},
+		{MetricName: "connections", Service: "api", MetricType: "gauge", Unit: "1", Description: "Connections", HasValue: true, Value: 2, Timestamp: base},
+		{MetricName: "queue_depth", Service: "api", MetricType: "up_down_counter", Unit: "1", Description: "Queue depth", HasValue: true, Value: 3, Timestamp: base},
+		{MetricName: "latency_seconds_bucket", Service: "api", MetricType: "histogram", Unit: "s", Description: "Latency", HasValue: true, Value: 1, Timestamp: base},
+		{MetricName: "latency_seconds_count", Service: "api", MetricType: "histogram", Unit: "s", Description: "Latency", HasValue: true, Value: 1, Timestamp: base},
+		{MetricName: "exp_latency_seconds_bucket", Service: "api", MetricType: "exponential_histogram", Unit: "s", Description: "Exp latency", HasValue: true, Value: 1, Timestamp: base},
+		{MetricName: "summary_seconds", Service: "api", MetricType: "summary", Unit: "s", Description: "Summary", HasValue: true, Value: 1, Timestamp: base},
+	}}
+	svc := &Service{defaultTenant: "default", logEngine: backend}
+
+	rec := doRequest(t, svc.handlePrometheusMetadata, "/api/v1/metadata")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Status string                         `json:"status"`
+		Data   map[string][]map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	want := map[string]string{
+		"requests_total":      "counter",
+		"connections":         "gauge",
+		"queue_depth":         "gauge",
+		"latency_seconds":     "histogram",
+		"exp_latency_seconds": "histogram",
+		"summary_seconds":     "summary",
+	}
+	for name, metricType := range want {
+		entries := response.Data[name]
+		if len(entries) == 0 {
+			t.Fatalf("missing metadata for %s: %#v", name, response.Data)
+		}
+		if entries[0]["type"] != metricType {
+			t.Fatalf("%s type = %q, want %q", name, entries[0]["type"], metricType)
+		}
+	}
+	if _, ok := response.Data["latency_seconds_bucket"]; ok {
+		t.Fatalf("histogram suffix leaked into metadata: %#v", response.Data)
+	}
+	if got := response.Data["latency_seconds"][0]; got["help"] != "Latency" || got["unit"] != "s" {
+		t.Fatalf("latency metadata = %#v", got)
+	}
+}

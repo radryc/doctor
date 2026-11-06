@@ -192,6 +192,7 @@ func (e *Evaluator) recordFor(group Group, rule Rule, sample mergedSample, at ti
 		Service:    service,
 		MetricName: rule.Record,
 		Type:       "gauge",
+		MetricType: "gauge",
 		Timestamp:  at,
 		HasValue:   true,
 		Value:      sample.value,

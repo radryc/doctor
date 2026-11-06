@@ -26,6 +26,8 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 func main() {
@@ -202,10 +204,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	authInterceptor := grpcAuth.UnaryServerInterceptor()
 	grpcServerOptions := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(256 * 1024 * 1024),
 		grpc.MaxSendMsgSize(256 * 1024 * 1024),
-		grpc.UnaryInterceptor(grpcAuth.UnaryServerInterceptor()),
+		grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			// Guardian probes use the standard gRPC health service and do not
+			// carry the telemetry ingest token.
+			if info.FullMethod == "/grpc.health.v1.Health/Check" {
+				return handler(ctx, req)
+			}
+			return authInterceptor(ctx, req, info, handler)
+		}),
 	}
 	if cfg.GRPCTLSCertFile != "" || cfg.GRPCTLSKeyFile != "" {
 		creds, credsErr := credentials.NewServerTLSFromFile(cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile)
@@ -219,6 +229,9 @@ func main() {
 		grpcServer = grpc.NewServer(append(grpcServerOptions, grpc.StatsHandler(otelgrpc.NewServerHandler()))...)
 	}
 	service.RegisterGRPC(grpcServer)
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           ingestAuth.Wrap(service.Handler()),
