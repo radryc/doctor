@@ -339,7 +339,7 @@ Portable dashboard schema (`doctor.dashboard/v1`) and CAS store:
 - widget kinds: timeseries, stat, toplist, gauge, table, logs, traces, topology, markdown;
 - datasources: prometheus, loki, tempo, native_logs, native_traces;
 - variables: label values, custom, text, partition, service;
-- six built-in presets: fleet, service RED, synthetics, MonoFS storage, Doctor self, AWS federation;
+- seven built-in presets: fleet, service RED, synthetics, MonoFS storage, ClickHouse health, Doctor self, AWS federation;
 - stored dashboards are YAML at `/doctor/v1/dashboards/<tenant>/<id>.yaml`; built-ins are read-only
   and win over stored IDs;
 - CAS via expected version; `List`/`Get` populate version metadata from `ListVersions`.

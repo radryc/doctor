@@ -22,9 +22,17 @@ func (s *Service) handleUI(w http.ResponseWriter, r *http.Request) {
 		path = "index.html"
 	}
 
-	// Serve the actual file if it exists (JS/CSS/assets)
+	// Serve the actual file if it exists (JS/CSS/assets). Vite emits hashed
+	// asset names, so those can be cached aggressively. The shell must be
+	// revalidated on every load or a browser can keep pointing at an old bundle
+	// after a deployment.
 	if f, err := distFS.Open(path); err == nil {
 		_ = f.Close()
+		if strings.HasPrefix(path, "assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		}
 		http.FileServer(http.FS(distFS)).ServeHTTP(w, r)
 		return
 	}
@@ -46,6 +54,7 @@ func (s *Service) handleUI(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(data)
 }

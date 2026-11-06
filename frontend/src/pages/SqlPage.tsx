@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { AlertTriangle, Database, Loader2, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import { api } from "../api/client";
+import Tabs from "../components/ui/Tabs";
 import type { DuckDBSQLNodeResult, DuckDBSQLResponse } from "../types/api";
 
 type Dataset = "logs" | "metrics" | "traces";
@@ -114,11 +115,11 @@ export default function SqlPage() {
       <div className="mx-auto max-w-[1500px] space-y-4">
         <header className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--strata-accent-text)]">DuckDB</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--strata-accent-text)]">SQL</p>
             <h1 className="mt-1 text-xl font-semibold">SQL console</h1>
             <p className="mt-1 max-w-3xl text-xs text-slate-400">
-              Read-only SQL over the local Parquet chunks. Requests are filtered to your visible partitions,
-              and each MonoFS node returns its own shard-local result.
+              Read-only SQL over the MonoFS telemetry backend. Queries run on the configured engine
+              (DuckDB/Parquet or ClickHouse) and are filtered to your visible partitions.
             </p>
           </div>
           <div className="flex items-center gap-2 text-[11px] text-slate-400">
@@ -129,22 +130,16 @@ export default function SqlPage() {
 
         <section className="rounded-xl border border-slate-700/50 bg-slate-900/60 p-4">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex rounded-lg border border-slate-700/50 bg-slate-950/50 p-0.5">
-              {(["logs", "metrics", "traces"] as Dataset[]).map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  onClick={() => setDataset(item)}
-                  className={`rounded-md px-3 py-1.5 text-xs font-semibold capitalize transition-colors ${
-                    dataset === item
-                      ? "bg-cyan-500/15 text-[var(--strata-accent-text)]"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
+            <Tabs
+              items={[
+                { key: "logs", label: "logs" },
+                { key: "metrics", label: "metrics" },
+                { key: "traces", label: "traces" },
+              ] as const}
+              value={dataset}
+              onChange={setDataset}
+              ariaLabel="SQL dataset"
+            />
             <select
               value={rangeMs}
               onChange={(event) => setRangeMs(Number(event.target.value))}
@@ -184,7 +179,7 @@ export default function SqlPage() {
             spellCheck={false}
             rows={14}
             className="mt-3 w-full resize-y rounded-lg border border-slate-700/50 bg-slate-950/80 p-3 font-mono text-[12px] leading-5 text-slate-200 outline-none focus:border-cyan-500/60"
-            aria-label="DuckDB SQL query"
+            aria-label="SQL query"
           />
           <p className="mt-2 text-[11px] text-slate-500">{DATASET_HELP[dataset]}</p>
         </section>
@@ -303,8 +298,9 @@ export default function SqlPage() {
         )}
 
         <p className="text-[11px] text-slate-500">
-          Results are per MonoFS node because chunks are shard-local. Aggregate functions return partial
-          values for each node; use the Logs, Metrics, or Traces pages for globally merged queries.
+          Results are per MonoFS node. With the local logengine, chunks are shard-local and aggregate
+          functions return partial values per node; with ClickHouse, results come from one node because
+          the tables are shared. Use the Logs, Metrics, or Traces pages for globally merged queries.
         </p>
       </div>
     </div>

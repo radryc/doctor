@@ -1,11 +1,15 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { Check, Copy } from "lucide-react";
+import { copyText } from "../../lib/clipboard";
 import { CHART_PALETTE, formatChartValue, formatDateTimeFull } from "./TimeSeriesChart";
-import type { MetricSeries } from "../../types/api";
+import type { MetricLabelFilter, MetricSeries } from "../../types/api";
 
 interface SeriesDetailsProps {
   series: MetricSeries[];
   maxSeries?: number;
   showPoints?: boolean;
+  labelFilters?: MetricLabelFilter[];
+  onToggleLabel?: (key: string, value: string) => void;
 }
 
 interface SeriesStats {
@@ -49,7 +53,14 @@ function computeStats(series: MetricSeries): SeriesStats {
   };
 }
 
-export default function SeriesDetails({ series, maxSeries = 50, showPoints = true }: SeriesDetailsProps) {
+export default function SeriesDetails({
+  series,
+  maxSeries = 50,
+  showPoints = true,
+  labelFilters = [],
+  onToggleLabel,
+}: SeriesDetailsProps) {
+  const [copied, setCopied] = useState("");
   const visible = useMemo(
     () => (maxSeries > 0 && series.length > maxSeries ? series.slice(0, maxSeries) : series),
     [series, maxSeries]
@@ -66,6 +77,17 @@ export default function SeriesDetails({ series, maxSeries = 50, showPoints = tru
 
   if (rows.length === 0) return null;
 
+  const copySeries = (key: string, label: string) => {
+    void copyText(label).then((ok) => {
+      if (!ok) return;
+      setCopied(key);
+      window.setTimeout(() => setCopied(""), 1400);
+    });
+  };
+
+  const isActive = (key: string, value: string) =>
+    labelFilters.some((filter) => filter.key === key && filter.value === value);
+
   return (
     <div className="series-details">
       <div className="series-details__head">
@@ -77,24 +99,71 @@ export default function SeriesDetails({ series, maxSeries = 50, showPoints = tru
         {showPoints && <span>Points</span>}
       </div>
       <div className="series-details__body">
-        {rows.map(({ item, index, stats }) => (
-          <div className="series-details__row" key={`${item.label}-${index}`}>
-            <span className="series-details__identity" title={item.label}>
-              <span
-                className="series-details__swatch"
-                style={{ backgroundColor: CHART_PALETTE[index % CHART_PALETTE.length] }}
-              />
-              <code>{item.label}</code>
-            </span>
-            <span title={stats.latestAt ? formatDateTimeFull(stats.latestAt) : undefined}>
-              {stats.latest == null ? "—" : formatChartValue(stats.latest)}
-            </span>
-            <span>{stats.min == null ? "—" : formatChartValue(stats.min)}</span>
-            <span>{stats.avg == null ? "—" : formatChartValue(stats.avg)}</span>
-            <span>{stats.max == null ? "—" : formatChartValue(stats.max)}</span>
-            {showPoints && <span>{stats.points}</span>}
-          </div>
-        ))}
+        {rows.map(({ item, index, stats }) => {
+          const metricName = item.labels?.__name__ ?? "";
+          const labelEntries = Object.entries(item.labels ?? {})
+            .filter(([key]) => key !== "__name__")
+            .sort(([left], [right]) => left.localeCompare(right));
+          const rowKey = `${item.label}-${index}`;
+          return (
+            <div className="series-details__row" key={rowKey}>
+              <span className="series-details__identity" title={item.label}>
+                <span
+                  className="series-details__swatch"
+                  style={{ backgroundColor: CHART_PALETTE[index % CHART_PALETTE.length] }}
+                />
+                <span className="series-details__identity-main">
+                  {metricName ? (
+                    <code className="series-details__metric-name">{metricName}</code>
+                  ) : null}
+                  {labelEntries.length > 0 ? (
+                    <span className="series-details__labels">
+                      {labelEntries.map(([key, value]) => {
+                        const active = isActive(key, value);
+                        return (
+                          <button
+                            type="button"
+                            key={key}
+                            className={"series-label-token" + (active ? " is-active" : "")}
+                            title={`${key}="${value}"${onToggleLabel ? " — click to filter by this label" : ""}`}
+                            aria-pressed={active}
+                            disabled={!onToggleLabel}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onToggleLabel?.(key, value);
+                            }}
+                          >
+                            <span className="series-label-token__key">{key}</span>
+                            <span className="series-label-token__eq">=</span>
+                            <span className="series-label-token__value">{value}</span>
+                          </button>
+                        );
+                      })}
+                    </span>
+                  ) : !metricName ? (
+                    <code className="series-details__metric-name">{item.label}</code>
+                  ) : null}
+                </span>
+                <button
+                  type="button"
+                  className="series-details__copy"
+                  title="Copy the full series name and labels"
+                  aria-label="Copy series labels"
+                  onClick={() => copySeries(rowKey, item.label)}
+                >
+                  {copied === rowKey ? <Check size={11} /> : <Copy size={11} />}
+                </button>
+              </span>
+              <span title={stats.latestAt ? formatDateTimeFull(stats.latestAt) : undefined}>
+                {stats.latest == null ? "—" : formatChartValue(stats.latest)}
+              </span>
+              <span>{stats.min == null ? "—" : formatChartValue(stats.min)}</span>
+              <span>{stats.avg == null ? "—" : formatChartValue(stats.avg)}</span>
+              <span>{stats.max == null ? "—" : formatChartValue(stats.max)}</span>
+              {showPoints && <span>{stats.points}</span>}
+            </div>
+          );
+        })}
       </div>
       {series.length > visible.length && (
         <p className="series-details__note">

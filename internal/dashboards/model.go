@@ -3,6 +3,7 @@ package dashboards
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -108,6 +109,9 @@ type DashboardWidget struct {
 	GridPos       GridPos              `json:"gridPos" yaml:"gridPos"`
 	Queries       []WidgetQuery        `json:"queries" yaml:"queries"`
 	Visualization *WidgetVisualization `json:"visualization,omitempty" yaml:"visualization,omitempty"`
+	// Partitions narrows this panel to the partitions it affects. When empty,
+	// the dashboard-level Partitions value applies.
+	Partitions []string `json:"partitions,omitempty" yaml:"partitions,omitempty"`
 }
 
 // DashboardMeta holds MonoFS versioning metadata.
@@ -130,7 +134,12 @@ type DashboardDocument struct {
 	RefreshInterval  string              `json:"refreshInterval,omitempty" yaml:"refreshInterval,omitempty"`
 	Variables        []DashboardVariable `json:"variables,omitempty" yaml:"variables,omitempty"`
 	Layout           []DashboardWidget   `json:"layout,omitempty" yaml:"layout,omitempty"`
-	Meta             *DashboardMeta      `json:"meta,omitempty" yaml:"meta,omitempty"`
+	// Partitions lists the partitions this dashboard affects. Write access
+	// requires maintainer/admin role on every listed partition. An empty list
+	// is accepted only for legacy and built-in documents; new user-authored
+	// dashboards must set it when access enforcement is on.
+	Partitions []string       `json:"partitions,omitempty" yaml:"partitions,omitempty"`
+	Meta       *DashboardMeta `json:"meta,omitempty" yaml:"meta,omitempty"`
 }
 
 // DashboardBundle is a portable export of multiple dashboards.
@@ -138,6 +147,34 @@ type DashboardBundle struct {
 	Version    string              `json:"version" yaml:"version"`
 	ExportedAt time.Time           `json:"exportedAt" yaml:"exportedAt"`
 	Dashboards []DashboardDocument `json:"dashboards" yaml:"dashboards"`
+}
+
+// EffectivePartitions returns the deduplicated partitions affected by the
+// dashboard or any of its widgets. An empty result means the document predates
+// partition scoping (legacy or built-in).
+func (d *DashboardDocument) EffectivePartitions() []string {
+	if d == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	add := func(values []string) {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				seen[value] = struct{}{}
+			}
+		}
+	}
+	add(d.Partitions)
+	for _, widget := range d.Layout {
+		add(widget.Partitions)
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ParseDocument decodes a DashboardDocument from JSON or YAML bytes.

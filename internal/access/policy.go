@@ -191,6 +191,28 @@ func (g *PolicyGate) CanSeePartition(id authz.Identity, partition string) bool {
 	return p.CanSeePartition(id, partition)
 }
 
+// CanModifyPartition reports whether the identity may create, update, or
+// delete partition-scoped control-plane objects (dashboards, saved graphs)
+// for the partition. Maintainer and admin roles allow modification; viewer and
+// ingester do not. Observe mode and a disabled gate pass through.
+func (g *PolicyGate) CanModifyPartition(id authz.Identity, partition string) bool {
+	if g == nil || !g.enforce {
+		return true
+	}
+	partition = strings.TrimSpace(partition)
+	if partition == "" || id.IsAnonymous() {
+		return false
+	}
+	if g.IsAdmin(id) {
+		return true
+	}
+	p := g.policy()
+	if p == nil {
+		return false
+	}
+	return p.Role(id, partition).Allows(authz.ActionModify)
+}
+
 // PartitionVisible decides one record. Under enforcement, records without a
 // partition are denied unless the identity is an admin.
 func (g *PolicyGate) PartitionVisible(id authz.Identity, partition string, signal policy.Signal) bool {

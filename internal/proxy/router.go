@@ -421,6 +421,7 @@ func (r *Router) endpointInfoFor(ctx context.Context, backend Backend, now time.
 	info := EndpointInfo{
 		Name:          backend.Name,
 		Kind:          backend.Kind,
+		Engine:        backend.Engine,
 		Signals:       append([]Signal(nil), backend.Signals...),
 		OwnersPath:    backend.OwnersPath,
 		Origin:        backend.Origin,
@@ -452,6 +453,7 @@ func (r *Router) endpointInfoFor(ctx context.Context, backend Backend, now time.
 type EndpointInfo struct {
 	Name       string   `json:"name"`
 	Kind       string   `json:"kind"`
+	Engine     string   `json:"engine,omitempty"`
 	Signals    []Signal `json:"signals"`
 	OwnersPath string   `json:"ownersPath,omitempty"`
 	Origin     string   `json:"origin,omitempty"`

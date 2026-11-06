@@ -71,6 +71,42 @@ func TestAWSFederationPresetDefaultsStayScoped(t *testing.T) {
 	}
 }
 
+func TestClickHousePresetHasHealthPanels(t *testing.T) {
+	var preset DashboardDocument
+	for _, candidate := range builtInPresets() {
+		if candidate.ID == "preset-clickhouse" {
+			preset = candidate
+			break
+		}
+	}
+	if preset.ID == "" {
+		t.Fatal("preset-clickhouse not found")
+	}
+	if preset.Title != "ClickHouse - Health & Status" {
+		t.Fatalf("title = %q", preset.Title)
+	}
+	want := map[string]bool{
+		"clickhouse-probes":   false,
+		"clickhouse-uptime":   false,
+		"clickhouse-readonly": false,
+		"clickhouse-queries":  false,
+		"clickhouse-failures": false,
+		"clickhouse-pod-cpu":  false,
+		"clickhouse-logs":     false,
+		"clickhouse-log-note": false,
+	}
+	for _, widget := range preset.Layout {
+		if _, ok := want[widget.ID]; ok {
+			want[widget.ID] = true
+		}
+	}
+	for id, found := range want {
+		if !found {
+			t.Fatalf("preset-clickhouse missing %s", id)
+		}
+	}
+}
+
 func TestDoctorSelfPresetHasFederationCatalogPanels(t *testing.T) {
 	var preset DashboardDocument
 	for _, candidate := range builtInPresets() {

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { X } from "lucide-react";
 import TimeSeriesChart, { formatDateTimeFull, type ChartDisplayMode } from "./TimeSeriesChart";
 import SeriesDetails from "./SeriesDetails";
-import type { MetricSeries } from "../../types/api";
+import type { MetricLabelFilter, MetricSeries } from "../../types/api";
 
 interface ChartExpandModalProps {
   open: boolean;
@@ -17,6 +17,8 @@ interface ChartExpandModalProps {
   onClose: () => void;
   maxSeries?: number;
   unit?: string;
+  labelFilters?: MetricLabelFilter[];
+  onToggleLabel?: (key: string, value: string) => void;
 }
 
 export default function ChartExpandModal({
@@ -32,6 +34,8 @@ export default function ChartExpandModal({
   onClose,
   maxSeries = 50,
   unit,
+  labelFilters,
+  onToggleLabel,
 }: ChartExpandModalProps) {
   useEffect(() => {
     if (!open) return;
@@ -72,7 +76,12 @@ export default function ChartExpandModal({
           />
           <div>
             <div className="chart-modal__section-title">Series details</div>
-            <SeriesDetails series={series} maxSeries={maxSeries} />
+            <SeriesDetails
+              series={series}
+              maxSeries={maxSeries}
+              labelFilters={labelFilters}
+              onToggleLabel={onToggleLabel}
+            />
           </div>
           {queries.length > 0 && (
             <div className="chart-modal__queries">

@@ -78,6 +78,22 @@ func (c *LogEngineClient) Close() error {
 	return c.conn.Close()
 }
 
+// TelemetryEngine returns the storage engine selected by the MonoFS router
+// (logengine or clickhouse). The router publishes it in the GetClusterInfo node
+// metadata so Doctor can describe the local backend accurately.
+func (c *LogEngineClient) TelemetryEngine(ctx context.Context) (string, error) {
+	resp, err := c.router.GetClusterInfo(ctx, &pb.ClusterInfoRequest{})
+	if err != nil {
+		return "", err
+	}
+	for _, node := range resp.GetNodes() {
+		if engine := strings.TrimSpace(node.GetMetadata()["span_engine"]); engine != "" {
+			return engine, nil
+		}
+	}
+	return "", nil
+}
+
 // IngestLogs sends log records to the monofs logengine.
 func (c *LogEngineClient) IngestLogs(ctx context.Context, chunkID string, records []segment.LogRecord) error {
 	entries := make([]*pb.LogEntry, 0, len(records))
@@ -108,17 +124,25 @@ func (c *LogEngineClient) IngestLogs(ctx context.Context, chunkID string, record
 func (c *LogEngineClient) IngestMetrics(ctx context.Context, chunkID string, records []segment.MetricPointRecord) error {
 	entries := make([]*pb.MetricEntry, 0, len(records))
 	for _, r := range records {
-		entries = append(entries, &pb.MetricEntry{
+		entry := &pb.MetricEntry{
 			TimestampUnixNano: r.Timestamp.UnixNano(),
 			Service:           r.Service,
 			MetricName:        r.MetricName,
 			Value:             r.Value,
+			MetricType:        r.MetricType,
+			Temporality:       r.Temporality,
+			Unit:              r.Unit,
+			Description:       r.Description,
 			Labels: filterUnboundedMetricLabels(mergeLabels(
 				r.ResourceAttributes,
 				identityLabels(r.Partition, r.Intent, r.Asset),
 				r.Attributes,
 			)),
-		})
+		}
+		if !r.StartTime.IsZero() {
+			entry.StartTimeUnixNano = r.StartTime.UnixNano()
+		}
+		entries = append(entries, entry)
 	}
 	_, err := c.router.IngestMetrics(ctx, &pb.IngestMetricsRequest{
 		ChunkId: chunkID,
@@ -315,15 +339,18 @@ func metricSeriesMetaFromProto(tenant string, item *pb.MetricSeriesItem) segment
 	}
 	partition, intent, asset := labelsFromIdentity(labels)
 	return segment.MetricSeriesMeta{
-		Tenant:     tenant,
-		Service:    item.GetService(),
-		Partition:  partition,
-		Intent:     intent,
-		Asset:      asset,
-		MetricName: item.GetMetricName(),
-		Labels:     labels,
-		MinTime:    time.Unix(0, item.GetMinTimeUnixNano()).UTC(),
-		MaxTime:    time.Unix(0, item.GetMaxTimeUnixNano()).UTC(),
+		Tenant:      tenant,
+		Service:     item.GetService(),
+		Partition:   partition,
+		Intent:      intent,
+		Asset:       asset,
+		MetricName:  item.GetMetricName(),
+		MetricType:  item.GetMetricType(),
+		Unit:        item.GetUnit(),
+		Description: item.GetDescription(),
+		Labels:      labels,
+		MinTime:     time.Unix(0, item.GetMinTimeUnixNano()).UTC(),
+		MaxTime:     time.Unix(0, item.GetMaxTimeUnixNano()).UTC(),
 	}
 }
 
@@ -334,18 +361,23 @@ func metricPointFromStreamRecord(tenant string, record metricStreamRecord) segme
 	}
 	partition, intent, asset := labelsFromIdentity(labels)
 	return segment.MetricPointRecord{
-		Tenant:     tenant,
-		Service:    record.Service,
-		Partition:  partition,
-		Intent:     intent,
-		Asset:      asset,
-		MetricName: record.MetricName,
-		Timestamp:  record.Timestamp.UTC(),
-		TraceID:    labels["trace_id"],
-		SpanID:     labels["span_id"],
-		Attributes: labels,
-		HasValue:   true,
-		Value:      record.Value,
+		Tenant:      tenant,
+		Service:     record.Service,
+		Partition:   partition,
+		Intent:      intent,
+		Asset:       asset,
+		MetricName:  record.MetricName,
+		MetricType:  record.MetricType,
+		Description: record.Description,
+		Unit:        record.Unit,
+		Timestamp:   record.Timestamp.UTC(),
+		StartTime:   record.StartTime.UTC(),
+		Temporality: record.Temporality,
+		TraceID:     labels["trace_id"],
+		SpanID:      labels["span_id"],
+		Attributes:  labels,
+		HasValue:    true,
+		Value:       record.Value,
 	}
 }
 
@@ -442,11 +474,16 @@ func (c *LogEngineClient) QueryTraces(ctx context.Context, tenant, traceID, serv
 }
 
 type metricStreamRecord struct {
-	Timestamp  time.Time         `json:"Timestamp"`
-	Service    string            `json:"Service"`
-	MetricName string            `json:"MetricName"`
-	Value      float64           `json:"Value"`
-	Labels     map[string]string `json:"Labels"`
+	Timestamp   time.Time         `json:"Timestamp"`
+	StartTime   time.Time         `json:"StartTime"`
+	Service     string            `json:"Service"`
+	MetricName  string            `json:"MetricName"`
+	Value       float64           `json:"Value"`
+	MetricType  string            `json:"MetricType"`
+	Temporality string            `json:"Temporality"`
+	Unit        string            `json:"Unit"`
+	Description string            `json:"Description"`
+	Labels      map[string]string `json:"Labels"`
 }
 
 func unmarshalQueryItems[T any](stream grpc.ServerStreamingClient[pb.QueryResultItem]) ([]T, error) {

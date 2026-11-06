@@ -330,6 +330,49 @@
   border-bottom: 1px solid var(--strata-border);
 }
 
+/* Shared tabs, modelled on Flowbite's "Tabs with underline". Every product
+   page should use these instead of ad-hoc pill/underline variants so the tab
+   affordance is identical. */
+.s-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 2px;
+  border-bottom: 1px solid var(--strata-border);
+}
+.s-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 11px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--strata-radius-sm) var(--strata-radius-sm) 0 0;
+  background: transparent;
+  color: var(--strata-text-secondary);
+  font: inherit;
+  font-size: var(--strata-text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--strata-fast) var(--strata-ease),
+    border-color var(--strata-fast) var(--strata-ease),
+    color var(--strata-fast) var(--strata-ease);
+}
+.s-tab:hover {
+  background: var(--strata-hover);
+  border-bottom-color: var(--strata-border-strong);
+  color: var(--strata-text);
+}
+.s-tab.is-active,
+.s-tab[aria-selected="true"] {
+  background: var(--strata-overlay-soft);
+  border-bottom-color: var(--strata-accent);
+  color: var(--strata-accent-text);
+}
+/* Embedded tab bars already sit on a bordered header. */
+.s-tabs--flush { border-bottom: 0; }
+
 .s-table-wrap { width: 100%; overflow-x: auto; }
 .s-table { width: 100%; border-collapse: collapse; font-size: var(--strata-text-sm); }
 .s-table th,

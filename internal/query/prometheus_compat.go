@@ -1354,6 +1354,35 @@ func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	metadata := make(map[string][]map[string]string, len(metricNames))
+	if s.logEngine != nil {
+		start, end := prometheusDiscoveryRange(r)
+		tenant := s.tenantFromRequest(r)
+		_ = s.logEngine.StreamMetricSeries(r.Context(), tenant, segment.MetricQuery{}, start, end, func(meta segment.MetricSeriesMeta) error {
+			if meta.MetricName == "" {
+				return nil
+			}
+			family, promType := prometheusMetricFamily(meta.MetricName, meta.MetricType)
+			metricNames[family] = struct{}{}
+			entry := metadata[family]
+			if len(entry) == 0 {
+				entry = []map[string]string{{"type": promType, "help": meta.Description, "unit": meta.Unit}}
+			} else {
+				if entry[0]["type"] == "" || entry[0]["type"] == "untyped" {
+					entry[0]["type"] = promType
+				}
+				if entry[0]["help"] == "" {
+					entry[0]["help"] = meta.Description
+				}
+				if entry[0]["unit"] == "" {
+					entry[0]["unit"] = meta.Unit
+				}
+			}
+			metadata[family] = entry
+			return nil
+		})
+	}
+
 	if s.awsDiscoveryReady(r.Context()) {
 		if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
 			awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -1364,8 +1393,13 @@ func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	metadata := make(map[string][]map[string]string, len(metricNames))
 	for metricName := range metricNames {
+		if _, ok := metadata[metricName]; ok {
+			continue
+		}
+		if coveredByMetricFamily(metricName, metadata) {
+			continue
+		}
 		metadata[metricName] = []map[string]string{{
 			"type": "untyped",
 			"help": "",
@@ -1374,6 +1408,44 @@ func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Reques
 	}
 
 	writePrometheusSuccess(w, metadata)
+}
+
+// coveredByMetricFamily reports whether metricName is a _bucket/_count/_sum
+// series whose base family already has histogram or summary metadata.
+func coveredByMetricFamily(metricName string, metadata map[string][]map[string]string) bool {
+	for _, suffix := range []string{"_bucket", "_count", "_sum"} {
+		if !strings.HasSuffix(metricName, suffix) {
+			continue
+		}
+		base := strings.TrimSuffix(metricName, suffix)
+		entries := metadata[base]
+		if len(entries) == 0 {
+			return false
+		}
+		switch entries[0]["type"] {
+		case "histogram", "summary":
+			return true
+		}
+	}
+	return false
+}
+
+// prometheusMetricFamily maps a stored OTLP metric type to the Prometheus
+// metadata type Grafana understands and collapses histogram/summary series
+// suffixes onto the base family name.
+func prometheusMetricFamily(metricName, metricType string) (string, string) {
+	switch metricType {
+	case "counter":
+		return metricName, "counter"
+	case "gauge", "up_down_counter":
+		return metricName, "gauge"
+	case "histogram", "exponential_histogram":
+		return strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(metricName, "_bucket"), "_count"), "_sum"), "histogram"
+	case "summary":
+		return strings.TrimSuffix(strings.TrimSuffix(metricName, "_count"), "_sum"), "summary"
+	default:
+		return metricName, "untyped"
+	}
 }
 
 func (s *Service) handlePrometheusBuildInfo(w http.ResponseWriter, _ *http.Request) {

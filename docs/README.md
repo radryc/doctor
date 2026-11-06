@@ -27,6 +27,7 @@ the intended design.
 | [logical-flows/federation.md](logical-flows/federation.md) | platform/SRE | catalog controller, snapshots, tokens, planner, fan-out |
 | [logical-flows/rules-dashboards.md](logical-flows/rules-dashboards.md) | platform/SRE | recording rules, dashboards, CAS storage |
 | [logical-flows/ui.md](logical-flows/ui.md) | frontend/SRE | page routes, data dependencies, refresh/correlation behavior |
+| [design/graph-spec.md](design/graph-spec.md) | graph authors / agents | importable graph, dashboard, and saved-graph bundle schemas, query rules, and examples |
 | [security-architecture.md](security-architecture.md) | security/SRE | trust boundaries, authentication, authorization, secrets, threats, gaps |
 | [internal/code-inventory.md](internal/code-inventory.md) | engineers | every source/test file and what it does |
 | [internal/missing-pieces.md](internal/missing-pieces.md) | maintainers | unimplemented or unenforced capabilities, with priority |

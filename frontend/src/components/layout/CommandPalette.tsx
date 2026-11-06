@@ -170,7 +170,7 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         group: "Go to",
         label: "SQL console",
         hint: "g q",
-        keywords: "duckdb parquet select query",
+        keywords: "sql duckdb parquet clickhouse select query",
         icon: Database,
         run: go("/sql"),
       },

@@ -245,12 +245,15 @@ func (f *fakeLogEngineBackend) StreamMetricSeries(_ context.Context, tenant stri
 				labels[name] = value
 			}
 			entry = &segment.MetricSeriesMeta{
-				Tenant:     tenant,
-				Service:    metric.Service,
-				MetricName: metric.MetricName,
-				Labels:     labels,
-				MinTime:    metric.Timestamp.UTC(),
-				MaxTime:    metric.Timestamp.UTC(),
+				Tenant:      tenant,
+				Service:     metric.Service,
+				MetricName:  metric.MetricName,
+				MetricType:  metric.MetricType,
+				Unit:        metric.Unit,
+				Description: metric.Description,
+				Labels:      labels,
+				MinTime:     metric.Timestamp.UTC(),
+				MaxTime:     metric.Timestamp.UTC(),
 			}
 			byKey[key] = entry
 			order = append(order, key)

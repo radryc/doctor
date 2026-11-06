@@ -80,8 +80,12 @@ Details:
 - Span/log names, status messages, log bodies, and string attribute values go through
   `SanitizeText`/`SanitizeAttributes`.
 - Identity keys are preserved even if their values match a secret pattern.
-- Metrics are expanded from all OTLP point types; the raw point is also stored for histogram/
-  exponential-histogram/summary variants where useful.
+- Metrics are expanded from all OTLP point types. Gauge/Sum keep one point; Histogram and
+  ExponentialHistogram become `_bucket`/`_count`/`_sum`; Summary becomes quantile/`_count`/`_sum`.
+  Exponential histogram buckets are converted to explicit `le` boundaries (capped at 160 buckets).
+- Metric metadata (`MetricType`, `Temporality`, `StartTime`, `Unit`, `Description`) is preserved
+  through MonoFS. `MetricType` uses the OTLP aggregation kind; observable instruments are
+  indistinguishable from their synchronous equivalents on the wire.
 - Metric identity is normalized twice: once from the resource and once from point labels.
 
 ## 5. Execution path selection
@@ -134,7 +138,9 @@ normal traffic.
 3. call `LogEngineClient.Ingest*`;
 4. the log-engine client converts records to protobuf entries:
    - logs: timestamp, level, service, trace/span IDs, raw message, merged labels;
-   - metrics: timestamp, service, name, value, merged labels (unbounded labels removed);
+   - metrics: timestamp, start time, service, name, value, metric type, temporality, unit,
+     description, merged labels (unbounded labels removed);`unit`/`description` are written to the
+     chunk series index, the rest to the metric Parquet rows;
    - traces: start/end, trace/span/parent IDs, service, name, status, merged attributes;
 5. the MonoFS router forwards to a healthy node.
 

@@ -34,10 +34,14 @@ import type {
 } from "../types/api";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { downloadBlob, readFileAsText } from "../lib/download";
+import { parseGraphFile, serialiseGraphBundle, type GraphFileFormat } from "../lib/graphBundle";
+import type { DashboardDocument } from "../types/dashboard";
 import TraceWaterfall from "../components/charts/TraceWaterfall";
 import TraceFlow from "../components/charts/TraceFlow";
 import GraphQueryBuilder from "../components/charts/GraphQueryBuilder";
 import MiniLineChart from "../components/charts/MiniLineChart";
+import Tabs from "../components/ui/Tabs";
 import { resolveNodeKind } from "../components/topology/nodeKind";
 
 interface LayoutNode extends GuardianTopologyNode {
@@ -81,6 +85,7 @@ interface AdhocGraphCard {
   series: CustomSeries[];
   loading: boolean;
   error: string | null;
+  partitions?: string[];
 }
 
 interface SavedGraphDefinition {
@@ -90,25 +95,46 @@ interface SavedGraphDefinition {
   rangeMinutes: number;
   refreshIntervalSec: number;
   createdAt: string;
+  partitions: string[];
 }
 
 interface SavedDashboard {
   id: string;
   name: string;
-  graphs: Array<{ title: string; query: string; rangeMinutes: number; refreshIntervalSec: number }>;
+  graphs: Array<{
+    title: string;
+    query: string;
+    rangeMinutes: number;
+    refreshIntervalSec: number;
+    partitions: string[];
+  }>;
   createdAt: string;
   updatedAt: string;
-}
-
-interface SavedBundle {
-  version: number;
-  exportedAt: string;
-  savedGraphs: SavedGraphDefinition[];
-  savedDashboards: SavedDashboard[];
+  partitions: string[];
 }
 
 const SAVED_GRAPHS_KEY = "doctor.savedGraphs.v1";
 const SAVED_DASHBOARDS_KEY = "doctor.savedDashboards.v1";
+
+function parsePartitionList(value: string): string[] {
+  const out: string[] = [];
+  for (const entry of value.split(/[\s,]+/)) {
+    const trimmed = entry.trim();
+    if (trimmed && !out.includes(trimmed)) out.push(trimmed);
+  }
+  return out;
+}
+
+function slugifyGraphTitle(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "graph"
+  );
+}
 
 function healthColor(level?: string): string {
   const n = (level || "").toLowerCase();
@@ -811,6 +837,8 @@ export default function PartitionAssetsPage() {
   const [savedDashboards, setSavedDashboards] = useState<SavedDashboard[]>([]);
   const [dashboardName, setDashboardName] = useState("");
   const [graphTitle, setGraphTitle] = useState("Adhoc Graph");
+  const [graphPartitions, setGraphPartitions] = useState(name ?? "");
+  const [dashboardPartitions, setDashboardPartitions] = useState(name ?? "");
   const [graphsNotice, setGraphsNotice] = useState<string | null>(null);
   const [draggingGraphId, setDraggingGraphId] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -842,6 +870,7 @@ export default function PartitionAssetsPage() {
                 ...g,
                 rangeMinutes: Number(g.rangeMinutes) || 60,
                 refreshIntervalSec: Number(g.refreshIntervalSec) || 0,
+                partitions: Array.isArray(g.partitions) ? g.partitions : [],
               }))
           );
         }
@@ -854,17 +883,25 @@ export default function PartitionAssetsPage() {
           setSavedDashboards(
             parsed
               .filter((d) => typeof d?.name === "string" && Array.isArray(d?.graphs))
-              .map((d) => ({
-                ...d,
-                graphs: d.graphs
+              .map((d) => {
+                const graphs = d.graphs
                   .filter((g) => typeof g?.query === "string" && typeof g?.title === "string")
                   .map((g) => ({
                     title: g.title,
                     query: g.query,
                     rangeMinutes: Number(g.rangeMinutes) || 60,
                     refreshIntervalSec: Number(g.refreshIntervalSec) || 0,
-                  })),
-              }))
+                    partitions: Array.isArray(g.partitions) ? g.partitions : [],
+                  }));
+                return {
+                  ...d,
+                  graphs,
+                  partitions:
+                    Array.isArray(d.partitions) && d.partitions.length > 0
+                      ? d.partitions
+                      : [...new Set(graphs.flatMap((graph) => graph.partitions ?? []))],
+                };
+              })
           );
         }
       }
@@ -1756,6 +1793,7 @@ export default function PartitionAssetsPage() {
         series: [],
         loading: true,
         error: null,
+        partitions: selectedNode.partition ? [selectedNode.partition] : [],
       }]);
       void refreshAdhocGraph(id, query, timeRange);
     }
@@ -1787,8 +1825,8 @@ export default function PartitionAssetsPage() {
     });
   }, []);
 
-  const exportSavedBoards = useCallback(() => {
-    const payload: SavedBundle = {
+  const exportSavedBoards = useCallback((format: GraphFileFormat) => {
+    const payload = {
       version: 1,
       exportedAt: new Date().toISOString(),
       savedGraphs,
@@ -1796,71 +1834,120 @@ export default function PartitionAssetsPage() {
     };
 
     try {
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `doctor-graphs-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setGraphsNotice("Exported saved graphs and dashboards");
-    } catch {
-      setGraphsNotice("Failed to export dashboards");
+      const { content, mimeType, extension } = serialiseGraphBundle(payload, format);
+      downloadBlob(
+        content,
+        `doctor-graphs-${new Date().toISOString().slice(0, 10)}.${extension}`,
+        mimeType
+      );
+      setGraphsNotice(
+        `Exported ${savedGraphs.length} graph(s) and ${savedDashboards.length} dashboard(s) as ${extension.toUpperCase()}`
+      );
+    } catch (error) {
+      setGraphsNotice(
+        `Export failed: ${error instanceof Error ? error.message : "could not serialise graphs"}`
+      );
     }
   }, [savedGraphs, savedDashboards]);
 
-  const importSavedBoards = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+  const importSavedBoards = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const parsed = JSON.parse(String(ev.target?.result || "{}")) as Partial<SavedBundle>;
-        if (!Array.isArray(parsed.savedGraphs) || !Array.isArray(parsed.savedDashboards)) {
-          throw new Error("Invalid saved dashboard bundle");
-        }
-
-        const importedGraphs = parsed.savedGraphs
-          .filter((g) => typeof g?.query === "string" && typeof g?.title === "string")
-          .map((g) => ({
-            id: g.id || `graph-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            title: g.title,
-            query: g.query,
-            rangeMinutes: Number(g.rangeMinutes) || 60,
-            refreshIntervalSec: Number(g.refreshIntervalSec) || 0,
-            createdAt: g.createdAt || new Date().toISOString(),
-          }));
-
-        const importedDashboards = parsed.savedDashboards
-          .filter((d) => typeof d?.name === "string" && Array.isArray(d?.graphs))
-          .map((d) => ({
-            id: d.id || `dash-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            name: d.name,
-            graphs: d.graphs
-              .filter((g) => typeof g?.query === "string" && typeof g?.title === "string")
-              .map((g) => ({
-                title: g.title,
-                query: g.query,
-                rangeMinutes: Number(g.rangeMinutes) || 60,
-                refreshIntervalSec: Number(g.refreshIntervalSec) || 0,
-              })),
-            createdAt: d.createdAt || new Date().toISOString(),
-            updatedAt: d.updatedAt || new Date().toISOString(),
-          }));
-
-        setSavedGraphs(importedGraphs);
-        setSavedDashboards(importedDashboards);
-        setGraphsNotice(`Imported ${importedGraphs.length} graph(s) and ${importedDashboards.length} dashboard(s)`);
-      } catch {
-        setGraphsNotice("Import failed: invalid JSON bundle");
+    try {
+      if (file.size > 2 * 1024 * 1024) {
+        throw new Error("file is larger than 2 MB");
       }
-    };
+      const parsed = parseGraphFile(await readFileAsText(file), file.name);
+      const stamp = Date.now();
+      const usedIds = new Set([
+        ...savedGraphs.map((graph) => graph.id),
+        ...savedDashboards.map((dashboard) => dashboard.id),
+      ]);
+      const freshId = (prefix: string, preferred: string | undefined, index: number) => {
+        if (preferred && !usedIds.has(preferred)) {
+          usedIds.add(preferred);
+          return preferred;
+        }
+        let id = `${prefix}-${stamp}-${index}-${Math.random().toString(36).slice(2, 7)}`;
+        while (usedIds.has(id)) {
+          id = `${prefix}-${stamp}-${index}-${Math.random().toString(36).slice(2, 7)}`;
+        }
+        usedIds.add(id);
+        return id;
+      };
 
-    reader.onerror = () => setGraphsNotice("Import failed: could not read file");
-    reader.readAsText(file);
-    event.target.value = "";
-  }, []);
+      const importedGraphs: SavedGraphDefinition[] = parsed.graphs.map((graph, index) => ({
+        id: freshId("graph", graph.id, index),
+        title: graph.title,
+        query: graph.query,
+        rangeMinutes: graph.rangeMinutes,
+        refreshIntervalSec: graph.refreshIntervalSec,
+        createdAt: graph.createdAt || new Date().toISOString(),
+        partitions: graph.partitions,
+      }));
+
+      const importedDashboards: SavedDashboard[] = parsed.dashboards.map((dashboard, index) => ({
+        id: freshId("dash", dashboard.id, index),
+        name: dashboard.name,
+        graphs: dashboard.graphs.map((graph) => ({
+          title: graph.title,
+          query: graph.query,
+          rangeMinutes: graph.rangeMinutes,
+          refreshIntervalSec: graph.refreshIntervalSec,
+          partitions: graph.partitions,
+        })),
+        createdAt: dashboard.createdAt || new Date().toISOString(),
+        updatedAt: dashboard.updatedAt || new Date().toISOString(),
+        partitions: dashboard.partitions,
+      }));
+
+      // Uploading is additive: keep existing boards and skip exact duplicates
+      // so importing the same file twice does not create a second copy.
+      const graphKey = (graph: { title: string; query: string }) =>
+        `${graph.title}\u0000${graph.query}`;
+      const existingGraphKeys = new Set(savedGraphs.map(graphKey));
+      const newGraphs = importedGraphs.filter((graph) => {
+        const key = graphKey(graph);
+        if (existingGraphKeys.has(key)) return false;
+        existingGraphKeys.add(key);
+        return true;
+      });
+
+      const existingDashboardNames = new Set(savedDashboards.map((dashboard) => dashboard.name));
+      const newDashboards = importedDashboards.filter((dashboard) => {
+        if (existingDashboardNames.has(dashboard.name)) return false;
+        existingDashboardNames.add(dashboard.name);
+        return true;
+      });
+
+      setSavedGraphs([...savedGraphs, ...newGraphs]);
+      setSavedDashboards([...savedDashboards, ...newDashboards]);
+
+      const skipped =
+        importedGraphs.length - newGraphs.length + (importedDashboards.length - newDashboards.length);
+      if (newGraphs.length === 0 && newDashboards.length === 0) {
+        setGraphsNotice(
+          skipped > 0
+            ? `Nothing new to import: ${skipped} graph/dashboard already saved`
+            : "Import failed: no graphs or dashboards found"
+        );
+      } else {
+        setGraphsNotice(
+          `Imported ${newGraphs.length} graph(s) and ${newDashboards.length} dashboard(s)${
+            skipped > 0 ? ` · ${skipped} duplicate(s) skipped` : ""
+          }`
+        );
+      }
+    } catch (error) {
+      setGraphsNotice(
+        `Import failed: ${error instanceof Error ? error.message : "could not read file"}`
+      );
+    } finally {
+      input.value = "";
+    }
+  }, [savedGraphs, savedDashboards]);
 
   useEffect(() => {
     const timers: number[] = [];
@@ -1897,17 +1984,23 @@ export default function PartitionAssetsPage() {
         series: [],
         loading: false,
         error: null,
+        partitions: parsePartitionList(graphPartitions),
       },
       ...prev,
     ]);
     setGraphsNotice(`Added ${title}`);
     await refreshAdhocGraph(graphId, query, timeRange);
-  }, [customQuery, graphTitle, adhocGraphs.length, refreshAdhocGraph, timeRange]);
+  }, [customQuery, graphTitle, graphPartitions, adhocGraphs.length, refreshAdhocGraph, timeRange]);
 
   const saveCurrentQueryAsGraph = useCallback(() => {
     const query = customQuery.trim();
     if (!query) {
       setGraphsNotice("Query is empty");
+      return;
+    }
+    const partitions = parsePartitionList(graphPartitions);
+    if (partitions.length === 0) {
+      setGraphsNotice("Specify at least one affected partition before saving");
       return;
     }
     const title = graphTitle.trim() || `Saved Graph ${savedGraphs.length + 1}`;
@@ -1918,10 +2011,11 @@ export default function PartitionAssetsPage() {
       rangeMinutes: timeRange,
       refreshIntervalSec: 0,
       createdAt: new Date().toISOString(),
+      partitions,
     };
     setSavedGraphs((prev) => [entry, ...prev]);
     setGraphsNotice(`Saved graph ${title}`);
-  }, [customQuery, graphTitle, savedGraphs.length, timeRange]);
+  }, [customQuery, graphTitle, graphPartitions, savedGraphs.length, timeRange]);
 
   const addSavedGraphToBoard = useCallback(async (graph: SavedGraphDefinition) => {
     const graphId = `adhoc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1936,6 +2030,7 @@ export default function PartitionAssetsPage() {
         series: [],
         loading: false,
         error: null,
+        partitions: graph.partitions,
       },
       ...prev,
     ]);
@@ -1949,11 +2044,23 @@ export default function PartitionAssetsPage() {
         query: g.query.trim(),
         rangeMinutes: g.rangeMinutes,
         refreshIntervalSec: g.refreshIntervalSec,
+        partitions: g.partitions ?? [],
       }))
       .filter((g) => g.title && g.query);
 
     if (graphs.length === 0) {
       setGraphsNotice("Add at least one ad-hoc graph before saving dashboard");
+      return;
+    }
+
+    const partitions = [
+      ...new Set([
+        ...parsePartitionList(dashboardPartitions),
+        ...graphs.flatMap((graph) => graph.partitions ?? []),
+      ]),
+    ];
+    if (partitions.length === 0) {
+      setGraphsNotice("Specify at least one affected partition before saving the dashboard");
       return;
     }
 
@@ -1965,10 +2072,11 @@ export default function PartitionAssetsPage() {
       graphs,
       createdAt: now,
       updatedAt: now,
+      partitions,
     };
     setSavedDashboards((prev) => [dashboard, ...prev]);
     setGraphsNotice(`Saved dashboard ${name}`);
-  }, [adhocGraphs, dashboardName, savedDashboards.length]);
+  }, [adhocGraphs, dashboardName, dashboardPartitions, savedDashboards.length]);
 
   const loadDashboard = useCallback(async (dashboard: SavedDashboard) => {
     const cards: AdhocGraphCard[] = dashboard.graphs.map((g, idx) => ({
@@ -1981,6 +2089,10 @@ export default function PartitionAssetsPage() {
       series: [],
       loading: false,
       error: null,
+      partitions:
+        (g.partitions ?? []).length > 0
+          ? g.partitions
+          : dashboard.partitions,
     }));
 
     setAdhocGraphs(cards);
@@ -1993,6 +2105,44 @@ export default function PartitionAssetsPage() {
   const deleteSavedGraph = useCallback((graphId: string) => {
     setSavedGraphs((prev) => prev.filter((g) => g.id !== graphId));
   }, []);
+
+  const promoteSavedGraph = useCallback(async (graph: SavedGraphDefinition) => {
+    if (graph.partitions.length === 0) {
+      setGraphsNotice("Add at least one affected partition before promoting this graph");
+      return;
+    }
+    const id = `graph-${slugifyGraphTitle(graph.title)}-${Date.now().toString(36)}`;
+    const doc: DashboardDocument = {
+      version: "doctor.dashboard/v1",
+      id,
+      title: graph.title,
+      description: "Promoted from a browser-local saved graph in the partition view.",
+      tenant,
+      tags: ["saved-graph", "promoted"],
+      defaultTimeRange: `${graph.rangeMinutes}m`,
+      refreshInterval: graph.refreshIntervalSec > 0 ? `${graph.refreshIntervalSec}s` : undefined,
+      partitions: graph.partitions,
+      layout: [
+        {
+          id: "graph",
+          title: graph.title,
+          kind: "timeseries",
+          gridPos: { x: 0, y: 0, w: 12, h: 8 },
+          queries: [{ refId: "A", datasource: "prometheus", expr: graph.query }],
+          visualization: { displayMode: "line" },
+          partitions: graph.partitions,
+        },
+      ],
+    };
+    try {
+      await api.putDashboard(tenant, id, doc);
+      setGraphsNotice(`Promoted "${graph.title}" to shared dashboard ${id}`);
+    } catch (error) {
+      setGraphsNotice(
+        `Promote failed: ${error instanceof Error ? error.message : "dashboard write rejected"}`
+      );
+    }
+  }, [tenant]);
 
   const deleteDashboard = useCallback((dashboardId: string) => {
     setSavedDashboards((prev) => prev.filter((d) => d.id !== dashboardId));
@@ -2290,57 +2440,57 @@ export default function PartitionAssetsPage() {
         <div className="px-6 pb-12" ref={tabsRef}>
           <div className="bg-slate-900/60 border border-slate-800 overflow-hidden">
             {/* Tab bar */}
-            <div className="flex items-center border-b border-slate-800/60 bg-slate-950/60">
-              {showMetrics && (
-                <button
-                  onClick={() => handleTabChange("metrics")}
-                  className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
-                    activeTab === "metrics"
-                      ? "border-sky-400 text-sky-300 bg-sky-500/5"
-                      : "border-transparent text-slate-500 hover:text-slate-400"
-                  }`}
-                >
-                  <BarChart3 className="w-3.5 h-3.5" />
-                  Metrics
-                </button>
-              )}
-              <button
-                onClick={() => handleTabChange("traces")}
-                className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
-                  activeTab === "traces"
-                    ? "border-violet-400 text-violet-300 bg-violet-500/5"
-                    : "border-transparent text-slate-500 hover:text-slate-400"
-                }`}
-              >
-                <GanttChartSquare className="w-3.5 h-3.5" />
-                Traces
-              </button>
-              {showLogs && (
-                <button
-                  onClick={() => handleTabChange("logs")}
-                  className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
-                    activeTab === "logs"
-                      ? "border-amber-400 text-amber-300 bg-amber-500/5"
-                      : "border-transparent text-slate-500 hover:text-slate-400"
-                  }`}
-                >
-                  <ScrollText className="w-3.5 h-3.5" />
-                  Logs
-                </button>
-              )}
-              {showGraphs && (
-                <button
-                  onClick={() => handleTabChange("graphs")}
-                  className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 ${
-                    activeTab === "graphs"
-                      ? "border-cyan-400 text-cyan-300 bg-cyan-500/5"
-                      : "border-transparent text-slate-500 hover:text-slate-400"
-                  }`}
-                >
-                  <BarChart3 className="w-3.5 h-3.5" />
-                  Graphs
-                </button>
-              )}
+            <div className="flex flex-wrap items-center gap-2 border-b border-slate-800/60 bg-slate-950/60 px-3 py-1.5">
+              <Tabs
+                className="s-tabs--flush"
+                items={[
+                  ...(showMetrics
+                    ? [{
+                        key: "metrics" as const,
+                        label: (
+                          <>
+                            <BarChart3 className="w-3.5 h-3.5" />
+                            Metrics
+                          </>
+                        ),
+                      }]
+                    : []),
+                  {
+                    key: "traces" as const,
+                    label: (
+                      <>
+                        <GanttChartSquare className="w-3.5 h-3.5" />
+                        Traces
+                      </>
+                    ),
+                  },
+                  ...(showLogs
+                    ? [{
+                        key: "logs" as const,
+                        label: (
+                          <>
+                            <ScrollText className="w-3.5 h-3.5" />
+                            Logs
+                          </>
+                        ),
+                      }]
+                    : []),
+                  ...(showGraphs
+                    ? [{
+                        key: "graphs" as const,
+                        label: (
+                          <>
+                            <BarChart3 className="w-3.5 h-3.5" />
+                            Graphs
+                          </>
+                        ),
+                      }]
+                    : []),
+                ]}
+                value={activeTab}
+                onChange={handleTabChange}
+                ariaLabel="Asset telemetry views"
+              />
 
               <div className="flex-1" />
 
@@ -2765,7 +2915,7 @@ export default function PartitionAssetsPage() {
 
                       <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4 space-y-3">
                         <div className="flex items-center justify-between gap-2">
-                          <h3 className="text-xs font-semibold text-slate-300">Ad-hoc and Persistent Dashboards</h3>
+                          <h3 className="text-xs font-semibold text-slate-300">Ad-hoc Boards (local to this browser)</h3>
                           {graphsNotice && <span className="text-[10px] text-emerald-300">{graphsNotice}</span>}
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
@@ -2807,26 +2957,59 @@ export default function PartitionAssetsPage() {
                               Save dashboard
                             </button>
                             <button
-                              onClick={exportSavedBoards}
+                              onClick={() => exportSavedBoards("json")}
                               className="px-2.5 py-1 text-[11px] border border-indigo-500/60 text-indigo-300 hover:bg-indigo-500/10"
+                              title="Download saved graphs and dashboards as JSON"
                             >
                               Export JSON
                             </button>
                             <button
+                              onClick={() => exportSavedBoards("yaml")}
+                              className="px-2.5 py-1 text-[11px] border border-indigo-500/60 text-indigo-300 hover:bg-indigo-500/10"
+                              title="Download saved graphs and dashboards as YAML"
+                            >
+                              Export YAML
+                            </button>
+                            <button
                               onClick={() => importInputRef.current?.click()}
                               className="px-2.5 py-1 text-[11px] border border-fuchsia-500/60 text-fuchsia-300 hover:bg-fuchsia-500/10"
+                              title="Upload saved graphs and dashboards from a JSON or YAML file"
                             >
-                              Import JSON
+                              Import JSON/YAML
                             </button>
                             <input
                               ref={importInputRef}
                               type="file"
-                              accept="application/json,.json"
+                              accept="application/json,application/yaml,text/yaml,.json,.yaml,.yml"
                               onChange={importSavedBoards}
                               className="hidden"
                             />
                           </div>
                         </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          <label className="text-[10px] text-slate-500">
+                            Graph affected partitions
+                            <input
+                              value={graphPartitions}
+                              onChange={(e) => setGraphPartitions(e.target.value)}
+                              className="mt-1 w-full bg-slate-900 border border-slate-700 text-[11px] text-slate-200 px-2 py-1"
+                              placeholder="agent, monofs"
+                            />
+                          </label>
+                          <label className="text-[10px] text-slate-500">
+                            Dashboard affected partitions
+                            <input
+                              value={dashboardPartitions}
+                              onChange={(e) => setDashboardPartitions(e.target.value)}
+                              className="mt-1 w-full bg-slate-900 border border-slate-700 text-[11px] text-slate-200 px-2 py-1"
+                              placeholder="agent, monofs"
+                            />
+                          </label>
+                        </div>
+                        <p className="text-[10px] text-slate-500">
+                          Saved graphs are stored in this browser. Use a Dashboard for shared partition-scoped storage:
+                          the server requires maintainer/admin on every listed partition.
+                        </p>
                       </div>
 
                       <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4 space-y-2">
@@ -2984,21 +3167,51 @@ export default function PartitionAssetsPage() {
 
                       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                         <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4 space-y-2">
-                          <h3 className="text-xs font-semibold text-slate-300">Saved Graphs</h3>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-xs font-semibold text-slate-300">Saved Graphs</h3>
+                            <span
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9px] font-bold uppercase tracking-wider text-amber-300"
+                              title="Stored in this browser only. Not shared, permanent, or RBAC-enforced."
+                            >
+                              Local · ad-hoc
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-amber-300/80">
+                            Not permanent or shared. These live in this browser and are not RBAC-enforced.
+                            Promote one to a Dashboard for partition-scoped permanent storage.
+                          </p>
                           {savedGraphs.length === 0 ? (
                             <p className="text-[11px] text-slate-500">No saved graphs yet.</p>
                           ) : (
                             <div className="space-y-2 max-h-64 overflow-y-auto">
                               {savedGraphs.map((graph) => (
                                 <div key={graph.id} className="border border-slate-800 rounded bg-slate-900/60 p-2">
-                                  <p className="text-[11px] text-slate-200 font-medium">{graph.title}</p>
+                                  <div className="flex items-center gap-2">
+                                    <p className="text-[11px] text-slate-200 font-medium flex-1">{graph.title}</p>
+                                    <span
+                                      className="inline-flex items-center px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9px] font-bold uppercase tracking-wider text-amber-300"
+                                      title="Browser-local. Not a permanent shared dashboard."
+                                    >
+                                      Local
+                                    </span>
+                                  </div>
                                   <p className="text-[10px] text-slate-500 truncate font-mono mt-1">{graph.query}</p>
+                                  {graph.partitions.length > 0 && (
+                                    <p className="text-[10px] text-slate-600 mt-1">partitions: {graph.partitions.join(", ")}</p>
+                                  )}
                                   <div className="mt-2 flex items-center gap-2">
                                     <button
                                       onClick={() => void addSavedGraphToBoard(graph)}
                                       className="px-2 py-1 text-[10px] border border-cyan-500/60 text-cyan-300 hover:bg-cyan-500/10"
                                     >
                                       Add to board
+                                    </button>
+                                    <button
+                                      onClick={() => void promoteSavedGraph(graph)}
+                                      className="px-2 py-1 text-[10px] border border-emerald-500/60 text-emerald-300 hover:bg-emerald-500/10"
+                                      title="Create a permanent shared Doctor dashboard from this graph"
+                                    >
+                                      Promote
                                     </button>
                                     <button
                                       onClick={() => deleteSavedGraph(graph.id)}
@@ -3014,15 +3227,37 @@ export default function PartitionAssetsPage() {
                         </div>
 
                         <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-4 space-y-2">
-                          <h3 className="text-xs font-semibold text-slate-300">Saved Dashboards</h3>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-xs font-semibold text-slate-300">Saved Dashboards</h3>
+                            <span
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9px] font-bold uppercase tracking-wider text-amber-300"
+                              title="Stored in this browser only. Not shared, permanent, or RBAC-enforced."
+                            >
+                              Local · ad-hoc
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-amber-300/80">
+                            Browser-local board definitions. Use the Dashboards page for permanent shared storage.
+                          </p>
                           {savedDashboards.length === 0 ? (
                             <p className="text-[11px] text-slate-500">No saved dashboards yet.</p>
                           ) : (
                             <div className="space-y-2 max-h-64 overflow-y-auto">
                               {savedDashboards.map((dash) => (
                                 <div key={dash.id} className="border border-slate-800 rounded bg-slate-900/60 p-2">
-                                  <p className="text-[11px] text-slate-200 font-medium">{dash.name}</p>
+                                  <div className="flex items-center gap-2">
+                                    <p className="text-[11px] text-slate-200 font-medium flex-1">{dash.name}</p>
+                                    <span
+                                      className="inline-flex items-center px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9px] font-bold uppercase tracking-wider text-amber-300"
+                                      title="Browser-local. Not a permanent shared dashboard."
+                                    >
+                                      Local
+                                    </span>
+                                  </div>
                                   <p className="text-[10px] text-slate-500 mt-1">{dash.graphs.length} graph(s)</p>
+                                  {dash.partitions.length > 0 && (
+                                    <p className="text-[10px] text-slate-600 mt-1">partitions: {dash.partitions.join(", ")}</p>
+                                  )}
                                   <div className="mt-2 flex items-center gap-2">
                                     <button
                                       onClick={() => void loadDashboard(dash)}
