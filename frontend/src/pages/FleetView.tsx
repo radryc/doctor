@@ -38,8 +38,10 @@ type Tone = "healthy" | "attention" | "critical" | "unknown";
 interface FleetViewProps {
   partitions: PartitionModel[];
   viewMode: "compact" | "detailed";
+  alertCounts?: Record<string, { firing: number; critical: number }>;
   onSelectPartition: (partition: PartitionModel) => void;
   onSelectHub: (asset: AssetGroup) => void;
+  onOpenAlerts?: (partition: PartitionModel) => void;
 }
 
 function toneFor(health: string | undefined): Tone {
@@ -97,8 +99,10 @@ function healthPercent(partition: PartitionModel): number {
 export default function FleetView({
   partitions,
   viewMode,
+  alertCounts = {},
   onSelectPartition,
   onSelectHub,
+  onOpenAlerts,
 }: FleetViewProps) {
   if (partitions.length === 0) {
     return (
@@ -117,6 +121,10 @@ export default function FleetView({
         const total = Math.max(partition.summary.assetCount, 1);
         const pct = healthPercent(partition);
         const hasTopology = partition.intents.some((intent) => intent.assets.length > 0);
+        const focusAsset = [...partition.intents.flatMap((intent) => intent.assets)].sort((a, b) => {
+          const rank = (status: HealthStatus) => (status === "critical" ? 0 : status === "degraded" ? 1 : 2);
+          return rank(a.status) - rank(b.status);
+        })[0];
 
         return (
           <section
@@ -190,6 +198,45 @@ export default function FleetView({
                 />
               )}
             </div>
+
+            {(alertCounts[partition.id]?.firing ?? 0) > 0 && (
+              <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px]">
+                <span className="flex min-w-0 items-center gap-1.5 text-rose-300">
+                  <AlertTriangle size={12} className="shrink-0" />
+                  <span className="truncate">
+                    {alertCounts[partition.id]?.firing} firing
+                    {(alertCounts[partition.id]?.critical ?? 0) > 0 ? ` · ${alertCounts[partition.id]?.critical} critical` : ""}
+                  </span>
+                </span>
+                {onOpenAlerts && (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenAlerts(partition);
+                    }}
+                    className="shrink-0 rounded border border-rose-400/40 px-1.5 py-0.5 text-[10px] text-rose-200 hover:bg-rose-500/15"
+                  >
+                    Alerts →
+                  </button>
+                )}
+              </div>
+            )}
+
+            {focusAsset && (
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelectHub(focusAsset);
+                  }}
+                  className="rounded border border-accent-blue/40 bg-accent-blue/10 px-2 py-1 text-[10px] font-medium text-accent-blue hover:bg-accent-blue/20"
+                >
+                  Traffic &amp; RTO →
+                </button>
+              </div>
+            )}
 
             <div className="mt-3 grid grid-cols-3 gap-2 text-center">
               <div className="rounded-lg border border-dark-600 bg-dark-900/60 px-2 py-1.5">

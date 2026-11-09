@@ -36,6 +36,35 @@ import type {
 type ViewMode = "graph" | "table" | "json";
 type QueryMode = "range" | "instant";
 type StatusKind = "idle" | "loading" | "ok" | "error";
+type MetricSource = "all" | "doctor" | "aws" | "gcp";
+
+const METRIC_SOURCES: { value: MetricSource; label: string }[] = [
+  { value: "all", label: "All sources" },
+  { value: "doctor", label: "Doctor" },
+  { value: "aws", label: "AWS" },
+  { value: "gcp", label: "GCP" },
+];
+
+// The browser never receives the whole federated catalog: Cloud Monitoring
+// alone exposes tens of thousands of metric names. The backend searches and
+// limits before responding.
+const METRIC_CATALOG_LIMIT = 300;
+
+// Native and CloudWatch metric names are valid PromQL identifiers. GCP names
+// contain dots/slashes, so they must be referenced through __name__.
+const PROMQL_METRIC_NAME = /^[a-zA-Z_:][a-zA-Z0-9_:]*$/;
+
+function metricQueryExpression(name: string): string {
+  if (PROMQL_METRIC_NAME.test(name)) return name;
+  const escaped = name.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  // Non-identifier names are Cloud Monitoring metrics today. Route explicitly
+  // so the query does not fan out to every fallback backend.
+  return `{__name__="${escaped}", source="gcp"}`;
+}
+
+function metricSourceFromParam(value: string | null): MetricSource {
+  return value === "doctor" || value === "aws" || value === "gcp" ? value : "all";
+}
 
 const METRIC_HELPERS = [
   {
@@ -104,14 +133,6 @@ const PREFERRED_METRIC_NAMES: string[] = [
 const QUICK_METRIC_ICONS = [Activity, Gauge, Clock, Sparkles, AlertTriangle] as const;
 const QUICK_METRIC_TONES = ["sky", "emerald", "violet", "amber", "rose"] as const;
 
-function preferredMetricName(names: string[]): string {
-  const available = new Set(names);
-  for (const candidate of PREFERRED_METRIC_NAMES) {
-    if (available.has(candidate)) return candidate;
-  }
-  return names[0] ?? "";
-}
-
 function metricHint(name: string): string {
   for (const group of METRIC_HELPERS) {
     const item = group.items.find((candidate) => candidate.name === name);
@@ -127,14 +148,6 @@ const TONE_CLASS: Record<string, string> = {
   amber: "border-amber-500/30 bg-amber-500/10 text-amber-300",
   emerald: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
 };
-
-const RANGE_PRESETS = [5, 15, 60, 360, 1440] as const;
-
-function formatDateTimeLocal(date: Date): string {
-  if (Number.isNaN(date.getTime())) return formatDateTimeLocal(new Date());
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
 
 function toISOStringOrEmpty(value: string): string {
   const date = new Date(value);
@@ -381,7 +394,9 @@ export default function MetricsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialized = useRef(false);
   const bootstrapped = useRef(false);
-  const autoRan = useRef("");
+  // True once the user has explicitly run a query. Time-range refreshes only
+  // re-run after that point; selecting a partition never auto-runs.
+  const hasRun = useRef(false);
   const lastGlobalRange = useRef("");
 
   const [tenant, setTenant] = useState(searchParams.get("tenant") ?? config.default_tenant ?? "default");
@@ -392,21 +407,26 @@ export default function MetricsPage() {
   const [assetValues, setAssetValues] = useState<string[]>([]);
   const [partitions, setPartitions] = useState<string[]>([]);
   const [metricNames, setMetricNames] = useState<string[]>([]);
+  // Native metric names used for quick cards and the automatic first graph.
+  // Kept separate from the source-filtered catalog so a GCP/AWS selection does
+  // not change what "live metrics in this partition" means.
+  const [quickMetricNames, setQuickMetricNames] = useState<string[]>([]);
+  const quickLoadSeq = useRef(0);
+  const [metricTotal, setMetricTotal] = useState(0);
+  const [metricTruncated, setMetricTruncated] = useState(false);
+  const [metricPartial, setMetricPartial] = useState("");
   const [metricLoading, setMetricLoading] = useState(true);
   const [metricError, setMetricError] = useState("");
   const [metricFilter, setMetricFilter] = useState("");
+  const [metricSearch, setMetricSearch] = useState("");
+  const [metricSource, setMetricSource] = useState<MetricSource>(() =>
+    metricSourceFromParam(searchParams.get("source"))
+  );
+  const metricLoadSeq = useRef(0);
   const [selectedMetric, setSelectedMetric] = useState(searchParams.get("metric") ?? "");
   const [query, setQuery] = useState(searchParams.get("query") ?? searchParams.get("metric") ?? "");
-  const [from, setFrom] = useState(() =>
-    searchParams.get("from")
-      ? formatDateTimeLocal(new Date(searchParams.get("from") || ""))
-      : formatDateTimeLocal(tr.resolve().from)
-  );
-  const [to, setTo] = useState(() =>
-    searchParams.get("to")
-      ? formatDateTimeLocal(new Date(searchParams.get("to") || ""))
-      : formatDateTimeLocal(tr.resolve().to)
-  );
+  const [from, setFrom] = useState(() => tr.resolve().from.toISOString());
+  const [to, setTo] = useState(() => tr.resolve().to.toISOString());
   const [step, setStep] = useState(searchParams.get("step") ?? "30s");
   const [mode, setMode] = useState<QueryMode>((searchParams.get("mode") as QueryMode) || "range");
   const [queryTimeout, setQueryTimeout] = useState(searchParams.get("timeout") ?? "");
@@ -421,27 +441,17 @@ export default function MetricsPage() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [chartMode, setChartMode] = useState<ChartDisplayMode>("line");
   const [labelFilters, setLabelFilters] = useState<MetricLabelFilter[]>([]);
-
-  // Follow the global time picker. The page used to keep an isolated
-  // 60-minute window, so selecting 5m in the top bar still queried one hour.
-  useEffect(() => {
-    const { from: globalFrom, to: globalTo } = tr.resolve();
-    const key = `${globalFrom.getTime()}-${globalTo.getTime()}`;
-    if (!lastGlobalRange.current) {
-      lastGlobalRange.current = key;
-      return;
-    }
-    if (lastGlobalRange.current === key) return;
-    lastGlobalRange.current = key;
-    setFrom(formatDateTimeLocal(globalFrom));
-    setTo(formatDateTimeLocal(globalTo));
-  }, [tr]);
+  // Guards against out-of-order responses: a slower query for a previous time
+  // window must not overwrite the result for the current one.
+  const executeSeq = useRef(0);
 
   const loadMetricNames = useCallback(async (
     targetTenant = tenant,
     targetPartition = partition,
     rangeStart = from,
-    rangeEnd = to
+    rangeEnd = to,
+    search = metricSearch,
+    source = metricSource
   ) => {
     let end = new Date(rangeEnd);
     let start = new Date(rangeStart);
@@ -453,21 +463,53 @@ export default function MetricsPage() {
       tenant: targetTenant,
       start: start.toISOString(),
       end: end.toISOString(),
+      source,
+      limit: String(METRIC_CATALOG_LIMIT),
     });
     if (targetPartition) params.set("partition", targetPartition);
+    if (search.trim()) params.set("q", search.trim());
 
+    const seq = ++metricLoadSeq.current;
     setMetricLoading(true);
     setMetricError("");
     try {
-      const data = await api.getMetricNames(params);
-      setMetricNames(data.data ?? []);
+      const catalog = await api.getMetricCatalog(params);
+      if (seq !== metricLoadSeq.current) return;
+      const names = catalog.data ?? [];
+      setMetricNames(names);
+      setMetricTotal(catalog.total ?? names.length);
+      setMetricTruncated(Boolean(catalog.truncated));
+      setMetricPartial(catalog.partial ?? "");
     } catch (err) {
+      if (seq !== metricLoadSeq.current) return;
       setMetricNames([]);
+      setMetricTotal(0);
+      setMetricTruncated(false);
+      setMetricPartial("");
       setMetricError(err instanceof Error ? err.message : "Metric discovery failed");
     } finally {
-      setMetricLoading(false);
+      if (seq === metricLoadSeq.current) setMetricLoading(false);
     }
-  }, [tenant, partition, from, to]);
+  }, [tenant, partition, from, to, metricSearch, metricSource]);
+
+  // The quick-start cards and auto-selected graph always use native metrics.
+  // This catalog is small and bounded, so it is fetched without a limit.
+  const loadQuickMetricNames = useCallback(async (
+    targetTenant = tenant,
+    targetPartition = partition
+  ) => {
+    const params = new URLSearchParams({ tenant: targetTenant, source: "doctor" });
+    if (targetPartition) params.set("partition", targetPartition);
+    const seq = ++quickLoadSeq.current;
+    try {
+      const catalog = await api.getMetricCatalog(params);
+      if (seq !== quickLoadSeq.current) return;
+      setQuickMetricNames(catalog.data ?? []);
+    } catch {
+      if (seq !== quickLoadSeq.current) return;
+      setQuickMetricNames([]);
+    }
+  }, [tenant, partition]);
 
   useEffect(() => {
     if (loaded && !initialized.current) {
@@ -491,9 +533,20 @@ export default function MetricsPage() {
     };
   }, []);
 
+  // Debounce the catalog search so typing does not hit the federated
+  // providers on every keystroke.
   useEffect(() => {
-    void loadMetricNames(tenant, partition, from, to);
-  }, [tenant, partition, from, to, loadMetricNames]);
+    const timer = window.setTimeout(() => setMetricSearch(metricFilter.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [metricFilter]);
+
+  useEffect(() => {
+    void loadMetricNames(tenant, partition, from, to, metricSearch, metricSource);
+  }, [tenant, partition, from, to, metricSearch, metricSource, loadMetricNames]);
+
+  useEffect(() => {
+    void loadQuickMetricNames(tenant, partition);
+  }, [tenant, partition, loadQuickMetricNames]);
 
   // Canonical identity filters are label dimensions on metric series.
   useEffect(() => {
@@ -533,15 +586,12 @@ export default function MetricsPage() {
     if (metricAsset) next.set("asset", metricAsset);
     if (selectedMetric) next.set("metric", selectedMetric);
     if (query) next.set("query", query);
-    const fromISO = toISOStringOrEmpty(from);
-    const toISO = toISOStringOrEmpty(to);
-    if (fromISO) next.set("from", fromISO);
-    if (toISO) next.set("to", toISO);
     if (step) next.set("step", step);
     next.set("mode", mode);
+    next.set("source", metricSource);
     if (queryTimeout) next.set("timeout", queryTimeout);
     if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
-  }, [tenant, partition, metricIntent, metricAsset, selectedMetric, query, from, to, step, mode, queryTimeout, searchParams, setSearchParams]);
+  }, [tenant, partition, metricIntent, metricAsset, selectedMetric, query, step, mode, metricSource, queryTimeout, searchParams, setSearchParams]);
 
   const execute = useCallback(
     async (
@@ -555,6 +605,8 @@ export default function MetricsPage() {
         from?: string;
         to?: string;
         step?: string;
+        /** Keep the current label filters (time-range refresh of the same query). */
+        keepFilters?: boolean;
       }
     ) => {
       const expr = expression.trim();
@@ -592,7 +644,7 @@ export default function MetricsPage() {
       }
 
       setRequestUrl(`${url}?${params}`);
-      setLabelFilters([]);
+      if (!options?.keepFilters) setLabelFilters([]);
       setStatusKind("loading");
       setStatusMsg(
         queryTimeout
@@ -600,12 +652,15 @@ export default function MetricsPage() {
           : "Executing PromQL query…"
       );
       if (nextMode === "instant") setView("table");
+      hasRun.current = true;
 
+      const seq = ++executeSeq.current;
       try {
         const data =
           nextMode === "range"
             ? await api.queryPrometheusRange(params)
             : await api.queryPrometheus(params);
+        if (seq !== executeSeq.current) return;
         setResponse(data);
         setRawJson(JSON.stringify(data, null, 2));
         const nextStats = resultStats(data);
@@ -614,6 +669,7 @@ export default function MetricsPage() {
           `${data.data.resultType} result: ${nextStats.series} series, ${nextStats.samples} samples.`
         );
       } catch (err) {
+        if (seq !== executeSeq.current) return;
         setResponse(null);
         const message = err instanceof Error ? err.message : "Query failed";
         setRawJson(JSON.stringify({ error: message }, null, 2));
@@ -638,6 +694,27 @@ export default function MetricsPage() {
     void execute(initial);
   }, [execute, searchParams]);
 
+  // The global time picker owns the query window. Once the user has run a
+  // query, changing the window re-runs it; before that, changing the range
+  // only updates the form (no implicit fetch).
+  useEffect(() => {
+    const { from: globalFrom, to: globalTo } = tr.resolve();
+    const key = `${globalFrom.getTime()}-${globalTo.getTime()}-${tr.refreshTick}`;
+    if (!lastGlobalRange.current) {
+      lastGlobalRange.current = key;
+      return;
+    }
+    if (lastGlobalRange.current === key) return;
+    lastGlobalRange.current = key;
+    const nextFrom = globalFrom.toISOString();
+    const nextTo = globalTo.toISOString();
+    setFrom(nextFrom);
+    setTo(nextTo);
+    if (!hasRun.current) return;
+    const expression = query.trim() || (selectedMetric ? metricQueryExpression(selectedMetric) : "");
+    if (expression) void execute(expression, { from: nextFrom, to: nextTo, keepFilters: true });
+  }, [tr, execute, query, selectedMetric]);
+
   const toggleLabelFilter = useCallback((key: string, value: string) => {
     setLabelFilters((previous) => {
       const exists = previous.some((filter) => filter.key === key && filter.value === value);
@@ -658,31 +735,19 @@ export default function MetricsPage() {
     const names = needle
       ? metricNames.filter((name) => name.toLowerCase().includes(needle))
       : metricNames;
-    return names.slice(0, 250);
+    return names.slice(0, METRIC_CATALOG_LIMIT);
   }, [metricNames, metricFilter]);
 
   const quickMetrics = useMemo(() => {
-    const available = new Set(metricNames);
+    // Quick-start cards run a bare metric name; GCP names are not valid
+    // PromQL identifiers and stay in the catalog instead.
+    const simpleNames = quickMetricNames.filter((name) => PROMQL_METRIC_NAME.test(name));
+    const available = new Set(simpleNames);
     const preferred = PREFERRED_METRIC_NAMES.filter((name) => available.has(name));
     const preferredSet = new Set(preferred);
-    const rest = metricNames.filter((name) => !preferredSet.has(name));
+    const rest = simpleNames.filter((name) => !preferredSet.has(name));
     return [...preferred, ...rest].slice(0, 5);
-  }, [metricNames]);
-
-  // Populate the main graph from a metric that actually exists in the selected
-  // partition instead of leaving the page on an empty "Nothing plotted yet".
-  useEffect(() => {
-    if (metricLoading || metricNames.length === 0) return;
-    const key = `${tenant}|${partition}`;
-    if (autoRan.current === key) return;
-    autoRan.current = key;
-    if (query.trim() || selectedMetric.trim()) return;
-    const pick = preferredMetricName(metricNames);
-    if (!pick) return;
-    setSelectedMetric(pick);
-    setQuery(pick);
-    void execute(pick, { partition });
-  }, [execute, metricLoading, metricNames, partition, query, selectedMetric, tenant]);
+  }, [quickMetricNames]);
 
   const stats = resultStats(response);
   const allGraphSeries = useMemo(() => {
@@ -704,12 +769,18 @@ export default function MetricsPage() {
   const rows = tableRows(response, labelFilters);
   const tableRowLimit = 2000;
   const visibleRows = rows.length > tableRowLimit ? rows.slice(0, tableRowLimit) : rows;
-  const activeExpression = query.trim() || selectedMetric.trim();
+  const activeExpression = query.trim() || (selectedMetric ? metricQueryExpression(selectedMetric) : "");
   const currentRange = rangeLabel(from, to);
   const parsedFrom = new Date(from);
   const parsedTo = new Date(to);
   const chartFrom = Number.isNaN(parsedFrom.getTime()) ? new Date(Date.now() - 60 * 60_000) : parsedFrom;
   const chartTo = Number.isNaN(parsedTo.getTime()) ? new Date() : parsedTo;
+  // When the user shifts into the past, "last 5m" is misleading — show the
+  // actual window instead of implying the data is current.
+  const rangeSummary =
+    tr.mode === "absolute"
+      ? `${formatDateTimeFull(chartFrom)} → ${formatDateTimeFull(chartTo)}`
+      : currentRange;
   const activeDescription = selectedMetric
     ? metricHint(selectedMetric)
     : "Custom PromQL expression. Click a legend item to show only that series; click it again (or Ctrl/Cmd-click to toggle) to change the view.";
@@ -719,46 +790,32 @@ export default function MetricsPage() {
   const assetOptions = metricAsset && !assetValues.includes(metricAsset)
     ? [metricAsset, ...assetValues]
     : assetValues;
+  const metricSourceLabel =
+    METRIC_SOURCES.find((source) => source.value === metricSource)?.label ?? "All sources";
 
   const chooseMetric = (metricName: string) => {
+    const expression = metricQueryExpression(metricName);
     setSelectedMetric(metricName);
-    setQuery(metricName);
-    void execute(metricName);
+    setQuery(expression);
+    void execute(expression);
   };
 
   const changePartition = (nextPartition: string) => {
     setPartition(nextPartition);
     setMetricIntent("");
     setMetricAsset("");
-    autoRan.current = "";
-    if (query.trim()) void execute(query.trim(), { partition: nextPartition, intent: "", asset: "" });
   };
 
   const changeIntent = (nextIntent: string) => {
     setMetricIntent(nextIntent);
-    if (query.trim()) void execute(query.trim(), { intent: nextIntent });
   };
 
   const changeAsset = (nextAsset: string) => {
     setMetricAsset(nextAsset);
-    if (query.trim()) void execute(query.trim(), { asset: nextAsset });
   };
 
   const changeMode = (nextMode: QueryMode) => {
     setMode(nextMode);
-    if (query.trim()) void execute(query.trim(), { mode: nextMode });
-  };
-
-  const setQuickRange = (minutes: number) => {
-    tr.setRelative(minutes < 60 ? `${minutes}m` : `${minutes / 60}h`);
-    // Derive both ends from one timestamp so the window is exactly `minutes`
-    // even when the click lands on a minute boundary.
-    const now = new Date();
-    const nextFrom = formatDateTimeLocal(new Date(now.getTime() - minutes * 60_000));
-    const nextTo = formatDateTimeLocal(now);
-    setFrom(nextFrom);
-    setTo(nextTo);
-    if (query.trim()) void execute(query.trim(), { from: nextFrom, to: nextTo });
   };
 
   const copyQuery = () => {
@@ -777,24 +834,24 @@ export default function MetricsPage() {
           <h2>Metrics</h2>
           <p>
             {query
-              ? `${partition || "all partitions"} · ${currentRange} · ${mode === "range" ? "range query" : "instant query"}`
+              ? `${partition || "all partitions"} · ${rangeSummary} · ${mode === "range" ? "range query" : "instant query"}`
               : "Explore live Prometheus-compatible metrics. Pick a partition to narrow the metric catalog and graphs."}
           </p>
         </div>
         <div className="xp-toolbar">
-          <div className="xp-presets" role="group" aria-label="Time range">
-            {RANGE_PRESETS.map((minutes) => (
-              <button
-                key={minutes}
-                type="button"
-                className="xp-preset"
-                onClick={() => setQuickRange(minutes)}
-                title={`Set the query window to the last ${minutes < 60 ? `${minutes} minutes` : `${minutes / 60} hours`}`}
-              >
-                {minutes < 60 ? `${minutes}m` : `${minutes / 60}h`}
-              </button>
-            ))}
-          </div>
+          <label className="filter-label">
+            Source
+            <select
+              className="xp-select"
+              value={metricSource}
+              onChange={(event) => setMetricSource(event.target.value as MetricSource)}
+              title="Which metric catalog to browse"
+            >
+              {METRIC_SOURCES.map((source) => (
+                <option key={source.value} value={source.value}>{source.label}</option>
+              ))}
+            </select>
+          </label>
           <label className="filter-label">
             Partition
             <select
@@ -836,10 +893,27 @@ export default function MetricsPage() {
           </label>
           <button
             type="button"
+            className="rounded-lg bg-accent-blue px-3.5 py-1.5 text-xs font-bold text-white transition-colors hover:bg-accent-blue/85 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => {
+              if (activeExpression) void execute(activeExpression);
+            }}
+            disabled={!activeExpression || statusKind === "loading"}
+            title="Run the current query with the selected source, partition, and time range"
+          >
+            Run
+          </button>
+          <button
+            type="button"
             className="xp-live-btn"
-            onClick={() => void loadMetricNames(tenant, partition)}
+            onClick={() => {
+              void loadMetricNames(tenant, partition);
+              void loadQuickMetricNames(tenant, partition);
+              if (!hasRun.current) return;
+              const expression = query.trim() || (selectedMetric ? metricQueryExpression(selectedMetric) : "");
+              if (expression) void execute(expression, { keepFilters: true });
+            }}
             disabled={metricLoading}
-            title="Reload the metric catalog from Doctor"
+            title="Reload the metric catalog and refresh the current query"
           >
             {metricLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
             {metricLoading ? "Loading…" : "Refresh"}
@@ -866,15 +940,19 @@ export default function MetricsPage() {
           <div className="mb-2 flex items-center gap-2">
             <Sparkles size={14} className="text-amber-300" />
             <h3 className="text-[11px] font-bold uppercase tracking-[0.14em] text-gray-500">
-              Live metrics in this partition
+              Quick metrics
             </h3>
             <span className="text-[10px] text-gray-600">
-              {partition || "all partitions"} · {metricNames.length} metric{metricNames.length === 1 ? "" : "s"} with data
+              {partition || "all partitions"} · {quickMetrics.length} suggested · {metricSourceLabel}
             </span>
           </div>
           {quickMetrics.length === 0 ? (
             <div className="rounded-xl border border-dark-600 bg-dark-800 px-4 py-3 text-xs text-gray-500">
-              {metricLoading ? "Discovering metrics with data…" : "No metrics with data found for this partition in the last 24h."}
+              {metricLoading
+                ? "Discovering metrics with data…"
+                : quickMetricNames.length > 0
+                  ? "Quick cards show native/CloudWatch identifiers only — pick a metric from the catalog below."
+                  : "No metrics with data found for this partition in the last 24h."}
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
@@ -909,7 +987,9 @@ export default function MetricsPage() {
                 <p className="mt-0.5 text-[11px] text-gray-500">
                   {metricLoading
                     ? "Discovering metrics…"
-                    : `${metricNames.length} metric${metricNames.length === 1 ? "" : "s"} with data in the selected range`}
+                    : `${metricNames.length}${metricTruncated ? ` of ${metricTotal}` : ""} metric${
+                        metricTotal === 1 ? "" : "s"
+                      } · ${metricSourceLabel}`}
                 </p>
               </div>
               {metricLoading && <Loader2 size={15} className="animate-spin text-gray-500" />}
@@ -920,9 +1000,20 @@ export default function MetricsPage() {
                 type="text"
                 value={metricFilter}
                 onChange={(event) => setMetricFilter(event.target.value)}
-                placeholder="Search metric names…"
+                placeholder="Search metric names… (e.g. guardian_, run.)"
                 className="w-full rounded-lg border border-dark-600 bg-dark-900 py-1.5 pl-8 pr-3 text-xs text-gray-200 placeholder:text-gray-600 focus:border-accent-blue focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
               />
+              {metricTruncated && (
+                <p className="mt-1.5 text-[10px] leading-relaxed text-gray-600">
+                  Showing the first {metricNames.length} of {metricTotal} names — refine the search or pick a
+                  source to narrow the catalog.
+                </p>
+              )}
+              {metricPartial && (
+                <p className="mt-1.5 text-[10px] leading-relaxed text-amber-300/90" title={metricPartial}>
+                  Some sources failed: {metricPartial}
+                </p>
+              )}
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -1066,50 +1157,12 @@ export default function MetricsPage() {
                     </button>
                   </div>
                   <label className="filter-label">
-                    From
-                    <input
-                      type="datetime-local"
-                      value={from}
-                      onChange={(event) => {
-                        const value = event.target.value;
-                        setFrom(value);
-                        const nextFrom = new Date(value);
-                        const currentTo = new Date(to);
-                        if (
-                          !Number.isNaN(nextFrom.getTime()) &&
-                          !Number.isNaN(currentTo.getTime()) &&
-                          nextFrom < currentTo
-                        ) {
-                          tr.setAbsolute(nextFrom, currentTo);
-                        }
-                      }}
-                      disabled={mode === "instant"}
-                    />
-                  </label>
-                  <label className="filter-label">
-                    To
-                    <input
-                      type="datetime-local"
-                      value={to}
-                      onChange={(event) => {
-                        const value = event.target.value;
-                        setTo(value);
-                        const currentFrom = new Date(from);
-                        const nextTo = new Date(value);
-                        if (
-                          !Number.isNaN(currentFrom.getTime()) &&
-                          !Number.isNaN(nextTo.getTime()) &&
-                          currentFrom < nextTo
-                        ) {
-                          tr.setAbsolute(currentFrom, nextTo);
-                        }
-                      }}
-                    />
-                  </label>
-                  <label className="filter-label">
                     Step
                     <input value={step} onChange={(event) => setStep(event.target.value)} disabled={mode === "instant"} />
                   </label>
+                  <span className="text-[11px] text-gray-500">
+                    Window follows the global time picker in the top bar.
+                  </span>
                 </div>
               )}
 
@@ -1176,8 +1229,8 @@ export default function MetricsPage() {
                     <Activity size={22} className="text-gray-600" />
                     <p className="text-sm font-medium text-gray-300">Nothing plotted yet</p>
                     <p className="max-w-md text-xs leading-relaxed text-gray-500">
-                      Pick one of the quick starts above, choose a metric from the catalog, or type a PromQL expression.
-                      Selecting a metric now runs it automatically.
+                      Select a source and partition, pick a quick metric or a name from the catalog, then press Run.
+                      Nothing is queried until you run it.
                     </p>
                   </div>
                 ) : view === "graph" ? (

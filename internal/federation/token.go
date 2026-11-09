@@ -149,9 +149,10 @@ type GuardianTokenResolver struct {
 	cacheTTL    time.Duration
 	negativeTTL time.Duration
 
-	mu       sync.Mutex
-	cache    map[string]guardianTokenEntry
-	inflight map[string]chan struct{}
+	mu         sync.Mutex
+	cache      map[string]guardianTokenEntry
+	inflight   map[string]chan struct{}
+	generation uint64
 }
 
 type guardianTokenEntry struct {
@@ -213,19 +214,34 @@ func (r *GuardianTokenResolver) Resolve(ctx context.Context, target Target) (str
 	}
 	ch := make(chan struct{})
 	r.inflight[name] = ch
+	generation := r.generation
 	r.mu.Unlock()
 
-	token, fetchErr := r.fetch(ctx, name)
-	expires := time.Now().Add(r.cacheTTL)
-	if fetchErr != nil {
-		expires = time.Now().Add(r.negativeTTL)
-	}
+	var (
+		token     string
+		fetchErr  error
+		completed bool
+	)
+	// Clean up the inflight entry even if fetch panics: otherwise every waiter
+	// blocks on this channel until its own context expires.
+	defer func() {
+		r.mu.Lock()
+		// A 401 may have invalidated this token while the fetch was running.
+		// Do not resurrect a token from an older generation.
+		if completed && r.generation == generation {
+			expires := time.Now().Add(r.cacheTTL)
+			if fetchErr != nil {
+				expires = time.Now().Add(r.negativeTTL)
+			}
+			r.cache[name] = guardianTokenEntry{token: token, err: fetchErr, expires: expires}
+		}
+		delete(r.inflight, name)
+		close(ch)
+		r.mu.Unlock()
+	}()
 
-	r.mu.Lock()
-	r.cache[name] = guardianTokenEntry{token: token, err: fetchErr, expires: expires}
-	delete(r.inflight, name)
-	close(ch)
-	r.mu.Unlock()
+	token, fetchErr = r.fetch(ctx, name)
+	completed = true
 	return token, fetchErr
 }
 
@@ -235,6 +251,7 @@ func (r *GuardianTokenResolver) Invalidate(target Target) {
 		return
 	}
 	r.mu.Lock()
+	r.generation++
 	delete(r.cache, name)
 	r.mu.Unlock()
 }
@@ -337,9 +354,10 @@ type BundleTokenResolver struct {
 	// was published encrypted.
 	Key []byte
 
-	mu      sync.Mutex
-	shards  map[int]bundleTokenShard
-	loading map[int]chan struct{}
+	mu         sync.Mutex
+	shards     map[int]bundleTokenShard
+	loading    map[int]chan struct{}
+	generation uint64
 }
 
 type bundleTokenShard struct {
@@ -419,16 +437,29 @@ func (r *BundleTokenResolver) Resolve(ctx context.Context, target Target) (strin
 	}
 	ch := make(chan struct{})
 	r.loading[shard] = ch
+	generation := r.generation
 	r.mu.Unlock()
 
-	tokens, loadErr := r.loadShard(ctx, shard)
-	r.mu.Lock()
-	if loadErr == nil {
-		r.shards[shard] = bundleTokenShard{tokens: tokens, expires: time.Now().Add(r.cacheTTL)}
-	}
-	delete(r.loading, shard)
-	close(ch)
-	r.mu.Unlock()
+	var (
+		tokens    map[string]string
+		loadErr   error
+		completed bool
+	)
+	// Clean up the inflight entry even if loadShard panics: otherwise every
+	// waiter blocks on this channel until its own context expires.
+	defer func() {
+		r.mu.Lock()
+		// Do not repopulate a shard invalidated while the load was in flight.
+		if completed && loadErr == nil && r.generation == generation {
+			r.shards[shard] = bundleTokenShard{tokens: tokens, expires: time.Now().Add(r.cacheTTL)}
+		}
+		delete(r.loading, shard)
+		close(ch)
+		r.mu.Unlock()
+	}()
+
+	tokens, loadErr = r.loadShard(ctx, shard)
+	completed = true
 	if loadErr != nil {
 		return "", loadErr
 	}
@@ -442,6 +473,7 @@ func (r *BundleTokenResolver) Resolve(ctx context.Context, target Target) (strin
 func (r *BundleTokenResolver) Invalidate(target Target) {
 	shard := r.shardFor(target.ID)
 	r.mu.Lock()
+	r.generation++
 	delete(r.shards, shard)
 	r.mu.Unlock()
 }

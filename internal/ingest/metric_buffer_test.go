@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -86,6 +87,91 @@ func TestMetricBufferFlushPendingChunksByMaxBytes(t *testing.T) {
 	}
 }
 
+type partialMetricWriter struct {
+	failAt  int
+	calls   int
+	written []string
+}
+
+func (w *partialMetricWriter) WriteTraces(context.Context, []segment.TraceRecord) error {
+	return nil
+}
+
+func (w *partialMetricWriter) WriteLogs(context.Context, []segment.LogRecord) error {
+	return nil
+}
+
+func (w *partialMetricWriter) WriteMetrics(_ context.Context, records []segment.MetricPointRecord) error {
+	w.calls++
+	if w.failAt > 0 && w.calls == w.failAt {
+		w.failAt = 0
+		return fmt.Errorf("injected chunk failure")
+	}
+	for _, record := range records {
+		w.written = append(w.written, record.MetricName)
+	}
+	return nil
+}
+
+func (w *partialMetricWriter) WriteGuardianEvents(context.Context, []segment.GuardianEvent) error {
+	return nil
+}
+
+func TestMetricBufferPartialChunkFailureRetriesOnlyRemainder(t *testing.T) {
+	log, err := wal.NewMetricBatchLog(filepath.Join(t.TempDir(), "metric-wal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := []segment.MetricPointRecord{
+		testMetricRecord("metric_a", 1),
+		testMetricRecord("metric_b", 2),
+		testMetricRecord("metric_c", 3),
+		testMetricRecord("metric_d", 4),
+	}
+	recordBytes := estimateMetricRecordSize(records[0])
+	writer := &partialMetricWriter{failAt: 2}
+	buffer := NewMetricBuffer(writer, log, MetricBufferConfig{
+		FlushInterval: time.Second,
+		// Four batches fit in one take; the flush splits them into two-record
+		// chunks, so the writer accepts chunk 1 and fails on chunk 2.
+		MaxBytes: 4 * recordBytes,
+	})
+	for _, record := range records {
+		if err := buffer.Append(context.Background(), []segment.MetricPointRecord{record}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := buffer.flushPending(context.Background()); err == nil {
+		t.Fatal("flushPending() succeeded, want injected failure")
+	}
+	if got := writer.written; len(got) != 2 || got[0] != "metric_a" || got[1] != "metric_b" {
+		t.Fatalf("first flush wrote %v, want metric_a metric_b", got)
+	}
+	if got := buffer.Stats().PendingBatches; got != 2 {
+		t.Fatalf("pending batches after failure = %d, want 2", got)
+	}
+
+	if err := buffer.flushPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := writer.written; len(got) != 4 {
+		t.Fatalf("total written = %v, want 4 records", got)
+	}
+	seen := map[string]int{}
+	for _, name := range writer.written {
+		seen[name]++
+	}
+	for _, record := range records {
+		if seen[record.MetricName] != 1 {
+			t.Fatalf("record %s written %d times, want 1", record.MetricName, seen[record.MetricName])
+		}
+	}
+	if got := log.Count(); got != 0 {
+		t.Fatalf("metric wal count after retry = %d, want 0", got)
+	}
+}
+
 func TestMetricBufferReplayFlushesIncrementally(t *testing.T) {
 	writer := &metricBufferTestWriter{}
 	log, err := wal.NewMetricBatchLog(filepath.Join(t.TempDir(), "metric-wal"))
@@ -151,4 +237,3 @@ func TestMetricBufferReplaySplitsSingleOversizedBatch(t *testing.T) {
 		t.Fatalf("metric wal count after replay = %d, want 0", got)
 	}
 }
-

@@ -20,11 +20,12 @@ type targetBreaker struct {
 	failures    int
 	openUntil   time.Time
 	halfOpen    bool
+	probeUntil  time.Time
 	lastError   string
 	lastErrorAt time.Time
 }
 
-func (b *targetBreaker) allow(now time.Time) bool {
+func (b *targetBreaker) allow(now time.Time, probeTimeout time.Duration) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.openUntil.IsZero() {
@@ -34,11 +35,19 @@ func (b *targetBreaker) allow(now time.Time) bool {
 		return false
 	}
 	// Cooldown elapsed. Allow exactly one half-open probe; concurrent callers
-	// wait for the probe result.
+	// wait for the probe result. If the previous probe never reported back
+	// (panic or a forgotten code path), expire it so the target can recover.
 	if b.halfOpen {
-		return false
+		if now.Before(b.probeUntil) {
+			return false
+		}
+		b.halfOpen = false
+	}
+	if probeTimeout <= 0 {
+		probeTimeout = 30 * time.Second
 	}
 	b.halfOpen = true
+	b.probeUntil = now.Add(probeTimeout)
 	return true
 }
 
@@ -48,6 +57,7 @@ func (b *targetBreaker) recordSuccess() {
 	b.failures = 0
 	b.openUntil = time.Time{}
 	b.halfOpen = false
+	b.probeUntil = time.Time{}
 	b.lastError = ""
 	b.lastErrorAt = time.Time{}
 }
@@ -67,6 +77,7 @@ func (b *targetBreaker) recordFailure(now time.Time, threshold int, cooldown tim
 	if b.failures >= threshold || b.halfOpen {
 		b.openUntil = now.Add(cooldown)
 		b.halfOpen = false
+		b.probeUntil = time.Time{}
 	}
 }
 
@@ -74,6 +85,7 @@ func (b *targetBreaker) abortProbe() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.halfOpen = false
+	b.probeUntil = time.Time{}
 }
 
 type breakerSnapshot struct {
@@ -112,7 +124,28 @@ func (m *Manager) breakerFor(targetID string) *targetBreaker {
 }
 
 func (m *Manager) breakerAllow(targetID string, now time.Time) bool {
-	return m.breakerFor(targetID).allow(now)
+	attempts := m.maxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	probeTimeout := m.timeout * time.Duration(attempts)
+	return m.breakerFor(targetID).allow(now, probeTimeout)
+}
+
+// pruneBreakers drops breaker state for targets that no longer exist in the
+// active catalog. Without this the map grows forever as discovered pushers
+// come and go.
+func (m *Manager) pruneBreakers(valid func(string) bool) {
+	if m == nil || valid == nil {
+		return
+	}
+	m.breakerMu.Lock()
+	defer m.breakerMu.Unlock()
+	for id := range m.breakers {
+		if !valid(id) {
+			delete(m.breakers, id)
+		}
+	}
 }
 
 func (m *Manager) noteTargetSuccess(targetID string) {

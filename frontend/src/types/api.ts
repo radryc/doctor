@@ -150,6 +150,15 @@ export type PrometheusBuildInfoResponse = PrometheusEnvelope<{
 
 export type PrometheusLabelValuesResponse = PrometheusEnvelope<string[]>;
 
+/** Metric-name discovery with server-side search/limit metadata. */
+export interface MetricNameCatalog {
+  data: string[];
+  total: number;
+  truncated: boolean;
+  /** Partial-failure details from X-Doctor-Partial (e.g. an unhealthy source). */
+  partial: string;
+}
+
 export interface PrometheusSeriesMetric {
   [key: string]: string;
 }

@@ -68,6 +68,8 @@ interface TimeRangeState {
   /** Force an immediate refresh (increments the refresh counter). */
   refresh(): void;
   refreshTick: number;
+  /** True once the user explicitly picked or shifted a range. */
+  userSelected: boolean;
 }
 
 const TimeRangeContext = createContext<TimeRangeState | null>(null);
@@ -89,6 +91,7 @@ export function TimeRangeProvider({ children, defaultPreset = "1h" }: Props) {
   const [absolute, setAbsoluteState] = useState<AbsoluteTimeRange | null>(null);
   const [autoRefresh, setAutoRefreshState] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
+  const [userSelected, setUserSelected] = useState(false);
   const refreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Auto-refresh loop
@@ -131,6 +134,7 @@ export function TimeRangeProvider({ children, defaultPreset = "1h" }: Props) {
   }, [resolved]);
 
   const setRelative = useCallback((preset: string) => {
+    setUserSelected(true);
     setRelativePreset(preset);
     setMode("relative");
     setAbsoluteState(null);
@@ -139,6 +143,7 @@ export function TimeRangeProvider({ children, defaultPreset = "1h" }: Props) {
   }, []);
 
   const setAbsolute = useCallback((from: Date, to: Date) => {
+    setUserSelected(true);
     setAbsoluteState({ from, to });
     setMode("absolute");
   }, []);
@@ -187,11 +192,12 @@ export function TimeRangeProvider({ children, defaultPreset = "1h" }: Props) {
       setAutoRefresh,
       refresh,
       refreshTick,
+      userSelected,
     }),
     [
       mode, relativePreset, absolute, autoRefresh, resolve, rangeString,
       stepInterval, setRelative, setAbsolute, shiftBack, shiftForward,
-      zoomOut, setAutoRefresh, refresh, refreshTick,
+      zoomOut, setAutoRefresh, refresh, refreshTick, userSelected,
     ]
   );
 

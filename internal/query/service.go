@@ -49,6 +49,8 @@ type Service struct {
 	logEngine        LogEngineBackend
 	aws              proxy.AWSClient
 	awsViaRouter     bool
+	gcp              proxy.GCPClient
+	gcpViaRouter     bool
 	proxyRouter      *proxy.Router
 	guardianClient   *http.Client
 	rulesProxy       *httputil.ReverseProxy
@@ -155,6 +157,21 @@ func (s *Service) SetAWSBackend(client proxy.AWSClient) {
 // and once through the direct Service.aws fallback).
 func (s *Service) SetAWSViaRouter(viaRouter bool) {
 	s.awsViaRouter = viaRouter
+}
+
+// SetGCPBackend configures the optional GCP (Cloud Monitoring/Logging/Trace)
+// federation backend served by guardian-pusher-gcp.
+func (s *Service) SetGCPBackend(client proxy.GCPClient) {
+	if client == nil {
+		s.gcp = nil
+		return
+	}
+	s.gcp = client
+}
+
+// SetGCPViaRouter records that proxyRouter already owns the GCP backend.
+func (s *Service) SetGCPViaRouter(viaRouter bool) {
+	s.gcpViaRouter = viaRouter
 }
 
 type federationStatusProvider interface {
@@ -868,6 +885,13 @@ func (s *Service) handleSentinelProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			cloned.Header.Set("X-Doctor-Partition-Access", partition)
+		} else if s.policyGate != nil {
+			// Tenant-wide alert summaries (used by Fleet) should include every
+			// partition the caller can see, not just the ones named in the URL.
+			visible, _ := s.policyGate.VisiblePartitions(identity, policy.SignalMetrics)
+			if len(visible) > 0 {
+				cloned.Header.Set("X-Doctor-Partition-Access", strings.Join(visible, ","))
+			}
 		}
 	}
 	s.sentinelProxy.ServeHTTP(w, cloned)
@@ -1055,11 +1079,11 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject broad live-AWS searches before any fan-out. Native/local queries
-	// are unaffected; this only applies when the query or log-group picker
-	// targets AWS.
-	if _, awsMode := proxy.AWSQueryMode(query); awsMode != proxy.AWSQueryNone || logGroup != "" {
+	// and GCP log-name selectors are unaffected.
+	gcpLogGroup := isGCPLogName(logGroup)
+	if _, awsMode := proxy.AWSQueryMode(query); awsMode != proxy.AWSQueryNone || (logGroup != "" && !gcpLogGroup) {
 		groups := []string(nil)
-		if logGroup != "" {
+		if logGroup != "" && !gcpLogGroup {
 			groups = []string{logGroup}
 		}
 		if err := s.checkAWSLogScope(r.Context(), query, groups); err != nil {
@@ -1088,7 +1112,7 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			// CloudWatch and merge the records. The CloudWatch log-group picker
 			// is an AWS selector too, so it must not depend on the free-text
 			// query containing source="aws".
-			if logGroup != "" {
+			if logGroup != "" && !gcpLogGroup {
 				plan := lokiPlan{selector: fmt.Sprintf(`{source="aws", aws_log_group=%q}`, logGroup)}
 				if awsLogs := s.queryAWSLogsForLoki(r.Context(), tenant, plan, from, to, limit); len(awsLogs) > 0 {
 					records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
@@ -1327,10 +1351,20 @@ func (s *Service) fetchAllGuardianTopologies(ctx context.Context) ([]augmentedTo
 	}
 	ch := make(chan result, len(partitions))
 	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
 
+loop:
 	for _, p := range partitions {
+		// Acquire the slot before spawning so a large fleet cannot create one
+		// blocked goroutine per partition.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break loop
+		}
+		wg.Add(1)
 		go func(part string) {
-			sem <- struct{}{}
+			defer wg.Done()
 			defer func() { <-sem }()
 			topo, err := s.fetchGuardianTopology(ctx, part)
 			if err != nil || topo == nil {
@@ -1347,11 +1381,12 @@ func (s *Service) fetchAllGuardianTopologies(ctx context.Context) ([]augmentedTo
 			ch <- result{nodes: nodes, edges: topo.Edges}
 		}(p)
 	}
+	wg.Wait()
+	close(ch)
 
 	var allNodes []augmentedTopologyNode
 	var allEdges []guardianTopologyEdge
-	for range partitions {
-		r := <-ch
+	for r := range ch {
 		allNodes = append(allNodes, r.nodes...)
 		allEdges = append(allEdges, r.edges...)
 	}
@@ -1465,32 +1500,55 @@ func (s *Service) handleGuardianEvents(w http.ResponseWriter, r *http.Request) {
 		Revision  string `json:"revision,omitempty"`
 	}
 
+	// Fetch partition histories concurrently, bounded so a large fleet does not
+	// turn one UI request into hundreds of serial Guardian round trips.
+	perPartition := make([][]outEvent, len(partitions))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+loop:
+	for i, p := range partitions {
+		select {
+		case sem <- struct{}{}:
+		case <-r.Context().Done():
+			break loop
+		}
+		wg.Add(1)
+		go func(index int, part string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			hist, err := s.fetchGuardianHistory(r.Context(), part)
+			if err != nil || hist == nil {
+				return
+			}
+			events := make([]outEvent, 0, len(hist.Events))
+			for _, e := range hist.Events {
+				if e.Timestamp.Before(cutoff) {
+					continue
+				}
+				if intent != "" && e.Intent != "" && e.Intent != intent {
+					continue
+				}
+				events = append(events, outEvent{
+					Tenant:    tenant,
+					Partition: part,
+					Intent:    e.Intent,
+					Asset:     e.Asset,
+					Kind:      e.Kind,
+					Timestamp: e.Timestamp.UTC().Format(time.RFC3339),
+					Status:    e.Status,
+					Message:   e.Message,
+					TaskID:    e.TaskID,
+					Revision:  e.DeploymentRevision,
+				})
+			}
+			perPartition[index] = events
+		}(i, p)
+	}
+	wg.Wait()
+
 	var all []outEvent
-	for _, p := range partitions {
-		hist, err := s.fetchGuardianHistory(r.Context(), p)
-		if err != nil || hist == nil {
-			continue
-		}
-		for _, e := range hist.Events {
-			if e.Timestamp.Before(cutoff) {
-				continue
-			}
-			if intent != "" && e.Intent != "" && e.Intent != intent {
-				continue
-			}
-			all = append(all, outEvent{
-				Tenant:    tenant,
-				Partition: p,
-				Intent:    e.Intent,
-				Asset:     e.Asset,
-				Kind:      e.Kind,
-				Timestamp: e.Timestamp.UTC().Format(time.RFC3339),
-				Status:    e.Status,
-				Message:   e.Message,
-				TaskID:    e.TaskID,
-				Revision:  e.DeploymentRevision,
-			})
-		}
+	for _, events := range perPartition {
+		all = append(all, events...)
 	}
 
 	// Sort newest first.
@@ -1935,7 +1993,7 @@ func (s *Service) buildLogServices(ctx context.Context, tenant, partition, inclu
 		}
 		addIdentity(part, "", "", svc.Name)
 	}
-	logGroups := make([]string, 0)
+	logGroupSet := map[string]struct{}{}
 	if strings.Contains(include, "aws") && s.awsDiscoveryReady(ctx) {
 		awsCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
@@ -1950,9 +2008,21 @@ func (s *Service) buildLogServices(ctx context.Context, tenant, partition, inclu
 			if _, allowed := s.policyPartitionAllowed(ctx, "", "", groupPartition, policy.SignalLogs); !allowed {
 				continue
 			}
-			logGroups = append(logGroups, group)
+			logGroupSet[group] = struct{}{}
 		}
 	}
+	if s.gcpDiscoveryReady() {
+		gcpCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if names, err := s.gcp.ListLogNames(gcpCtx); err == nil {
+			for _, name := range names {
+				if name != "" {
+					logGroupSet[name] = struct{}{}
+				}
+			}
+		}
+	}
+	logGroups := sortedStrings(logGroupSet)
 	sort.Strings(components)
 	sort.Strings(partitions)
 	sort.Strings(logGroups)

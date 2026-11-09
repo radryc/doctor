@@ -476,6 +476,18 @@ func TestLogSearchPushdownUsesAWSLogGroup(t *testing.T) {
 	}
 }
 
+func TestLogSearchPushdownUsesGCPLogName(t *testing.T) {
+	for _, name := range []string{"run.googleapis.com/stdout", "cloudaudit.googleapis.com%2Factivity"} {
+		pushdown := logSearchPushdown("", "", name, signalIdentity{})
+		if !strings.Contains(pushdown.Selector, `source="gcp"`) || !strings.Contains(pushdown.Selector, `gcp_log_name="`+name+`"`) {
+			t.Fatalf("selector = %q, want GCP log name", pushdown.Selector)
+		}
+		if strings.Contains(pushdown.Selector, `aws_log_group`) {
+			t.Fatalf("selector = %q, should not use an AWS log group", pushdown.Selector)
+		}
+	}
+}
+
 func TestLogSearchPushdownIncludesCanonicalIdentity(t *testing.T) {
 	pushdown := logSearchPushdown("", "", "", signalIdentity{
 		Partition: "monofs",

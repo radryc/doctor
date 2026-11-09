@@ -134,12 +134,10 @@ func (b *MetricBuffer) Append(ctx context.Context, records []segment.MetricPoint
 	if shouldFlush {
 		b.signalFlush()
 	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
-	}
+	// The batch is already durably staged in the WAL. Reporting a late
+	// cancellation here would make the caller retry data that was accepted and
+	// produce duplicate records.
+	return nil
 }
 
 // Replay flushes any batches recovered from the WAL after a crash.
@@ -153,7 +151,7 @@ func (b *MetricBuffer) Replay(ctx context.Context) error {
 		if len(replayBatches) == 0 {
 			return nil
 		}
-		if err := b.flushBatches(ctx, replayBatches); err != nil {
+		if _, err := b.flushBatches(ctx, replayBatches); err != nil {
 			return err
 		}
 		replayBatches = replayBatches[:0]
@@ -182,7 +180,7 @@ func (b *MetricBuffer) Replay(ctx context.Context) error {
 	if err := flushReplay(); err != nil {
 		return err
 	}
-	return b.log.Replace(nil)
+	return b.log.Retire(nil)
 }
 
 // Stats returns current buffer statistics.
@@ -234,26 +232,29 @@ func (b *MetricBuffer) flushPending(ctx context.Context) error {
 		return nil
 	}
 	b.flushing = true
-	batches, flushedBytes := b.takeFlushBatchesLocked()
+	batches, _ := b.takeFlushBatchesLocked()
 	b.mu.Unlock()
 
-	err := b.flushBatches(ctx, batches)
+	written, err := b.flushBatches(ctx, batches)
 
 	b.mu.Lock()
 	b.flushing = false
 	if err != nil {
-		restored := make([]wal.MetricBatch, 0, len(batches)+len(b.batches))
-		restored = append(restored, batches...)
+		// Chunks before the failure were accepted by the backend. Requeue only
+		// the unwritten records instead of re-sending the whole batch set.
+		pending, pendingBytes := trimMetricBatches(batches, written)
+		restored := make([]wal.MetricBatch, 0, len(pending)+len(b.batches))
+		restored = append(restored, pending...)
 		restored = append(restored, b.batches...)
 		b.batches = restored
-		b.byteCount += flushedBytes
+		b.byteCount += pendingBytes
 		b.mu.Unlock()
 		return err
 	}
 
 	remaining := append([]wal.MetricBatch(nil), b.batches...)
 	hasMore := len(remaining) > 0
-	if err := b.log.Replace(remaining); err != nil {
+	if err := b.log.Retire(remaining); err != nil {
 		b.mu.Unlock()
 		return err
 	}
@@ -297,7 +298,10 @@ func (b *MetricBuffer) takeFlushBatchesLocked() ([]wal.MetricBatch, int) {
 	return selected, bytes
 }
 
-func (b *MetricBuffer) flushBatches(ctx context.Context, batches []wal.MetricBatch) error {
+// flushBatches writes the merged records in bounded chunks and reports how
+// many records were accepted before an error, so the caller can retry only the
+// remainder.
+func (b *MetricBuffer) flushBatches(ctx context.Context, batches []wal.MetricBatch) (int, error) {
 	total := 0
 	for _, batch := range batches {
 		total += len(batch.Records)
@@ -306,13 +310,46 @@ func (b *MetricBuffer) flushBatches(ctx context.Context, batches []wal.MetricBat
 	for _, batch := range batches {
 		records = append(records, batch.Records...)
 	}
+	written := 0
 	for _, chunk := range splitMetricRecords(records, b.metricFlushChunkBytes()) {
 		if err := b.writer.WriteMetrics(ctx, chunk); err != nil {
-			return fmt.Errorf("flush metric buffer: %w", err)
+			return written, fmt.Errorf("flush metric buffer: %w", err)
 		}
+		written += len(chunk)
 	}
 	b.flushes.Add(1)
-	return nil
+	return written, nil
+}
+
+// trimMetricBatches removes the first written records from the batch list,
+// preserving the original batch IDs for the partially written batch.
+func trimMetricBatches(batches []wal.MetricBatch, written int) ([]wal.MetricBatch, int) {
+	if written <= 0 {
+		return batches, metricBatchesBytes(batches)
+	}
+	out := make([]wal.MetricBatch, 0, len(batches))
+	bytes := 0
+	for _, batch := range batches {
+		if written >= len(batch.Records) {
+			written -= len(batch.Records)
+			continue
+		}
+		if written > 0 {
+			batch.Records = batch.Records[written:]
+			written = 0
+		}
+		out = append(out, batch)
+		bytes += estimateMetricBatchSize(batch)
+	}
+	return out, bytes
+}
+
+func metricBatchesBytes(batches []wal.MetricBatch) int {
+	total := 0
+	for _, batch := range batches {
+		total += estimateMetricBatchSize(batch)
+	}
+	return total
 }
 
 func (b *MetricBuffer) metricFlushChunkBytes() int {

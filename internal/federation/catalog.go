@@ -441,3 +441,28 @@ func dedupeStrings(values []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// FilterProvider returns a catalog containing only targets for one provider.
+// It is used to run one manager per provider while keeping a single shared
+// snapshot.
+func (c *Catalog) FilterProvider(provider string) *Catalog {
+	if c == nil {
+		return nil
+	}
+	provider = normalizeProvider(provider)
+	targets := c.Targets()
+	filtered := make([]Target, 0, len(targets))
+	for _, target := range targets {
+		if normalizeProvider(target.Provider) == provider {
+			filtered = append(filtered, target)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	catalog, err := NewCatalog(filtered, c.Version())
+	if err != nil {
+		return nil
+	}
+	return catalog
+}

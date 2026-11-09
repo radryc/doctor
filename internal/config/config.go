@@ -87,12 +87,16 @@ type QueryConfig struct {
 	GuardianAPIURL      string
 	DefaultPartition    string
 	MonoFSLogEngineAddr string
+	MonoFSToken         string
 	RulesURL            string
 	SentinelURL         string
 	RulesAPIToken       string
 	AWSEnabled          bool
 	AWSBackendURL       string
 	AWSBackendToken     string
+	GCPEnabled          bool
+	GCPBackendURL       string
+	GCPBackendToken     string
 
 	FederationEnabled              bool
 	FederationCatalogFile          string
@@ -232,25 +236,29 @@ func LoadRules(service string) RulesConfig {
 
 // SentinelConfig holds doctor-sentinel settings.
 type SentinelConfig struct {
-	Enabled             bool
-	HTTPAddr            string
-	QueryURL            string
-	QueryToken          string
-	StoreRoot           string
-	DefaultTenant       string
-	MonoFSLogEngineAddr string
-	MonoFSToken         string
-	MonoFSClientID      string
-	GuardianHMACSecret  string
-	ServiceToken        string
-	AuthAllowAll        bool
-	DeliveryEnabled     bool
-	PollInterval        time.Duration
-	EvalShards          int
-	ShardIndex          int
-	LeaseTTL            time.Duration
-	LeaseRenew          time.Duration
-	RulerID             string
+	Enabled              bool
+	HTTPAddr             string
+	QueryURL             string
+	QueryToken           string
+	StoreRoot            string
+	DefaultTenant        string
+	MonoFSLogEngineAddr  string
+	MonoFSToken          string
+	MonoFSClientID       string
+	GuardianHMACSecret   string
+	GuardianEnabled      bool
+	GuardianURL          string
+	GuardianToken        string
+	GuardianPollInterval time.Duration
+	ServiceToken         string
+	AuthAllowAll         bool
+	DeliveryEnabled      bool
+	PollInterval         time.Duration
+	EvalShards           int
+	ShardIndex           int
+	LeaseTTL             time.Duration
+	LeaseRenew           time.Duration
+	RulerID              string
 
 	AWSEnabled        bool
 	AWSURL            string
@@ -258,6 +266,15 @@ type SentinelConfig struct {
 	AWSPollInterval   time.Duration
 	AWSRegions        []string
 	AWSAlarmSelection string
+
+	GCPEnabled      bool
+	GCPURL          string
+	GCPToken        string
+	GCPPollInterval time.Duration
+	GCPProject      string
+	GCPRegion       string
+	GCPPartition    string
+	GCPPolicy       string
 }
 
 // LoadSentinel loads the doctor-sentinel configuration from the environment.
@@ -271,25 +288,29 @@ func LoadSentinel(service string) SentinelConfig {
 		}
 	}
 	return SentinelConfig{
-		Enabled:             envBool("DOCTOR_SENTINEL_ENABLED", true),
-		HTTPAddr:            envString("DOCTOR_SENTINEL_HTTP_ADDR", ":18082"),
-		QueryURL:            envString("DOCTOR_SENTINEL_QUERY_URL", ""),
-		QueryToken:          envString("DOCTOR_SENTINEL_QUERY_TOKEN", ""),
-		StoreRoot:           envString("DOCTOR_SENTINEL_STORE_ROOT", "/doctor/v1/alerts"),
-		DefaultTenant:       envString("DOCTOR_SENTINEL_DEFAULT_TENANT", "default"),
-		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
-		MonoFSToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
-		MonoFSClientID:      envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-sentinel"),
-		GuardianHMACSecret:  envString("DOCTOR_SENTINEL_GUARDIAN_HMAC_SECRET", ""),
-		ServiceToken:        envString("DOCTOR_SENTINEL_SERVICE_TOKEN", ""),
-		AuthAllowAll:        envBool("DOCTOR_SENTINEL_AUTH_ALLOW_ALL", true),
-		DeliveryEnabled:     envBool("DOCTOR_SENTINEL_DELIVERY_ENABLED", true),
-		PollInterval:        envDuration("DOCTOR_SENTINEL_POLL_INTERVAL", 30*time.Second),
-		EvalShards:          int(envInt64("DOCTOR_SENTINEL_EVAL_SHARDS", 1)),
-		ShardIndex:          int(envInt64("DOCTOR_SENTINEL_SHARD_INDEX", 0)),
-		LeaseTTL:            envDuration("DOCTOR_SENTINEL_LEASE_TTL", 30*time.Second),
-		LeaseRenew:          envDuration("DOCTOR_SENTINEL_LEASE_RENEW", 10*time.Second),
-		RulerID:             rulerID,
+		Enabled:              envBool("DOCTOR_SENTINEL_ENABLED", true),
+		HTTPAddr:             envString("DOCTOR_SENTINEL_HTTP_ADDR", ":18082"),
+		QueryURL:             envString("DOCTOR_SENTINEL_QUERY_URL", ""),
+		QueryToken:           envString("DOCTOR_SENTINEL_QUERY_TOKEN", ""),
+		StoreRoot:            envString("DOCTOR_SENTINEL_STORE_ROOT", "/doctor/v1/alerts"),
+		DefaultTenant:        envString("DOCTOR_SENTINEL_DEFAULT_TENANT", "default"),
+		MonoFSLogEngineAddr:  envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
+		MonoFSToken:          envString("DOCTOR_MONOFS_TOKEN", ""),
+		MonoFSClientID:       envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-sentinel"),
+		GuardianHMACSecret:   envString("DOCTOR_SENTINEL_GUARDIAN_HMAC_SECRET", ""),
+		GuardianEnabled:      envBool("DOCTOR_SENTINEL_GUARDIAN_ENABLED", false),
+		GuardianURL:          envString("DOCTOR_SENTINEL_GUARDIAN_URL", envString("DOCTOR_GUARDIAN_API_URL", "")),
+		GuardianToken:        envString("DOCTOR_SENTINEL_GUARDIAN_TOKEN", envString("DOCTOR_GUARDIAN_TOKEN", "")),
+		GuardianPollInterval: envDuration("DOCTOR_SENTINEL_GUARDIAN_POLL_INTERVAL", 30*time.Second),
+		ServiceToken:         envString("DOCTOR_SENTINEL_SERVICE_TOKEN", ""),
+		AuthAllowAll:         envBool("DOCTOR_SENTINEL_AUTH_ALLOW_ALL", true),
+		DeliveryEnabled:      envBool("DOCTOR_SENTINEL_DELIVERY_ENABLED", true),
+		PollInterval:         envDuration("DOCTOR_SENTINEL_POLL_INTERVAL", 30*time.Second),
+		EvalShards:           int(envInt64("DOCTOR_SENTINEL_EVAL_SHARDS", 1)),
+		ShardIndex:           int(envInt64("DOCTOR_SENTINEL_SHARD_INDEX", 0)),
+		LeaseTTL:             envDuration("DOCTOR_SENTINEL_LEASE_TTL", 30*time.Second),
+		LeaseRenew:           envDuration("DOCTOR_SENTINEL_LEASE_RENEW", 10*time.Second),
+		RulerID:              rulerID,
 
 		AWSEnabled:        envBool("DOCTOR_SENTINEL_AWS_ENABLED", false),
 		AWSURL:            envString("DOCTOR_SENTINEL_AWS_URL", ""),
@@ -297,6 +318,15 @@ func LoadSentinel(service string) SentinelConfig {
 		AWSPollInterval:   envDuration("DOCTOR_SENTINEL_AWS_POLL_INTERVAL", 60*time.Second),
 		AWSRegions:        envCSV("DOCTOR_SENTINEL_AWS_REGIONS", nil),
 		AWSAlarmSelection: envString("DOCTOR_SENTINEL_AWS_ALARM_SELECTION", ""),
+
+		GCPEnabled:      envBool("DOCTOR_SENTINEL_GCP_ENABLED", false),
+		GCPURL:          envString("DOCTOR_SENTINEL_GCP_URL", ""),
+		GCPToken:        envString("DOCTOR_SENTINEL_GCP_TOKEN", ""),
+		GCPPollInterval: envDuration("DOCTOR_SENTINEL_GCP_POLL_INTERVAL", 60*time.Second),
+		GCPProject:      envString("DOCTOR_SENTINEL_GCP_PROJECT", ""),
+		GCPRegion:       envString("DOCTOR_SENTINEL_GCP_REGION", ""),
+		GCPPartition:    envString("DOCTOR_SENTINEL_GCP_PARTITION", ""),
+		GCPPolicy:       envString("DOCTOR_SENTINEL_GCP_POLICY", ""),
 	}
 }
 
@@ -381,12 +411,16 @@ func LoadQuery(service string) QueryConfig {
 		GuardianAPIURL:      envString("DOCTOR_GUARDIAN_API_URL", envString("DOCTOR_GUARDIAN_UI_URL", "")),
 		DefaultPartition:    envString("DOCTOR_DEFAULT_PARTITION", ""),
 		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
+		MonoFSToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
 		RulesURL:            envString("DOCTOR_RULES_URL", ""),
 		SentinelURL:         envString("DOCTOR_SENTINEL_URL", ""),
 		RulesAPIToken:       envString("DOCTOR_RULES_API_TOKEN", ""),
 		AWSEnabled:          envBool("DOCTOR_AWS_ENABLED", true),
 		AWSBackendURL:       envString("DOCTOR_AWS_BACKEND_URL", ""),
 		AWSBackendToken:     envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
+		GCPEnabled:          envBool("DOCTOR_GCP_ENABLED", true),
+		GCPBackendURL:       envString("DOCTOR_GCP_BACKEND_URL", ""),
+		GCPBackendToken:     envString("DOCTOR_GCP_BACKEND_TOKEN", ""),
 
 		FederationEnabled:              envBool("DOCTOR_FEDERATION_ENABLED", false),
 		FederationCatalogFile:          envString("DOCTOR_FEDERATION_CATALOG_FILE", ""),

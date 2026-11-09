@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -100,20 +101,28 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleSilence(w, r, strings.TrimPrefix(path, "silences/"))
 	case path == "capabilities":
 		a.handleCapabilities(w, r)
+	case path == "summary":
+		a.handleAlertSummary(w, r)
 	case path == "sources":
 		a.handleSources(w, r)
 	case path == "sources/aws/policy":
 		a.handleAWSPolicy(w, r)
+	case path == "sources/gcp/policy":
+		a.handleGCPPolicy(w, r)
 	case path == "sources/aws/excluded":
 		a.handleExcluded(w, r)
 	case path == "receivers":
 		a.handleReceivers(w, r)
+	case path == "routing/overview":
+		a.handleRoutingOverview(w, r)
 	case path == "delivery":
 		a.handleDelivery(w, r)
 	case path == "rules":
 		a.handleRules(w, r)
 	case path == "rules/preview":
 		a.handleRulePreview(w, r)
+	case path == "rules/compile":
+		a.handleRuleCompile(w, r)
 	case path == "rules/test":
 		a.handleRuleTest(w, r)
 	case strings.HasPrefix(path, "rules/"):
@@ -339,6 +348,28 @@ func (a *API) handleSilence(w http.ResponseWriter, r *http.Request, rest string)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "success"})
 }
 
+func (a *API) handleAlertSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	tenant, _ := tenantPartition(r)
+	identity := IdentityFromRequest(r, a.AllowAll)
+	summaries, err := a.Store.ListAlertSummaries(r.Context(), tenant)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	filtered := make([]PartitionAlertSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		if !identity.Can(CapAlertsRead, summary.Tenant, summary.Partition) {
+			continue
+		}
+		filtered = append(filtered, summary)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"partitions": filtered})
+}
+
 func (a *API) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	tenant, partition := tenantPartition(r)
 	identity := IdentityFromRequest(r, a.AllowAll)
@@ -353,8 +384,9 @@ func (a *API) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleSources(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sources": []map[string]any{
-			{"name": "guardian", "mode": "push", "status": "configured"},
+			{"name": "guardian", "mode": "push/pull", "status": "configured"},
 			{"name": "aws", "mode": "pull", "status": "configured"},
+			{"name": "gcp", "mode": "pull", "status": "configured"},
 			{"name": "alertmanager", "mode": "push", "status": "optional"},
 			{"name": "sentinel", "mode": "internal", "status": "configured"},
 		},
@@ -396,6 +428,41 @@ func (a *API) handleAWSPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *API) handleGCPPolicy(w http.ResponseWriter, r *http.Request) {
+	identity := IdentityFromRequest(r, a.AllowAll)
+	tenant, partition := tenantPartition(r)
+	switch r.Method {
+	case http.MethodGet:
+		if !identity.Can(CapSourcesRead, tenant, partition) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		policy, err := a.Store.GetGCPPolicy(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, policy)
+	case http.MethodPut:
+		if !identity.Can(CapSourcesWrite, tenant, partition) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		var policy GCPPolicy
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&policy); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := a.Store.PutGCPPolicy(r.Context(), policy); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "policy": policy})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (a *API) handleExcluded(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"excluded": []any{}, "count": 0})
 }
@@ -403,24 +470,67 @@ func (a *API) handleExcluded(w http.ResponseWriter, _ *http.Request) {
 func (a *API) handleReceivers(w http.ResponseWriter, r *http.Request) {
 	tenant, partition := tenantPartition(r)
 	identity := IdentityFromRequest(r, a.AllowAll)
+	if partition == "" {
+		// Legacy, tenant-wide view. New clients always send a partition.
+		switch r.Method {
+		case http.MethodGet:
+			if !identity.Can(CapReceiversRead, tenant, "") && !identity.AllowAll && !identity.Admin {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			cfg, err := a.Store.GetReceiverConfig(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if cfg.Receivers == nil {
+				cfg.Receivers = []Receiver{}
+			}
+			if cfg.Routes == nil {
+				cfg.Routes = []Route{}
+			}
+			writeJSON(w, http.StatusOK, cfg)
+			return
+		case http.MethodPut:
+			if !identity.Admin && !identity.AllowAll {
+				writeError(w, http.StatusForbidden, "tenant-wide receiver config requires an admin")
+				return
+			}
+			var cfg ReceiverConfig
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&cfg); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if err := a.Store.PutReceiverConfig(r.Context(), cfg); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success"})
+			return
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+	}
 	switch r.Method {
 	case http.MethodGet:
 		if !identity.Can(CapReceiversRead, tenant, partition) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		cfg, err := a.Store.GetReceiverConfig(r.Context())
+		cfg, err := a.Store.GetPartitionRouting(r.Context(), tenant, partition)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// Keep the API shape stable for clients: an empty config is an empty
-		// list, not JSON null.
 		if cfg.Receivers == nil {
 			cfg.Receivers = []Receiver{}
 		}
 		if cfg.Routes == nil {
 			cfg.Routes = []Route{}
+		}
+		if cfg.AlertRoutes == nil {
+			cfg.AlertRoutes = []AlertRoute{}
 		}
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPut:
@@ -428,19 +538,72 @@ func (a *API) handleReceivers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		var cfg ReceiverConfig
+		var cfg PartitionRouting
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&cfg); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := a.Store.PutReceiverConfig(r.Context(), cfg); err != nil {
+		if err := a.Store.PutPartitionRouting(r.Context(), tenant, partition, cfg); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// A route may be added while an alert is already firing (Guardian
+		// partition alerts are a common example). Deliver those alerts now
+		// rather than waiting for the next state transition.
+		if a.Service != nil {
+			if _, err := a.Service.ReconcileRouting(r.Context(), tenant, partition); err != nil && a.Logger != nil {
+				a.Logger.Printf("sentinel: reconcile routing for %s/%s: %v", tenant, partition, err)
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "success"})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (a *API) handleRoutingOverview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	tenant, _ := tenantPartition(r)
+	identity := IdentityFromRequest(r, a.AllowAll)
+	if !identity.AllowAll && !identity.Admin {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	configs, err := a.Store.ListPartitionRouting(r.Context(), tenant)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type partitionSummary struct {
+		Tenant            string   `json:"tenant"`
+		Partition         string   `json:"partition"`
+		Receivers         int      `json:"receivers"`
+		Routes            int      `json:"routes"`
+		PartitionReceiver string   `json:"partitionReceiver,omitempty"`
+		DefaultReceiver   string   `json:"defaultReceiver,omitempty"`
+		ReceiverNames     []string `json:"receiverNames"`
+	}
+	out := make([]partitionSummary, 0, len(configs))
+	for _, cfg := range configs {
+		names := make([]string, 0, len(cfg.Receivers))
+		for _, receiver := range cfg.Receivers {
+			names = append(names, receiver.Name)
+		}
+		sort.Strings(names)
+		out = append(out, partitionSummary{
+			Tenant:            cfg.Tenant,
+			Partition:         cfg.Partition,
+			Receivers:         len(cfg.Receivers),
+			Routes:            len(cfg.Routes),
+			PartitionReceiver: cfg.PartitionReceiver,
+			DefaultReceiver:   cfg.DefaultReceiver,
+			ReceiverNames:     names,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"partitions": out})
 }
 
 func (a *API) handleDelivery(w http.ResponseWriter, r *http.Request) {
@@ -480,12 +643,21 @@ func (a *API) handleRules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	type ruleSummary struct {
+		Alert    string   `json:"alert"`
+		Mode     string   `json:"mode,omitempty"`
+		Signal   string   `json:"signal,omitempty"`
+		Severity string   `json:"severity,omitempty"`
+		Notify   []string `json:"notify,omitempty"`
+		Summary  string   `json:"summary,omitempty"`
+	}
 	type summary struct {
-		Tenant    string `json:"tenant"`
-		Partition string `json:"partition"`
-		Group     string `json:"group"`
-		Interval  string `json:"interval"`
-		Rules     int    `json:"rules"`
+		Tenant    string        `json:"tenant"`
+		Partition string        `json:"partition"`
+		Group     string        `json:"group"`
+		Interval  string        `json:"interval"`
+		Rules     int           `json:"rules"`
+		Alerts    []ruleSummary `json:"alerts"`
 	}
 	out := make([]summary, 0, len(refs))
 	for _, ref := range refs {
@@ -494,11 +666,23 @@ func (a *API) handleRules(w http.ResponseWriter, r *http.Request) {
 		}
 		interval := ""
 		rules := 0
+		alerts := make([]ruleSummary, 0)
 		if ref.File != nil && len(ref.File.Groups) > 0 {
-			interval = ref.File.Groups[0].IntervalOrDefault().String()
-			rules = len(ref.File.Groups[0].Rules)
+			group := ref.File.Groups[0]
+			interval = formatDuration(group.IntervalOrDefault())
+			rules = len(group.Rules)
+			for _, rule := range group.Rules {
+				alerts = append(alerts, ruleSummary{
+					Alert:    rule.Alert,
+					Mode:     rule.ModeOrDefault(),
+					Signal:   rule.Annotations["sentinel.signal"],
+					Severity: rule.Labels["severity"],
+					Notify:   append([]string(nil), rule.Notify...),
+					Summary:  rule.Annotations["summary"],
+				})
+			}
 		}
-		out = append(out, summary{Tenant: ref.Tenant, Partition: ref.Partition, Group: ref.Group, Interval: interval, Rules: rules})
+		out = append(out, summary{Tenant: ref.Tenant, Partition: ref.Partition, Group: ref.Group, Interval: interval, Rules: rules, Alerts: alerts})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"groups": out})
 }
@@ -520,6 +704,10 @@ func (a *API) handleRule(w http.ResponseWriter, r *http.Request, rest string) {
 		file, err := a.Store.GetRuleGroup(r.Context(), tenant, partition, group)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json") {
+			writeJSON(w, http.StatusOK, file)
 			return
 		}
 		data, err := yaml.Marshal(file)
@@ -565,9 +753,45 @@ func (a *API) handleRule(w http.ResponseWriter, r *http.Request, rest string) {
 	}
 }
 
+func (a *API) handleRuleCompile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	tenant, partition := tenantPartition(r)
+	identity := IdentityFromRequest(r, a.AllowAll)
+	if !identity.Can(CapRulesRead, tenant, partition) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req struct {
+		Spec *AlertSpec `json:"spec"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Spec == nil {
+		writeError(w, http.StatusBadRequest, "spec is required")
+		return
+	}
+	expr, err := CompileSpec(req.Spec)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"expr": expr})
+}
+
 func (a *API) handleRulePreview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	tenant, partition := tenantPartition(r)
+	identity := IdentityFromRequest(r, a.AllowAll)
+	if !identity.Can(CapRulesRead, tenant, partition) {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	if a.Service.Querier == nil {
@@ -575,18 +799,59 @@ func (a *API) handleRulePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Expr string `json:"expr"`
+		Spec *AlertSpec `json:"spec"`
+		Expr string     `json:"expr"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	data, partial, err := a.Service.Querier.PromInstant(r.Context(), req.Expr, a.now())
+	expr := strings.TrimSpace(req.Expr)
+	if req.Spec != nil {
+		compiled, err := CompileSpec(req.Spec)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		expr = compiled
+	}
+	if expr == "" {
+		writeError(w, http.StatusBadRequest, "spec or expr is required")
+		return
+	}
+	data, partial, err := a.Service.Querier.PromInstant(r.Context(), expr, a.now())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data, "partial": partial})
+	instances := make([]map[string]any, 0)
+	for _, item := range prometheusResultSlice(data) {
+		mapItem, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		labels := map[string]string{}
+		if metric, ok := mapItem["metric"].(map[string]any); ok {
+			for key, value := range metric {
+				if str, ok := value.(string); ok {
+					labels[key] = str
+				}
+			}
+		}
+		value, _, valueErr := promSampleValue(mapItem)
+		instance := map[string]any{"labels": labels}
+		if valueErr == nil {
+			instance["value"] = formatNumber(value)
+		}
+		instances = append(instances, instance)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"expr":      expr,
+		"data":      data,
+		"partial":   partial,
+		"instances": instances,
+		"wouldFire": len(instances) > 0,
+	})
 }
 
 func (a *API) handleRuleTest(w http.ResponseWriter, r *http.Request) {

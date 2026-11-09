@@ -784,9 +784,15 @@ func tempoSearchResponse(summaries []proxy.TraceSummary, spanSets map[string]tem
 }
 
 func writeTempoError(w http.ResponseWriter, statusCode int, message string) {
+	cause := ""
 	if statusCode >= http.StatusInternalServerError {
 		log.Printf("tempo error: %s", message)
+		cause = internalCause(message)
 		message = internalErrorMessage
 	}
-	writeJSON(w, statusCode, map[string]any{"status": "error", "error": message})
+	payload := map[string]any{"status": "error", "error": message}
+	if cause != "" {
+		payload["cause"] = cause
+	}
+	writeJSON(w, statusCode, payload)
 }

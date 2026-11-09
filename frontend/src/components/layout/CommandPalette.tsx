@@ -108,7 +108,7 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         id: "nav-federation",
         group: "Go to",
         label: "Federation catalog",
-        keywords: "aws federation catalog accounts partitions targets cloudwatch xray",
+        keywords: "federation catalog providers accounts projects partitions targets cloudwatch xray gcp cloud monitoring trace",
         icon: Cloud,
         run: go("/federation"),
       },

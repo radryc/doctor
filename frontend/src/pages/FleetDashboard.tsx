@@ -27,6 +27,7 @@ import type {
   GuardianOverview,
   GuardianTopologyResponse,
 } from "../types/api";
+import type { PartitionAlertSummary } from "../types/alerts";
 import type { HelperFileManifest } from "../types/observability";
 
 export { type HelperFileManifest };
@@ -180,6 +181,7 @@ export default function FleetDashboard() {
   const navigate = useNavigate();
   const [overview, setOverview] = useState<GuardianOverview | null>(null);
   const [topology, setTopology] = useState<GuardianTopologyResponse | null>(null);
+  const [alertSummary, setAlertSummary] = useState<PartitionAlertSummary[]>([]);
   const [selectedHub, setSelectedHub] = useState<AssetGroup | null>(null);
   const [selectedHealth, setSelectedHealth] = useState<GuardianHealthResponse | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<GuardianEventsResponse | null>(null);
@@ -204,9 +206,10 @@ export default function FleetDashboard() {
     const params = new URLSearchParams();
     params.set("tenant", tenant);
 
-    const [overviewResult, topologyResult] = await Promise.allSettled([
+    const [overviewResult, topologyResult, alertResult] = await Promise.allSettled([
       api.guardianOverview(),
       api.getGuardianTopology(params),
+      api.getAlertSummary(tenant),
     ]);
 
     if (overviewResult.status === "fulfilled") {
@@ -222,6 +225,12 @@ export default function FleetDashboard() {
     } else {
       setTopology(null);
       setTopologyError("Topology details are unavailable. Partition health still comes from Guardian.");
+    }
+
+    if (alertResult.status === "fulfilled") {
+      setAlertSummary(alertResult.value.partitions ?? []);
+    } else {
+      setAlertSummary([]);
     }
 
     setLastSync(new Date());
@@ -379,6 +388,21 @@ export default function FleetDashboard() {
         : "healthy";
   const shownAssets = sortedPartitions.reduce((total, p) => total + p.summary.assetCount, 0);
   const syncedAt = lastSync ? lastSync.toLocaleTimeString() : "not yet synced";
+  const alertsByPartition = useMemo(() => {
+    const map: Record<string, { firing: number; critical: number }> = {};
+    let firing = 0;
+    let critical = 0;
+    for (const summary of alertSummary) {
+      map[summary.partition] = { firing: summary.firing, critical: summary.critical };
+      firing += summary.firing;
+      critical += summary.critical;
+    }
+    return { map, firing, critical };
+  }, [alertSummary]);
+
+  const handlePartitionAlerts = (partition: PartitionModel) => {
+    navigate(`/alerts?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition.id)}`);
+  };
 
   if (selectedHub) {
     return (
@@ -464,7 +488,7 @@ export default function FleetDashboard() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <KpiCard icon={Server} label="Partitions" value={fleetPartitions.length} sub={`${healthyPartitions} healthy`} />
           <KpiCard
             icon={Activity}
@@ -486,6 +510,13 @@ export default function FleetDashboard() {
             value={failingAssets}
             sub={`${failingPartitions} partition${failingPartitions === 1 ? "" : "s"} failing`}
             tone={failingAssets > 0 ? "critical" : "healthy"}
+          />
+          <KpiCard
+            icon={AlertTriangle}
+            label="Firing alerts"
+            value={alertsByPartition.firing}
+            sub={`${alertsByPartition.critical} critical`}
+            tone={alertsByPartition.critical > 0 ? "critical" : alertsByPartition.firing > 0 ? "attention" : "healthy"}
           />
         </div>
 
@@ -588,8 +619,10 @@ export default function FleetDashboard() {
           <FleetView
             partitions={sortedPartitions}
             viewMode={viewMode}
+            alertCounts={alertsByPartition.map}
             onSelectPartition={handlePartitionSelect}
             onSelectHub={setSelectedHub}
+            onOpenAlerts={handlePartitionAlerts}
           />
         )}
       </div>

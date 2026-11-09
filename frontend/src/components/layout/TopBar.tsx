@@ -3,8 +3,9 @@ import GlobalTimePicker from "./GlobalTimePicker";
 import FederationStatusPill from "./FederationStatusPill";
 import ThemePicker from "./ThemePicker";
 import UserMenu from "./UserMenu";
-import { Menu } from "lucide-react";
+import { Loader2, Menu } from "lucide-react";
 import AskDrawer from "./AskDrawer";
+import { useRequestActivity } from "../../context/RequestActivityContext";
 
 const PAGE_TITLES: Record<string, string> = {
   "/": "On-call",
@@ -33,9 +34,10 @@ function pageTitle(pathname: string): string {
 
 export default function TopBar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const { pathname } = useLocation();
+  const { pending } = useRequestActivity();
 
   return (
-    <header className="app-topbar">
+    <header className="app-topbar" aria-busy={pending > 0}>
       <button type="button" className="s-icon-btn app-topbar__toggle" onClick={onToggleSidebar} aria-label="Toggle navigation">
         <Menu size={16} />
       </button>
@@ -46,6 +48,12 @@ export default function TopBar({ onToggleSidebar }: { onToggleSidebar?: () => vo
       </div>
       <div className="app-topbar__controls">
         <GlobalTimePicker />
+        {pending > 0 && (
+          <span className="app-topbar__activity" role="status" aria-live="polite">
+            <Loader2 size={12} className="animate-spin" />
+            Refreshing…
+          </span>
+        )}
         <FederationStatusPill />
       </div>
       <div className="flex items-center gap-2">
@@ -53,6 +61,7 @@ export default function TopBar({ onToggleSidebar }: { onToggleSidebar?: () => vo
         <ThemePicker />
         <UserMenu />
       </div>
+      <span className={`app-topbar__progress${pending > 0 ? " is-active" : ""}`} aria-hidden="true" />
     </header>
   );
 }

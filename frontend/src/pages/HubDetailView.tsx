@@ -1,15 +1,38 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Server, Activity } from "lucide-react";
-import type { AssetGroup, HealthStatus } from "./FleetView";
+import { useNavigate } from "react-router-dom";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  Clock3,
+  ExternalLink,
+  RefreshCw,
+  Server,
+  Timer,
+  Waypoints,
+} from "lucide-react";
 import { api } from "../api/client";
 import MiniLineChart from "../components/charts/MiniLineChart";
 import TraceWaterfall from "../components/charts/TraceWaterfall";
+import RtoPanel from "../components/fleet/RtoPanel";
+import TrafficGraph from "../components/fleet/TrafficGraph";
+import { computeRto, formatDurationMs, rtoStatus } from "../components/fleet/rto";
+import {
+  buildTrafficModel,
+  edgeRpsFromVector,
+  nodeRpsFromVector,
+  topologyNodeStatus,
+  alertsMatchingNode,
+} from "../components/fleet/traffic";
+import type { AssetGroup, HealthStatus } from "./FleetView";
+import type { Alert } from "../types/alerts";
 import type {
   GuardianEventRecord,
   GuardianHealthResponse,
-  GuardianTopologyNode,
   GuardianTopologyResponse,
   PrometheusMatrixResult,
+  PrometheusVectorResult,
   TraceRecord,
   TraceSummary,
 } from "../types/api";
@@ -24,7 +47,7 @@ interface HubDetailViewProps {
   onBack: () => void;
 }
 
-interface HubMetricPoint {
+interface TelemetryPoint {
   time: string;
   p95: number;
   p99: number;
@@ -36,22 +59,8 @@ interface SourceQuery {
   source: string;
 }
 
-interface TopologyVisualNode {
-  id: string;
-  name: string;
-  status: HealthStatus;
-  intent: string;
-  degree: number;
-  x: number;
-  y: number;
-  raw?: GuardianTopologyNode;
-}
-
-interface TopologyVisualEdge {
-  from: string;
-  to: string;
-  relation?: string;
-}
+const RTO_STORAGE_KEY = "doctor.fleet.rtoTargetMs";
+const DEFAULT_RTO_MS = 30 * 60_000;
 
 function minutesLabel(minutes: number): string {
   if (minutes < 60) return `${minutes}m`;
@@ -61,6 +70,10 @@ function minutesLabel(minutes: number): string {
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function escapePromQL(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function toIsoRange(minutes: number): { from: string; to: string } {
@@ -83,60 +96,30 @@ function matrixPoints(result?: PrometheusMatrixResult[]): Array<{ ts: number; va
     .filter((row) => Number.isFinite(row.value));
 }
 
-function mergeMetricPoints(
+function mergeTelemetry(
   p95Points: Array<{ ts: number; value: number }>,
   p99Points: Array<{ ts: number; value: number }>,
   rpsPoints: Array<{ ts: number; value: number }>
-): HubMetricPoint[] {
-  const byTs = new Map<number, HubMetricPoint>();
-
-  for (const row of p95Points) {
-    byTs.set(row.ts, {
-      time: new Date(row.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      p95: row.value,
-      p99: 0,
-      rps: 0,
-    });
-  }
-
-  for (const row of p99Points) {
-    const existing = byTs.get(row.ts);
-    if (existing) {
-      existing.p99 = row.value;
-    } else {
-      byTs.set(row.ts, {
-        time: new Date(row.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        p95: 0,
-        p99: row.value,
-        rps: 0,
-      });
+): TelemetryPoint[] {
+  const byTs = new Map<number, TelemetryPoint>();
+  const ensure = (ts: number) => {
+    let point = byTs.get(ts);
+    if (!point) {
+      point = { time: new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), p95: 0, p99: 0, rps: 0 };
+      byTs.set(ts, point);
     }
-  }
-
-  for (const row of rpsPoints) {
-    const existing = byTs.get(row.ts);
-    if (existing) {
-      existing.rps = row.value;
-    } else {
-      byTs.set(row.ts, {
-        time: new Date(row.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        p95: 0,
-        p99: 0,
-        rps: row.value,
-      });
-    }
-  }
-
-  return [...byTs.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, value]) => value);
+    return point;
+  };
+  for (const row of p95Points) ensure(row.ts).p95 = row.value;
+  for (const row of p99Points) ensure(row.ts).p99 = row.value;
+  for (const row of rpsPoints) ensure(row.ts).rps = row.value;
+  return [...byTs.entries()].sort((a, b) => a[0] - b[0]).map(([, point]) => point);
 }
 
 async function runRangeQuery(query: string, tenant: string, from: string, to: string, step: string) {
   const params = new URLSearchParams({ query, start: from, end: to, step, tenant });
   const response = await api.queryPrometheusRange(params);
-  if (response.status !== "success") return [];
-  if (response.data.resultType !== "matrix") return [];
+  if (response.status !== "success" || response.data.resultType !== "matrix") return [];
   return matrixPoints(response.data.result);
 }
 
@@ -147,171 +130,45 @@ async function firstNonEmptyRangeQuery(
   to: string,
   step: string
 ): Promise<{ points: Array<{ ts: number; value: number }>; source: string }> {
-  for (const q of queries) {
+  for (const query of queries) {
     try {
-      const points = await runRangeQuery(q.query, tenant, from, to, step);
-      if (points.length > 0) return { points, source: q.source };
+      const points = await runRangeQuery(query.query, tenant, from, to, step);
+      if (points.length > 0) return { points, source: query.source };
     } catch {
-      // Try next fallback query.
+      // Try the next fallback.
     }
   }
   return { points: [], source: "none" };
 }
 
-function sourceBadgeClass(source: string): string {
-  if (source.startsWith("asset:")) return "bg-emerald-500/10 text-emerald-300 border-emerald-500/30";
-  if (source.startsWith("partition:")) return "bg-sky-500/10 text-sky-300 border-sky-500/30";
-  if (source.startsWith("fleet:")) return "bg-amber-500/10 text-amber-300 border-amber-500/30";
-  return "bg-slate-700/30 text-slate-300 border-slate-600/40";
+async function instantVector(query: string, tenant: string): Promise<PrometheusVectorResult[]> {
+  try {
+    const response = await api.queryPrometheus(new URLSearchParams({ query, tenant }));
+    if (response.status !== "success" || response.data.resultType !== "vector") return [];
+    return response.data.result;
+  } catch {
+    return [];
+  }
 }
 
-function sourceBadgeLabel(source: string): string {
-  if (source === "none") return "source: no-data";
-  return `source: ${source}`;
+async function firstNonEmptyVector(queries: string[], tenant: string): Promise<PrometheusVectorResult[]> {
+  for (const query of queries) {
+    const result = await instantVector(query, tenant);
+    if (result.length > 0) return result;
+  }
+  return [];
 }
 
-function nodeStatus(node: GuardianTopologyNode): HealthStatus {
-  const health = (node.health?.level || "").toLowerCase();
-  const status = (node.status || "").toLowerCase();
-  const flow = (node.flow_state || "").toLowerCase();
-
-  if ([health, status, flow].some((v) => v.includes("critical") || v.includes("failed") || v.includes("error"))) {
-    return "critical";
-  }
-  if ([health, status, flow].some((v) => v.includes("degraded") || v.includes("attention") || v.includes("drift"))) {
-    return "degraded";
-  }
-  return "healthy";
+function statusClass(status: HealthStatus): string {
+  if (status === "critical") return "border-rose-500/40 bg-rose-500/10 text-rose-300";
+  if (status === "degraded") return "border-amber-500/40 bg-amber-500/10 text-amber-300";
+  return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
 }
 
-function statusGlow(status: HealthStatus): string {
-  if (status === "healthy") return "var(--ui-green)";
-  if (status === "degraded") return "var(--ui-amber)";
-  return "var(--ui-red)";
-}
-
-function buildTopologyGraph(
-  topology: GuardianTopologyResponse | null,
-  focusHint: string,
-  search: string
-): { nodes: TopologyVisualNode[]; edges: TopologyVisualEdge[]; focusId: string | null } {
-  const nodes = (topology?.nodes || []).filter((n) => n.type === "asset");
-  if (nodes.length === 0) return { nodes: [], edges: [], focusId: null };
-
-  const allEdges = (topology?.edges || []).filter((e) => {
-    const from = nodes.some((n) => n.id === e.from);
-    const to = nodes.some((n) => n.id === e.to);
-    return from && to;
-  });
-
-  const normalizedSearch = search.trim().toLowerCase();
-  let visibleNodes = nodes;
-  let visibleEdges = allEdges;
-
-  if (normalizedSearch) {
-    const hitIds = new Set(
-      nodes
-        .filter((n) => {
-          const text = [n.name, n.id, n.intent || "", n.partition || ""].join(" ").toLowerCase();
-          return text.includes(normalizedSearch);
-        })
-        .map((n) => n.id)
-    );
-
-    if (hitIds.size > 0) {
-      for (const edge of allEdges) {
-        if (hitIds.has(edge.from) || hitIds.has(edge.to)) {
-          hitIds.add(edge.from);
-          hitIds.add(edge.to);
-        }
-      }
-      visibleNodes = nodes.filter((n) => hitIds.has(n.id));
-      visibleEdges = allEdges.filter((e) => hitIds.has(e.from) && hitIds.has(e.to));
-    }
-  }
-
-  const nodeById = new Map(visibleNodes.map((n) => [n.id, n]));
-  const degree = new Map<string, number>(visibleNodes.map((n) => [n.id, 0]));
-  const adjacency = new Map<string, Set<string>>(visibleNodes.map((n) => [n.id, new Set()]));
-
-  for (const edge of visibleEdges) {
-    if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) continue;
-    degree.set(edge.from, (degree.get(edge.from) || 0) + 1);
-    degree.set(edge.to, (degree.get(edge.to) || 0) + 1);
-    adjacency.get(edge.from)?.add(edge.to);
-    adjacency.get(edge.to)?.add(edge.from);
-  }
-
-  const fallbackFocus = [...degree.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || visibleNodes[0]?.id || null;
-  const focusId = nodeById.has(focusHint) ? focusHint : fallbackFocus;
-  if (!focusId) return { nodes: [], edges: [], focusId: null };
-
-  const levels = new Map<string, number>();
-  levels.set(focusId, 0);
-  const queue = [focusId];
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current) continue;
-    const currentLevel = levels.get(current) || 0;
-    const nextNodes = adjacency.get(current) || new Set();
-    for (const next of nextNodes) {
-      if (!levels.has(next)) {
-        levels.set(next, currentLevel + 1);
-        queue.push(next);
-      }
-    }
-  }
-
-  const maxKnown = Math.max(...levels.values());
-  for (const node of visibleNodes) {
-    if (!levels.has(node.id)) levels.set(node.id, maxKnown + 1);
-  }
-
-  const grouped = new Map<number, string[]>();
-  for (const [id, lvl] of levels.entries()) {
-    if (!grouped.has(lvl)) grouped.set(lvl, []);
-    grouped.get(lvl)?.push(id);
-  }
-
-  const placed = new Map<string, { x: number; y: number }>();
-  placed.set(focusId, { x: 50, y: 50 });
-
-  const ringLevels = [...grouped.keys()].filter((lvl) => lvl > 0).sort((a, b) => a - b);
-  for (const lvl of ringLevels) {
-    const ids = grouped.get(lvl) || [];
-    const radius = Math.min(42, 12 + (lvl - 1) * 12);
-    const angleStep = (Math.PI * 2) / Math.max(ids.length, 1);
-    const offset = (lvl * Math.PI) / 9;
-    ids.forEach((id, idx) => {
-      const angle = offset + idx * angleStep;
-      const x = 50 + radius * Math.cos(angle);
-      const y = 50 + radius * Math.sin(angle);
-      placed.set(id, { x, y });
-    });
-  }
-
-  const visualNodes: TopologyVisualNode[] = visibleNodes
-    .map((n) => {
-      const pos = placed.get(n.id) || { x: 50, y: 50 };
-      return {
-        id: n.id,
-        name: n.name,
-        status: nodeStatus(n),
-        intent: n.intent || "unknown",
-        degree: degree.get(n.id) || 0,
-        x: pos.x,
-        y: pos.y,
-        raw: n,
-      };
-    })
-    .sort((a, b) => b.degree - a.degree);
-
-  return {
-    nodes: visualNodes,
-    edges: visibleEdges.map((e) => ({ from: e.from, to: e.to, relation: e.relation })),
-    focusId,
-  };
+function alertSeverityClass(severity: string): string {
+  if (severity === "critical") return "border-rose-500/40 bg-rose-500/10 text-rose-300";
+  if (severity === "warning") return "border-amber-500/40 bg-amber-500/10 text-amber-300";
+  return "border-sky-500/40 bg-sky-500/10 text-sky-300";
 }
 
 export default function HubDetailView({
@@ -323,558 +180,568 @@ export default function HubDetailView({
   onRangeChange,
   onBack,
 }: HubDetailViewProps) {
-  const [metricData, setMetricData] = useState<HubMetricPoint[]>([]);
-  const [metricStatus, setMetricStatus] = useState("Loading metrics...");
+  const navigate = useNavigate();
+  const [topology, setTopology] = useState<GuardianTopologyResponse | null>(null);
+  const [topologyStatus, setTopologyStatus] = useState("Loading topology…");
+  const [nodeRps, setNodeRps] = useState<Map<string, number>>(new Map());
+  const [edgeRps, setEdgeRps] = useState<Map<string, number>>(new Map());
+  const [explicitEdges, setExplicitEdges] = useState(false);
+  const [trafficStatus, setTrafficStatus] = useState("Loading traffic…");
+  const [selectedNodeId, setSelectedNodeId] = useState(asset.id || asset.name);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertsStatus, setAlertsStatus] = useState("Loading alerts…");
+  const [telemetry, setTelemetry] = useState<TelemetryPoint[]>([]);
+  const [telemetryStatus, setTelemetryStatus] = useState("Loading telemetry…");
   const [metricSource, setMetricSource] = useState("none");
   const [traces, setTraces] = useState<TraceSummary[]>([]);
+  const [traceStatus, setTraceStatus] = useState("Loading traces…");
   const [selectedTrace, setSelectedTrace] = useState<TraceSummary | null>(null);
   const [traceSpans, setTraceSpans] = useState<TraceRecord[]>([]);
-  const [traceStatus, setTraceStatus] = useState("Loading traces...");
-  const [traceSource, setTraceSource] = useState("none");
-  const [topology, setTopology] = useState<GuardianTopologyResponse | null>(null);
-  const [topologyStatus, setTopologyStatus] = useState("Loading topology...");
-  const [focusNodeId, setFocusNodeId] = useState("");
-  const [topologySearch, setTopologySearch] = useState("");
-  const [topologyZoom, setTopologyZoom] = useState(1);
-
-  const tableRows = events.slice(0, 8);
-
-  const topologyGraph = useMemo(
-    () => buildTopologyGraph(topology, focusNodeId || asset.id || asset.name, topologySearch),
-    [topology, focusNodeId, asset.id, asset.name, topologySearch]
-  );
-
-  useEffect(() => {
-    if (topologyGraph.focusId && topologyGraph.focusId !== focusNodeId) {
-      setFocusNodeId(topologyGraph.focusId);
-    }
-  }, [topologyGraph.focusId, focusNodeId]);
-
-  const counts = useMemo(() => {
-    if (topologyGraph.nodes.length > 0) {
-      const healthy = topologyGraph.nodes.filter((n) => n.status === "healthy").length;
-      const degraded = topologyGraph.nodes.filter((n) => n.status === "degraded").length;
-      const critical = topologyGraph.nodes.filter((n) => n.status === "critical").length;
-      return { healthy, degraded, critical };
-    }
-
-    const healthy = asset.status === "healthy" ? 1 : 0;
-    const degraded = asset.status === "degraded" ? 1 : 0;
-    const critical = asset.status === "critical" ? 1 : 0;
-    return { healthy, degraded, critical };
-  }, [topologyGraph.nodes, asset.status]);
-
-  const focusedNode = useMemo(
-    () => topologyGraph.nodes.find((n) => n.id === focusNodeId) || null,
-    [topologyGraph.nodes, focusNodeId]
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadTopology() {
-      setTopologyStatus("Loading topology...");
-      try {
-        const params = new URLSearchParams({
-          tenant,
-          partition: asset.partition,
-        });
-        const data = await api.getGuardianTopology(params);
-        if (cancelled) return;
-        setTopology(data);
-        const assetCount = (data.nodes || []).filter((n) => n.type === "asset").length;
-        setTopologyStatus(assetCount > 0 ? `Live topology: ${assetCount} assets` : "No asset topology nodes found");
-      } catch {
-        if (!cancelled) {
-          setTopology(null);
-          setTopologyStatus("Failed to load topology");
-        }
-      }
-    }
-
-    void loadTopology();
-    return () => {
-      cancelled = true;
-    };
-  }, [asset.partition, tenant]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadMetricsAndTraces() {
-      setMetricStatus("Loading metrics...");
-      setMetricSource("none");
-      setTraceStatus("Loading traces...");
-      setTraceSource("none");
-      setSelectedTrace(null);
-      setTraceSpans([]);
-
-      const { from, to } = toIsoRange(rangeMinutes);
-      const step = stepForMinutes(rangeMinutes);
-
-      const tokenSet = [asset.name, asset.id, asset.intent, asset.partition]
-        .map((value) => value.trim())
-        .filter(Boolean);
-      const serviceRegex = tokenSet.length > 0 ? tokenSet.map(escapeRegex).join("|") : ".*";
-
-      const p95Queries: SourceQuery[] = [
-        {
-          query: `histogram_quantile(0.95, sum by (le) (rate(request_duration_seconds_bucket{service=~"${serviceRegex}"}[5m])))`,
-          source: `asset:${asset.name}`,
-        },
-        {
-          query: `histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=~"${serviceRegex}"}[5m])))`,
-          source: `asset:${asset.name}`,
-        },
-        {
-          query: `histogram_quantile(0.95, sum by (le) (rate(request_duration_seconds_bucket[5m])))`,
-          source: `fleet:latency`,
-        },
-        {
-          query: `histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))`,
-          source: `fleet:latency`,
-        },
-      ];
-
-      const p99Queries: SourceQuery[] = [
-        {
-          query: `histogram_quantile(0.99, sum by (le) (rate(request_duration_seconds_bucket{service=~"${serviceRegex}"}[5m])))`,
-          source: `asset:${asset.name}`,
-        },
-        {
-          query: `histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{service=~"${serviceRegex}"}[5m])))`,
-          source: `asset:${asset.name}`,
-        },
-        {
-          query: `histogram_quantile(0.99, sum by (le) (rate(request_duration_seconds_bucket[5m])))`,
-          source: `fleet:latency`,
-        },
-        {
-          query: `histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))`,
-          source: `fleet:latency`,
-        },
-      ];
-
-      const rpsQueries: SourceQuery[] = [
-        {
-          query: `sum(rate(http_requests_total{service=~"${serviceRegex}"}[5m]))`,
-          source: `asset:${asset.name}`,
-        },
-        {
-          query: `sum(rate(http_server_requests_seconds_count{service=~"${serviceRegex}"}[5m]))`,
-          source: `asset:${asset.name}`,
-        },
-        {
-          query: `sum(rate(http_requests_total[5m]))`,
-          source: "fleet:rps",
-        },
-        {
-          query: `sum(rate(http_server_requests_seconds_count[5m]))`,
-          source: "fleet:rps",
-        },
-      ];
-
-      const [p95, p99, rps] = await Promise.all([
-        firstNonEmptyRangeQuery(p95Queries, tenant, from, to, step),
-        firstNonEmptyRangeQuery(p99Queries, tenant, from, to, step),
-        firstNonEmptyRangeQuery(rpsQueries, tenant, from, to, step),
-      ]);
-
-      const merged = mergeMetricPoints(p95.points, p99.points, rps.points);
-      if (!cancelled) {
-        setMetricData(merged);
-        const source = p95.source !== "none" ? p95.source : p99.source !== "none" ? p99.source : rps.source;
-        setMetricSource(source);
-        setMetricStatus(
-          merged.length > 0
-            ? `Live metrics loaded (${minutesLabel(rangeMinutes)})`
-            : "No matching time-series found for this window"
-        );
-      }
-
-      const traceParams = new URLSearchParams({
-        tenant,
-        from,
-        to,
-        limit: "60",
-      });
-
-      try {
-        const serviceList = await api.getLogServices(tenant);
-        const matchingServices = (serviceList.services || [])
-          .filter((service) => {
-            const value = service.toLowerCase();
-            return tokenSet.some((token) => value.includes(token.toLowerCase()));
-          })
-          .slice(0, 3);
-
-        let traceResults: TraceSummary[] = [];
-        for (const serviceName of matchingServices) {
-          const scoped = new URLSearchParams(traceParams);
-          scoped.set("service", serviceName);
-          const result = await api.getRecentTraces(scoped);
-          if ((result.traces || []).length > 0) {
-            traceResults = result.traces;
-            setTraceSource(`asset:${serviceName}`);
-            break;
-          }
-        }
-
-        if (traceResults.length === 0) {
-          const fallback = await api.getRecentTraces(traceParams);
-          traceResults = fallback.traces || [];
-          setTraceSource("fleet:recent-traces");
-        }
-
-        if (cancelled) return;
-
-        const top = traceResults.slice(0, 10);
-        setTraces(top);
-        if (top.length === 0) {
-          setTraceStatus("No traces in selected time window");
-          return;
-        }
-
-        setTraceStatus(`Loaded ${top.length} traces (${minutesLabel(rangeMinutes)})`);
-        const firstTrace = top[0];
-        setSelectedTrace(firstTrace);
-        const traceData = await api.getTrace(firstTrace.trace_id, tenant);
-        if (!cancelled) {
-          setTraceSpans(traceData.spans || []);
-        }
-      } catch {
-        if (!cancelled) {
-          setTraces([]);
-          setTraceSpans([]);
-          setTraceStatus("Failed to load traces");
-          setTraceSource("none");
-        }
-      }
-    }
-
-    void loadMetricsAndTraces();
-    return () => {
-      cancelled = true;
-    };
-  }, [asset, tenant, rangeMinutes]);
-
-  const openTrace = async (trace: TraceSummary) => {
-    setSelectedTrace(trace);
-    setTraceStatus(`Loading trace ${trace.trace_id.slice(0, 12)}...`);
+  const [rtoTarget, setRtoTarget] = useState(() => {
     try {
-      const traceData = await api.getTrace(trace.trace_id, tenant);
-      setTraceSpans(traceData.spans || []);
-      setTraceStatus(`Loaded trace ${trace.trace_id.slice(0, 12)}`);
+      const stored = Number(localStorage.getItem(RTO_STORAGE_KEY));
+      return Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_RTO_MS;
     } catch {
-      setTraceSpans([]);
-      setTraceStatus("Failed to load selected trace");
+      return DEFAULT_RTO_MS;
+    }
+  });
+  const [now, setNow] = useState(Date.now());
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(RTO_STORAGE_KEY, String(rtoTarget));
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [rtoTarget]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const focusNode = useMemo(
+    () => (topology?.nodes ?? []).find((node) => node.id === (selectedNodeId || asset.id || asset.name)),
+    [topology, selectedNodeId, asset.id, asset.name]
+  );
+
+  const rto = useMemo(() => computeRto(events, now, rtoTarget), [events, now, rtoTarget]);
+
+  const trafficModel = useMemo(
+    () => buildTrafficModel(topology, selectedNodeId || asset.id || asset.name, nodeRps, edgeRps, alerts, explicitEdges),
+    [topology, selectedNodeId, asset.id, asset.name, nodeRps, edgeRps, alerts, explicitEdges]
+  );
+
+  useEffect(() => {
+    if (trafficModel.focusId && !trafficModel.nodes.some((node) => node.id === selectedNodeId)) {
+      setSelectedNodeId(trafficModel.focusId);
+    }
+  }, [trafficModel, selectedNodeId]);
+
+  const activeAlerts = useMemo(() => alerts.filter((alert) => alert.status !== "resolved"), [alerts]);
+  const selectedNodeAlerts = useMemo(
+    () => alertsMatchingNode(alerts, focusNode),
+    [alerts, focusNode]
+  );
+  const focusStatus = focusNode ? topologyNodeStatus(focusNode) : "healthy";
+
+  const loadTopology = async () => {
+    setTopologyStatus("Loading topology…");
+    try {
+      const data = await api.getGuardianTopology(new URLSearchParams({ tenant, partition: asset.partition }));
+      setTopology(data);
+      const assets = (data.nodes || []).filter((node) => node.type === "asset").length;
+      setTopologyStatus(assets > 0 ? `${assets} assets · ${(data.edges || []).length} connections` : "No asset topology for this partition");
+    } catch {
+      setTopology(null);
+      setTopologyStatus("Failed to load topology");
     }
   };
 
+  const loadTraffic = async () => {
+    setTrafficStatus("Loading traffic…");
+    const partition = escapePromQL(asset.partition);
+    const nodeQueries = [
+      `sum by (service) (rate(http_server_request_duration_count{guardian_partition="${partition}"}[5m]))`,
+      `sum by (service) (rate(http_requests_total{guardian_partition="${partition}"}[5m]))`,
+      `sum by (service) (rate(http_server_requests_seconds_count{guardian_partition="${partition}"}[5m]))`,
+      `sum by (service) (rate(http_server_request_duration_count[5m]))`,
+      `sum by (service) (rate(http_requests_total[5m]))`,
+    ];
+    const edgeQueries = [
+      `sum by (source_service, destination_service) (rate(http_requests_total{guardian_partition="${partition}"}[5m]))`,
+      `sum by (source_service, destination_service) (rate(http_server_request_duration_count{guardian_partition="${partition}"}[5m]))`,
+      `sum by (source, destination) (rate(http_requests_total{guardian_partition="${partition}"}[5m]))`,
+      `sum by (client, server) (rate(http_requests_total{guardian_partition="${partition}"}[5m]))`,
+      `sum by (service, peer_service) (rate(http_requests_total{guardian_partition="${partition}"}[5m]))`,
+      `sum by (service, upstream_service) (rate(http_requests_total{guardian_partition="${partition}"}[5m]))`,
+      `sum by (caller, callee) (rate(http_requests_total{guardian_partition="${partition}"}[5m]))`,
+    ];
+    const [nodeItems, edgeItems] = await Promise.all([
+      firstNonEmptyVector(nodeQueries, tenant),
+      firstNonEmptyVector(edgeQueries, tenant),
+    ]);
+    const nodes = (topology?.nodes ?? []).filter((node) => node.type === "asset" || node.type === "intent");
+    setNodeRps(nodeRpsFromVector(nodeItems, nodes));
+    const edgeValues = edgeRpsFromVector(edgeItems, nodes);
+    setEdgeRps(edgeValues);
+    setExplicitEdges(edgeItems.length > 0 && edgeValues.size > 0);
+    setTrafficStatus(
+      nodeItems.length > 0
+        ? `Traffic loaded from ${nodeItems.length} service series${edgeValues.size > 0 ? ` and ${edgeValues.size} measured edges` : " (edges inferred from source RPS)"}`
+        : "No traffic metrics found; showing topology only"
+    );
+  };
+
+  const loadAlerts = async () => {
+    setAlertsStatus("Loading alerts…");
+    try {
+      const data = await api.getAlerts(new URLSearchParams({ tenant, partition: asset.partition }));
+      setAlerts(data.alerts ?? []);
+      setAlertsStatus(`${(data.alerts ?? []).filter((alert) => alert.status !== "resolved").length} active`);
+    } catch {
+      setAlerts([]);
+      setAlertsStatus("Failed to load alerts");
+    }
+  };
+
+  const loadTelemetry = async () => {
+    setTelemetryStatus("Loading telemetry…");
+    setMetricSource("none");
+    const { from, to } = toIsoRange(rangeMinutes);
+    const step = stepForMinutes(rangeMinutes);
+    const tokens = [asset.name, asset.id, asset.intent, asset.partition].map((value) => value.trim()).filter(Boolean);
+    const serviceRegex = tokens.length > 0 ? tokens.map(escapeRegex).join("|") : ".*";
+    const p95Queries: SourceQuery[] = [
+      { query: `histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_bucket{service=~"${serviceRegex}"}[5m])))`, source: `asset:${asset.name}` },
+      { query: `histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=~"${serviceRegex}"}[5m])))`, source: `asset:${asset.name}` },
+      { query: `histogram_quantile(0.95, sum by (le) (rate(request_duration_seconds_bucket{service=~"${serviceRegex}"}[5m])))`, source: `asset:${asset.name}` },
+    ];
+    const p99Queries: SourceQuery[] = p95Queries.map((query) => ({ ...query, query: query.query.replace("0.95", "0.99") }));
+    const rpsQueries: SourceQuery[] = [
+      { query: `sum(rate(http_server_request_duration_count{service=~"${serviceRegex}"}[5m]))`, source: `asset:${asset.name}` },
+      { query: `sum(rate(http_requests_total{service=~"${serviceRegex}"}[5m]))`, source: `asset:${asset.name}` },
+      { query: `sum(rate(http_server_requests_seconds_count{service=~"${serviceRegex}"}[5m]))`, source: `asset:${asset.name}` },
+    ];
+    const [p95, p99, rps] = await Promise.all([
+      firstNonEmptyRangeQuery(p95Queries, tenant, from, to, step),
+      firstNonEmptyRangeQuery(p99Queries, tenant, from, to, step),
+      firstNonEmptyRangeQuery(rpsQueries, tenant, from, to, step),
+    ]);
+    const merged = mergeTelemetry(p95.points, p99.points, rps.points);
+    setTelemetry(merged);
+    setMetricSource(p95.source !== "none" ? p95.source : p99.source !== "none" ? p99.source : rps.source);
+    setTelemetryStatus(merged.length > 0 ? `Live telemetry (${minutesLabel(rangeMinutes)})` : "No matching telemetry series for this window");
+  };
+
+  const loadTraces = async () => {
+    setTraceStatus("Loading traces…");
+    const { from, to } = toIsoRange(rangeMinutes);
+    const params = new URLSearchParams({ tenant, from, to, limit: "40" });
+    try {
+      const services = await api.getLogServices(tenant);
+      const tokens = [asset.name, asset.id, asset.intent];
+      const matches = (services.services || [])
+        .filter((service) => tokens.some((token) => service.toLowerCase().includes(token.toLowerCase())))
+        .slice(0, 3);
+      let results: TraceSummary[] = [];
+      for (const service of matches) {
+        const scoped = new URLSearchParams(params);
+        scoped.set("service", service);
+        const response = await api.getRecentTraces(scoped);
+        if ((response.traces || []).length > 0) {
+          results = response.traces || [];
+          break;
+        }
+      }
+      if (results.length === 0) {
+        const response = await api.getRecentTraces(params);
+        results = response.traces || [];
+      }
+      const top = results.slice(0, 10);
+      setTraces(top);
+      setSelectedTrace(top[0] ?? null);
+      setTraceStatus(top.length > 0 ? `${top.length} traces (${minutesLabel(rangeMinutes)})` : "No traces in this window");
+      if (top[0]) {
+        const data = await api.getTrace(top[0].trace_id, tenant);
+        setTraceSpans(data.spans || []);
+      } else {
+        setTraceSpans([]);
+      }
+    } catch {
+      setTraces([]);
+      setSelectedTrace(null);
+      setTraceSpans([]);
+      setTraceStatus("Failed to load traces");
+    }
+  };
+
+  const refresh = async () => {
+    setRefreshing(true);
+    await Promise.all([loadTopology(), loadAlerts(), loadTelemetry(), loadTraces()]);
+    setRefreshing(false);
+  };
+
+  useEffect(() => {
+    void loadTopology();
+    void loadAlerts();
+    void loadTelemetry();
+    void loadTraces();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asset.partition, asset.id, asset.name, tenant, rangeMinutes]);
+
+  useEffect(() => {
+    if (topology) void loadTraffic();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topology, tenant, asset.partition]);
+
+  const openTrace = async (trace: TraceSummary) => {
+    setSelectedTrace(trace);
+    setTraceStatus(`Loading ${trace.trace_id.slice(0, 12)}…`);
+    try {
+      const data = await api.getTrace(trace.trace_id, tenant);
+      setTraceSpans(data.spans || []);
+      setTraceStatus(`Loaded ${trace.trace_id.slice(0, 12)}`);
+    } catch {
+      setTraceSpans([]);
+      setTraceStatus("Failed to load trace");
+    }
+  };
+
+  const openAlerts = (fingerprint?: string) => {
+    const params = new URLSearchParams({ tenant, partition: asset.partition });
+    if (fingerprint) params.set("alert", fingerprint);
+    navigate(`/alerts?${params.toString()}`);
+  };
+
+  const trafficPaths = useMemo(
+    () =>
+      trafficModel.edges
+        .filter((edge) => edge.relation !== "contains")
+        .sort((a, b) => b.rps - a.rps)
+        .slice(0, 12),
+    [trafficModel.edges]
+  );
+  const counts = useMemo(() => {
+    const healthy = trafficModel.nodes.filter((node) => node.status === "healthy").length;
+    const degraded = trafficModel.nodes.filter((node) => node.status === "degraded").length;
+    const critical = trafficModel.nodes.filter((node) => node.status === "critical").length;
+    return { healthy, degraded, critical };
+  }, [trafficModel.nodes]);
+  const rtoState = rtoStatus(rto, rtoTarget);
+
   return (
-    <div className="w-full min-h-screen bg-slate-950 text-slate-100 p-6 font-sans overflow-auto">
-      <div className="flex items-center justify-between mb-6 pb-4 border-b border-slate-800">
-        <div className="flex items-center gap-4">
-          <button
-            onClick={onBack}
-            className="flex items-center gap-2 px-3 py-1.5 bg-slate-900 border border-slate-700 hover:bg-slate-800 rounded text-xs font-semibold transition"
-          >
-            <ArrowLeft className="w-4 h-4" /> Back to Fleet
+    <div className="h-full min-h-0 w-full overflow-y-auto bg-slate-950 p-5 text-slate-100">
+      <header className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 pb-4">
+        <div className="flex items-start gap-3">
+          <button type="button" onClick={onBack} className="btn mt-1 text-xs">
+            <ArrowLeft size={14} /> Fleet
           </button>
           <div>
-            <h1 className="text-xl font-bold text-slate-100">
-              {asset.partition} / {asset.intent} / {asset.name}
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[var(--strata-accent-text)]">Traffic & recovery</p>
+            <h1 className="mt-1 text-xl font-semibold">
+              {asset.partition} <span className="text-slate-600">/</span> {asset.intent} <span className="text-slate-600">/</span> {asset.name}
             </h1>
-            <p className="text-xs text-slate-400">Hub Instance Group Details & Real-Time Telemetry</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {topologyStatus} · {trafficStatus}
+            </p>
           </div>
         </div>
-
-        <div className="flex items-center gap-3 text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-2">
           {[15, 60, 360, 1440].map((minutes) => (
             <button
               key={minutes}
+              type="button"
               onClick={() => onRangeChange(minutes)}
-              className={`px-2 py-1 rounded border ${
+              className={`rounded border px-2 py-1 text-[11px] ${
                 rangeMinutes === minutes
-                  ? "bg-sky-500/20 border-sky-400/60 text-sky-300"
-                  : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
+                  ? "border-sky-500/50 bg-sky-500/15 text-sky-300"
+                  : "border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800"
               }`}
             >
               {minutesLabel(minutes)}
             </button>
           ))}
-          <span className="px-2.5 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded">
-            Healthy: {counts.healthy}
-          </span>
-          <span className="px-2.5 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded">
-            Degraded: {counts.degraded}
-          </span>
-          <span className="px-2.5 py-1 bg-rose-500/10 text-rose-400 border border-rose-500/30 rounded">
-            Critical: {counts.critical}
-          </span>
+          <button type="button" onClick={() => void refresh()} className="btn text-xs" disabled={refreshing}>
+            <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} /> Refresh
+          </button>
+        </div>
+      </header>
+
+      <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-6">
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+          <div className="text-[9px] uppercase tracking-wide text-slate-500">RTO</div>
+          <div className={`mt-1 text-sm font-bold uppercase ${rtoState === "breached" ? "text-rose-300" : rtoState === "at-risk" ? "text-amber-300" : "text-emerald-300"}`}>
+            {rtoState === "within" ? "within target" : rtoState === "at-risk" ? "at risk" : "breached"}
+          </div>
+          <div className="text-[10px] text-slate-500">target {formatDurationMs(rtoTarget)}</div>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+          <div className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-slate-500"><Clock3 size={10} /> current outage</div>
+          <div className={`mt-1 text-sm font-bold ${rto.currentOutageMs > 0 ? "text-rose-300" : "text-slate-100"}`}>{formatDurationMs(rto.currentOutageMs)}</div>
+          <div className="text-[10px] text-slate-500">{rto.open.length} open</div>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+          <div className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-slate-500"><Timer size={10} /> p95 recovery</div>
+          <div className="mt-1 text-sm font-bold text-slate-100">{formatDurationMs(rto.p95)}</div>
+          <div className="text-[10px] text-slate-500">{rto.completed.length} completed</div>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+          <div className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-slate-500"><AlertTriangle size={10} /> firing alerts</div>
+          <div className={`mt-1 text-sm font-bold ${activeAlerts.length > 0 ? "text-rose-300" : "text-emerald-300"}`}>{activeAlerts.length}</div>
+          <button type="button" onClick={() => openAlerts()} className="text-[10px] text-slate-500 hover:text-slate-300">open inbox →</button>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+          <div className="text-[9px] uppercase tracking-wide text-slate-500">assets</div>
+          <div className="mt-1 text-sm font-bold text-slate-100">{counts.healthy + counts.degraded + counts.critical}</div>
+          <div className="text-[10px] text-slate-500">{counts.critical} critical · {counts.degraded} degraded</div>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+          <div className="text-[9px] uppercase tracking-wide text-slate-500">traffic paths</div>
+          <div className="mt-1 text-sm font-bold text-sky-300">{trafficPaths.length}</div>
+          <div className="text-[10px] text-slate-500">{explicitEdges ? "measured edges" : "inferred from nodes"}</div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-6 bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <div className="flex items-start justify-between gap-3 mb-3">
-            <div>
-              <h2 className="text-sm font-semibold flex items-center gap-2">
-                <Server className="w-4 h-4 text-sky-400" /> Asset Topology Canvas
-              </h2>
-              <p className="text-[11px] text-slate-400 mt-1">{topologyStatus}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setTopologyZoom((z) => Math.max(0.8, Number((z - 0.1).toFixed(2))))}
-                className="px-2 py-1 text-xs rounded border border-slate-700 bg-slate-900 hover:bg-slate-800"
-              >
-                -
-              </button>
-              <button
-                onClick={() => setTopologyZoom((z) => Math.min(1.8, Number((z + 0.1).toFixed(2))))}
-                className="px-2 py-1 text-xs rounded border border-slate-700 bg-slate-900 hover:bg-slate-800"
-              >
-                +
-              </button>
-              <button
-                onClick={() => {
-                  setTopologyZoom(1);
-                  setTopologySearch("");
-                }}
-                className="px-2 py-1 text-xs rounded border border-slate-700 bg-slate-900 hover:bg-slate-800"
-              >
-                reset
-              </button>
-            </div>
-          </div>
-
-          <div className="mb-3 flex items-center gap-2">
-            <input
-              type="text"
-              value={topologySearch}
-              onChange={(e) => setTopologySearch(e.target.value)}
-              placeholder="Filter assets by name, id, intent"
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-400"
-            />
-            <span className="text-[10px] px-2 py-1 rounded border border-slate-700 bg-slate-950 text-slate-400 whitespace-nowrap">
-              zoom {topologyZoom.toFixed(1)}x
-            </span>
-          </div>
-
-          <div className="relative h-[440px] rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
-            <div className="absolute inset-0 opacity-40" style={{
-              backgroundImage:
-                "radial-gradient(circle at 20% 20%, color-mix(in oklab, var(--ui-accent) 18%, transparent), transparent 30%), radial-gradient(circle at 80% 75%, color-mix(in oklab, var(--ui-red) 14%, transparent), transparent 28%), linear-gradient(var(--chart-grid) 1px, transparent 1px), linear-gradient(90deg, var(--chart-grid) 1px, transparent 1px)",
-              backgroundSize: "auto, auto, 22px 22px, 22px 22px",
-            }} />
-            {topologyGraph.nodes.length === 0 ? (
-              <div className="relative z-10 h-full flex items-center justify-center text-sm text-slate-400">
-                No asset connections to display for this partition.
-              </div>
-            ) : (
-              <svg viewBox="0 0 100 100" className="relative z-10 w-full h-full">
-                <defs>
-                  <filter id="node-glow" x="-50%" y="-50%" width="200%" height="200%">
-                    <feGaussianBlur stdDeviation="1.4" result="blur" />
-                    <feMerge>
-                      <feMergeNode in="blur" />
-                      <feMergeNode in="SourceGraphic" />
-                    </feMerge>
-                  </filter>
-                </defs>
-                <g transform={`translate(${50 - 50 * topologyZoom} ${50 - 50 * topologyZoom}) scale(${topologyZoom})`}>
-                  {topologyGraph.edges.map((edge, index) => {
-                    const from = topologyGraph.nodes.find((n) => n.id === edge.from);
-                    const to = topologyGraph.nodes.find((n) => n.id === edge.to);
-                    if (!from || !to) return null;
-                    const mx = (from.x + to.x) / 2;
-                    const my = (from.y + to.y) / 2;
-                    const curve = 4;
-                    return (
-                      <path
-                        key={`${edge.from}-${edge.to}-${index}`}
-                        d={`M ${from.x} ${from.y} Q ${mx} ${my - curve} ${to.x} ${to.y}`}
-                        stroke="var(--ui-border-strong)"
-                        strokeWidth="0.35"
-                        fill="none"
-                      >
-                        <title>{edge.relation || "connected"}</title>
-                      </path>
-                    );
-                  })}
-
-                  {topologyGraph.nodes.map((node) => {
-                    const focused = node.id === topologyGraph.focusId;
-                    const color = statusGlow(node.status);
-                    const radius = focused ? 2.6 : 1.8 + Math.min(1.4, node.degree * 0.15);
-                    return (
-                      <g key={node.id} onClick={() => setFocusNodeId(node.id)} className="cursor-pointer">
-                        <circle cx={node.x} cy={node.y} r={radius + 0.8} fill={color} opacity={0.16} filter="url(#node-glow)" />
-                        <circle
-                          cx={node.x}
-                          cy={node.y}
-                          r={radius}
-                          fill={color}
-                          stroke={focused ? "var(--ui-text)" : "var(--ui-border-strong)"}
-                          strokeWidth={focused ? 0.45 : 0.2}
-                        >
-                          <title>{`${node.name} (${node.status})`}</title>
-                        </circle>
-                        {(focused || node.degree > 2) && (
-                          <text
-                            x={node.x + 1.9}
-                            y={node.y - 1.2}
-                            fontSize="2.1"
-                            fill="var(--ui-text)"
-                            style={{ paintOrder: "stroke", stroke: "var(--ui-bg)", strokeWidth: 0.7 }}
-                          >
-                            {node.name}
-                          </text>
-                        )}
-                      </g>
-                    );
-                  })}
-                </g>
-              </svg>
-            )}
-          </div>
-
-          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-              <div className="text-slate-400 mb-1">Focused asset</div>
-              <div className="font-semibold text-slate-200 truncate">{focusedNode?.name || "-"}</div>
-              <div className="text-slate-500 mt-1 truncate">{focusedNode?.id || ""}</div>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-              <div className="text-slate-400 mb-1">Legend</div>
-              <div className="flex items-center gap-3">
-                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400" /> healthy</span>
-                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" /> degraded</span>
-                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-400" /> critical</span>
-              </div>
-            </div>
-          </div>
+      {rto.open.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-300">
+          <AlertTriangle size={14} />
+          <span className="font-medium">{rto.open.length} active incident{rto.open.length === 1 ? "" : "s"}</span>
+          <span className="text-rose-200/80">
+            longest open: {rto.open.map((incident) => incident.asset || incident.intent || incident.key).join(", ")}
+          </span>
+          <button type="button" onClick={() => openAlerts()} className="ml-auto rounded border border-rose-400/40 px-2 py-0.5 text-[11px] hover:bg-rose-500/15">
+            Open alerts
+          </button>
         </div>
+      )}
 
-        <div className="lg:col-span-6 space-y-6">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-            <h2 className="text-sm font-semibold mb-4 flex items-center gap-2">
-              <Activity className="w-4 h-4 text-sky-400" /> Latency (p95 & p99 ms)
-            </h2>
-            <div className="flex items-center justify-between gap-3 mb-2">
-              <div className="text-[11px] text-slate-400">{metricStatus}</div>
-              <span className={`text-[10px] px-2 py-0.5 rounded border ${sourceBadgeClass(metricSource)}`}>
-                {sourceBadgeLabel(metricSource)}
-              </span>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="space-y-4">
+          <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-semibold">
+                  <Waypoints size={15} className="text-sky-400" /> Traffic between intents and assets
+                </h2>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Click a node to inspect it. Edge width follows request rate; dashed edges are intent membership.
+                </p>
+              </div>
+              <span className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-400">{trafficStatus}</span>
             </div>
-            <div className="h-48">
-              {metricData.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-xs text-slate-500">
-                  No latency metric samples for current filter window
-                </div>
-              ) : (
-                <MiniLineChart
-                  data={metricData}
-                  series={[
-                    { key: "p95", label: "p95", color: "var(--chart-1)" },
-                    { key: "p99", label: "p99", color: "var(--chart-5)" },
-                  ]}
-                  ariaLabel="Latency p95 and p99"
-                />
-              )}
+            <div className="mt-3">
+              <TrafficGraph
+                model={trafficModel}
+                selectedId={selectedNodeId}
+                onSelect={setSelectedNodeId}
+                onOpenAlerts={() => openAlerts()}
+              />
             </div>
+          </section>
+
+          <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-semibold"><Activity size={15} className="text-sky-400" /> Traffic paths</h2>
+                <p className="mt-1 text-[11px] text-slate-500">Top dependency edges by request rate in the last five minutes.</p>
+              </div>
+            </div>
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-[10px] uppercase tracking-wide text-slate-500">
+                  <tr><th className="px-2 py-1.5">From</th><th className="px-2 py-1.5">To</th><th className="px-2 py-1.5">Relation</th><th className="px-2 py-1.5 text-right">RPS</th><th className="px-2 py-1.5">Source</th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {trafficPaths.map((edge) => {
+                    const from = trafficModel.nodes.find((node) => node.id === edge.from);
+                    const to = trafficModel.nodes.find((node) => node.id === edge.to);
+                    const fromAlerted = selectedNodeAlerts.length > 0 && from?.id === focusNode?.id;
+                    return (
+                      <tr key={`${edge.from}-${edge.to}`} className="hover:bg-slate-800/40">
+                        <td className="px-2 py-1.5">
+                          <button type="button" onClick={() => setSelectedNodeId(edge.from)} className={`inline-flex items-center gap-1.5 ${fromAlerted ? "text-rose-300" : "text-slate-200"}`}>
+                            {fromAlerted && <AlertTriangle size={11} />} {from?.name ?? edge.from}
+                          </button>
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <button type="button" onClick={() => setSelectedNodeId(edge.to)} className="text-slate-300 hover:text-slate-100">{to?.name ?? edge.to}</button>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-500">{edge.relation || "depends_on"}</td>
+                        <td className="px-2 py-1.5 text-right font-mono text-sky-300">{edge.rps.toFixed(2)}</td>
+                        <td className="px-2 py-1.5 text-[10px] text-slate-500">{edge.inferred ? "inferred" : "measured"}</td>
+                      </tr>
+                    );
+                  })}
+                  {trafficPaths.length === 0 && (
+                    <tr><td colSpan={5} className="px-2 py-6 text-center text-slate-500">No dependency edges were reported for this partition.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold">Latency (p95 / p99)</h2>
+                <span className="text-[10px] text-slate-500">{telemetryStatus}</span>
+              </div>
+              <div className="mt-3 h-44">
+                {telemetry.length === 0 ? (
+                  <div className="flex h-full items-center justify-center text-xs text-slate-500">No latency samples for this window</div>
+                ) : (
+                  <MiniLineChart
+                    data={telemetry}
+                    series={[{ key: "p95", label: "p95", color: "var(--chart-1)" }, { key: "p99", label: "p99", color: "var(--chart-5)" }]}
+                    ariaLabel="Latency p95 and p99"
+                  />
+                )}
+              </div>
+              <div className="mt-1 text-[10px] text-slate-600">source: {metricSource}</div>
+            </section>
+            <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold">Throughput (RPS)</h2>
+                <span className="text-[10px] text-slate-500">{minutesLabel(rangeMinutes)}</span>
+              </div>
+              <div className="mt-3 h-44">
+                {telemetry.length === 0 ? (
+                  <div className="flex h-full items-center justify-center text-xs text-slate-500">No throughput samples for this window</div>
+                ) : (
+                  <MiniLineChart
+                    data={telemetry}
+                    series={[{ key: "rps", label: "rps", color: "var(--chart-2)" }]}
+                    ariaLabel="Throughput in requests per second"
+                  />
+                )}
+              </div>
+            </section>
           </div>
 
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-            <h2 className="text-sm font-semibold mb-4 flex items-center gap-2">
-              <Activity className="w-4 h-4 text-sky-400" /> Throughput (RPS)
-            </h2>
-            <div className="h-36">
-              {metricData.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-xs text-slate-500">
-                  No throughput metric samples for current filter window
-                </div>
-              ) : (
-                <MiniLineChart
-                  data={metricData}
-                  series={[{ key: "rps", label: "rps", color: "var(--chart-2)" }]}
-                  ariaLabel="Throughput in requests per second"
-                />
-              )}
+          <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold">Recent traces</h2>
+              <span className="text-[10px] text-slate-500">{traceStatus}</span>
             </div>
-          </div>
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-            <h2 className="text-sm font-semibold mb-2">Recent Traces</h2>
-            <div className="flex items-center justify-between gap-3 mb-3">
-              <div className="text-[11px] text-slate-400">{traceStatus}</div>
-              <span className={`text-[10px] px-2 py-0.5 rounded border ${sourceBadgeClass(traceSource)}`}>
-                {sourceBadgeLabel(traceSource)}
-              </span>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <div className="lg:col-span-1 space-y-2 max-h-56 overflow-y-auto pr-1">
+            <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">
+              <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
                 {traces.length === 0 ? (
-                  <div className="text-xs text-slate-500">No traces available for selected window.</div>
+                  <p className="text-xs text-slate-500">No traces in this window.</p>
                 ) : (
                   traces.map((trace) => (
                     <button
                       key={trace.trace_id}
+                      type="button"
                       onClick={() => void openTrace(trace)}
-                      className={`w-full text-left px-3 py-2 rounded border text-xs font-mono transition ${
+                      className={`w-full rounded border px-2 py-1.5 text-left text-[11px] ${
                         selectedTrace?.trace_id === trace.trace_id
-                          ? "bg-sky-500/15 border-sky-400/60 text-sky-200"
-                          : "bg-slate-950 border-slate-700 text-slate-300 hover:bg-slate-900"
+                          ? "border-sky-400/60 bg-sky-500/15 text-sky-200"
+                          : "border-slate-700 bg-slate-950 text-slate-300 hover:bg-slate-900"
                       }`}
                     >
                       <div className="truncate">{trace.service || "unknown-service"}</div>
-                      <div className="truncate text-[10px] text-slate-400">{trace.trace_id}</div>
+                      <div className="truncate font-mono text-[9px] text-slate-500">{trace.trace_id}</div>
                     </button>
                   ))
                 )}
               </div>
-              <div className="lg:col-span-2 border border-slate-800 rounded p-3 bg-slate-950/70 max-h-56 overflow-y-auto">
+              <div className="max-h-64 overflow-y-auto rounded border border-slate-800 bg-slate-950/70 p-2">
                 {traceSpans.length === 0 ? (
-                  <div className="text-xs text-slate-500">Select a trace to render the waterfall.</div>
+                  <p className="text-xs text-slate-500">Select a trace to render its waterfall.</p>
                 ) : (
                   <TraceWaterfall spans={traceSpans} />
                 )}
               </div>
             </div>
-          </div>
+          </section>
+        </div>
 
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-            <h2 className="text-sm font-semibold mb-3">Internal Partitions Status</h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-950 text-slate-400 border-b border-slate-800">
-                  <tr>
-                    <th className="p-2">Partition</th>
-                    <th className="p-2">Status</th>
-                    <th className="p-2">Health</th>
-                    <th className="p-2">Message</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800">
-                  {tableRows.length === 0 ? (
-                    <tr>
-                      <td className="p-2 text-slate-500" colSpan={4}>No recent events for this partition.</td>
-                    </tr>
-                  ) : (
-                    tableRows.map((row, idx) => (
-                      <tr key={`${row.timestamp || "na"}-${idx}`}>
-                        <td className="p-2 font-mono">{row.asset || row.intent || "component"}</td>
-                        <td className="p-2 text-slate-300">{row.kind || "event"}</td>
-                        <td className="p-2 text-slate-200">{row.status || health?.overall_health?.level || "unknown"}</td>
-                        <td className="p-2 text-slate-300">{row.message || "-"}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+        <div className="space-y-4">
+          <RtoPanel summary={rto} targetMs={rtoTarget} onTargetChange={setRtoTarget} onOpenAlerts={() => openAlerts()} />
+
+          <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="flex items-center gap-2 text-sm font-semibold"><AlertTriangle size={15} className="text-rose-400" /> Firing alerts</h2>
+              <span className="text-[10px] text-slate-500">{alertsStatus}</span>
             </div>
-          </div>
+            <div className="mt-2 max-h-64 space-y-1.5 overflow-y-auto pr-1">
+              {activeAlerts.slice(0, 12).map((alert) => (
+                <button
+                  key={alert.fingerprint}
+                  type="button"
+                  onClick={() => openAlerts(alert.fingerprint)}
+                  className="flex w-full items-start gap-2 rounded border border-slate-800 bg-slate-950/70 px-2 py-1.5 text-left hover:border-rose-500/40"
+                >
+                  <span className={`mt-0.5 rounded border px-1 text-[9px] uppercase ${alertSeverityClass(alert.severity)}`}>{alert.severity}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[11px] text-slate-200">{alert.labels.alertname || alert.fingerprint.slice(0, 10)}</span>
+                    <span className="block truncate text-[10px] text-slate-500">{alert.annotations?.summary || alert.status}</span>
+                  </span>
+                  <ExternalLink size={11} className="mt-0.5 shrink-0 text-slate-500" />
+                </button>
+              ))}
+              {activeAlerts.length === 0 && (
+                <p className="flex items-center gap-2 text-xs text-emerald-300"><CheckCircle2 size={13} /> No firing alerts for this partition.</p>
+              )}
+            </div>
+            <button type="button" onClick={() => openAlerts()} className="mt-2 w-full rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-400 hover:bg-slate-800">
+              Open alert inbox
+            </button>
+          </section>
+
+          <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="flex items-center gap-2 text-sm font-semibold"><Server size={15} className="text-sky-400" /> Selected node</h2>
+              {focusNode && (
+                <span className={`rounded border px-1.5 py-0.5 text-[9px] uppercase ${statusClass(focusStatus)}`}>
+                  {focusStatus}
+                </span>
+              )}
+            </div>
+            {focusNode ? (
+              <div className="mt-2 space-y-1 text-[11px]">
+                <div className="text-sm font-semibold text-slate-100">{focusNode.name}</div>
+                <div className="truncate text-slate-500">{focusNode.id}</div>
+                <div className="text-slate-500">intent: {focusNode.intent || "unknown"}</div>
+                <div className="text-slate-500">rps: {(nodeRps.get(focusNode.id) ?? 0).toFixed(2)}</div>
+                <div className={selectedNodeAlerts.length > 0 ? "text-rose-300" : "text-emerald-300"}>
+                  {selectedNodeAlerts.length > 0 ? `${selectedNodeAlerts.length} firing alert(s)` : "no firing alerts"}
+                </div>
+                {selectedNodeAlerts.length > 0 && (
+                  <button type="button" onClick={() => openAlerts(selectedNodeAlerts[0]?.fingerprint)} className="mt-1 rounded border border-rose-500/40 px-2 py-0.5 text-[10px] text-rose-300 hover:bg-rose-500/10">
+                    Inspect alert
+                  </button>
+                )}
+              </div>
+            ) : (
+              <p className="mt-2 text-xs text-slate-500">Select a node in the traffic map.</p>
+            )}
+          </section>
+
+          <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <h2 className="text-sm font-semibold">Recent Guardian events</h2>
+            <div className="mt-2 max-h-56 space-y-1.5 overflow-y-auto pr-1">
+              {events.slice(0, 10).map((event, index) => (
+                <div key={`${event.timestamp || "na"}-${index}`} className="rounded border border-slate-800 bg-slate-950/70 px-2 py-1.5">
+                  <div className="flex items-center gap-2 text-[10px]">
+                    <span className="truncate font-mono text-slate-400">{event.kind || event.status || "event"}</span>
+                    <span className="ml-auto shrink-0 text-slate-600">{event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : ""}</span>
+                  </div>
+                  <div className="truncate text-[10px] text-slate-500">{event.asset || event.intent || "component"} · {event.message || event.status || "—"}</div>
+                </div>
+              ))}
+              {events.length === 0 && <p className="text-xs text-slate-500">No events for this window.</p>}
+            </div>
+          </section>
+
+          {health?.overall_health?.level && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-[11px] text-slate-500">
+              Guardian health: <span className="font-semibold text-slate-300">{health.overall_health.level}</span>
+              {health.overall_health.reason ? ` · ${health.overall_health.reason}` : ""}
+            </div>
+          )}
         </div>
       </div>
     </div>

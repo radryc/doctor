@@ -52,6 +52,7 @@ const (
 	KindBigQuery      = "bigquery"
 	KindMonoFS        = "monofs"
 	KindAWS           = "aws"
+	KindGCP           = "gcp"
 )
 
 // Label names injected by the proxy.
@@ -67,6 +68,7 @@ const (
 const (
 	SourceDoctor    = "doctor"
 	SourceAWS       = "aws"
+	SourceGCP       = "gcp"
 	SourceRecording = "recording"
 )
 

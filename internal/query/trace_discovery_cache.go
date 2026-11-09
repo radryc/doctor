@@ -97,6 +97,13 @@ func cloneWarnings(in []proxy.Warning) []proxy.Warning {
 // its bound, drops one arbitrary entry to make room. The caller must hold
 // traceDiscoveryMu.
 func (s *Service) pruneTraceDiscoveryLocked(now time.Time) {
+	// Scanning three 10k-entry maps on every store is expensive; only do it
+	// when a cache has actually reached its bound.
+	if len(s.traceTagValuesCache) < maxTraceDiscoveryCacheEntries &&
+		len(s.traceTagsCache) < maxTraceDiscoveryCacheEntries &&
+		len(s.traceScopesCache) < maxTraceDiscoveryCacheEntries {
+		return
+	}
 	for key, entry := range s.traceTagValuesCache {
 		if now.After(entry.expires) {
 			delete(s.traceTagValuesCache, key)
@@ -139,14 +146,18 @@ func (s *Service) cachedTraceTagValues(ctx context.Context, tenant, tag string) 
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "tag-values", tag)
 	now := time.Now()
 	s.traceDiscoveryMu.Lock()
-	defer s.traceDiscoveryMu.Unlock()
 	entry, ok := s.traceTagValuesCache[key]
 	if !ok || now.After(entry.expires) {
 		if ok {
 			delete(s.traceTagValuesCache, key)
 		}
+		s.traceDiscoveryMu.Unlock()
 		return nil, nil, false
 	}
+	s.traceDiscoveryMu.Unlock()
+	// Stored entries are immutable (storeTrace* replaces them), so cloning
+	// after releasing the lock is safe and keeps large tag sets off the
+	// critical section.
 	return cloneStringSet(entry.values), cloneWarnings(entry.warnings), true
 }
 
@@ -155,6 +166,8 @@ func (s *Service) storeTraceTagValues(ctx context.Context, tenant, tag string, v
 		return
 	}
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "tag-values", tag)
+	cachedValues := cloneStringSet(values)
+	cachedWarnings := cloneWarnings(warnings)
 	s.traceDiscoveryMu.Lock()
 	defer s.traceDiscoveryMu.Unlock()
 	now := time.Now()
@@ -163,8 +176,8 @@ func (s *Service) storeTraceTagValues(ctx context.Context, tenant, tag string, v
 		s.traceTagValuesCache = make(map[string]traceTagValuesCacheEntry)
 	}
 	s.traceTagValuesCache[key] = traceTagValuesCacheEntry{
-		values:   cloneStringSet(values),
-		warnings: cloneWarnings(warnings),
+		values:   cachedValues,
+		warnings: cachedWarnings,
 		expires:  now.Add(s.traceDiscoveryTTL()),
 	}
 }
@@ -176,14 +189,15 @@ func (s *Service) cachedTraceTags(ctx context.Context, tenant string) (map[strin
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "tags", "")
 	now := time.Now()
 	s.traceDiscoveryMu.Lock()
-	defer s.traceDiscoveryMu.Unlock()
 	entry, ok := s.traceTagsCache[key]
 	if !ok || now.After(entry.expires) {
 		if ok {
 			delete(s.traceTagsCache, key)
 		}
+		s.traceDiscoveryMu.Unlock()
 		return nil, nil, false
 	}
+	s.traceDiscoveryMu.Unlock()
 	return cloneStringSet(entry.tags), cloneWarnings(entry.warnings), true
 }
 
@@ -192,6 +206,8 @@ func (s *Service) storeTraceTags(ctx context.Context, tenant string, tags map[st
 		return
 	}
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "tags", "")
+	cachedTags := cloneStringSet(tags)
+	cachedWarnings := cloneWarnings(warnings)
 	s.traceDiscoveryMu.Lock()
 	defer s.traceDiscoveryMu.Unlock()
 	now := time.Now()
@@ -200,8 +216,8 @@ func (s *Service) storeTraceTags(ctx context.Context, tenant string, tags map[st
 		s.traceTagsCache = make(map[string]traceTagsCacheEntry)
 	}
 	s.traceTagsCache[key] = traceTagsCacheEntry{
-		tags:     cloneStringSet(tags),
-		warnings: cloneWarnings(warnings),
+		tags:     cachedTags,
+		warnings: cachedWarnings,
 		expires:  now.Add(s.traceDiscoveryTTL()),
 	}
 }
@@ -213,14 +229,15 @@ func (s *Service) cachedTraceScopes(ctx context.Context, tenant string) ([]tempo
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "scopes", "")
 	now := time.Now()
 	s.traceDiscoveryMu.Lock()
-	defer s.traceDiscoveryMu.Unlock()
 	entry, ok := s.traceScopesCache[key]
 	if !ok || now.After(entry.expires) {
 		if ok {
 			delete(s.traceScopesCache, key)
 		}
+		s.traceDiscoveryMu.Unlock()
 		return nil, nil, false
 	}
+	s.traceDiscoveryMu.Unlock()
 	return append([]tempo.TagScope(nil), entry.scopes...), cloneWarnings(entry.warnings), true
 }
 
@@ -229,6 +246,8 @@ func (s *Service) storeTraceScopes(ctx context.Context, tenant string, scopes []
 		return
 	}
 	key := s.traceDiscoveryCacheKey(ctx, tenant, "scopes", "")
+	cachedScopes := append([]tempo.TagScope(nil), scopes...)
+	cachedWarnings := cloneWarnings(warnings)
 	s.traceDiscoveryMu.Lock()
 	defer s.traceDiscoveryMu.Unlock()
 	now := time.Now()
@@ -237,8 +256,8 @@ func (s *Service) storeTraceScopes(ctx context.Context, tenant string, scopes []
 		s.traceScopesCache = make(map[string]traceScopesCacheEntry)
 	}
 	s.traceScopesCache[key] = traceScopesCacheEntry{
-		scopes:   append([]tempo.TagScope(nil), scopes...),
-		warnings: cloneWarnings(warnings),
+		scopes:   cachedScopes,
+		warnings: cachedWarnings,
 		expires:  now.Add(s.traceDiscoveryTTL()),
 	}
 }

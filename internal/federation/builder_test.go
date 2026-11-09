@@ -107,3 +107,60 @@ func TestTargetMetaAcceptsServiceObjects(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildCatalogIncludesGCP(t *testing.T) {
+	result, err := BuildCatalog(BuildInput{
+		Version: "v1",
+		Partitions: []PartitionInfo{
+			{Name: "api", Provider: "gcp", Account: "demo-project", Region: "europe-west1"},
+			{Name: "worker", Provider: "aws", Account: "123456789012", Region: "eu-west-1"},
+		},
+		Pushers: []PusherInfo{
+			{Name: "gcp-demo-project", Provider: "gcp", Account: "demo-project", Region: "europe-west1", Endpoint: "http://gcp-pusher:19091", TokenRef: "guardian-pusher://gcp-demo-project"},
+			{Name: "aws-123456789012", Provider: "aws", Account: "123456789012", Region: "eu-west-1", Endpoint: "http://aws-pusher:19090", TokenRef: "guardian-pusher://aws-123456789012"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildCatalog: %v", err)
+	}
+	if len(result.Snapshot.Targets) != 2 {
+		t.Fatalf("targets = %+v", result.Snapshot.Targets)
+	}
+	var gcp *Target
+	var aws *Target
+	for i := range result.Snapshot.Targets {
+		target := &result.Snapshot.Targets[i]
+		switch target.Provider {
+		case "gcp":
+			gcp = target
+		case "aws":
+			aws = target
+		}
+	}
+	if gcp == nil || aws == nil {
+		t.Fatalf("providers missing: %+v", result.Snapshot.Targets)
+	}
+	if gcp.ID != "gcp-demo-project-europe-west1" || gcp.Account != "demo-project" {
+		t.Errorf("gcp target = %+v", gcp)
+	}
+	if len(gcp.LogGroups) != 0 {
+		t.Errorf("gcp target must not inherit AWS log-group conventions: %v", gcp.LogGroups)
+	}
+	if aws.ID != "aws-123456789012-eu-west-1" || len(aws.LogGroups) == 0 {
+		t.Errorf("aws target = %+v", aws)
+	}
+
+	catalog, err := NewCatalog(result.Snapshot.Targets, result.Snapshot.Version)
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
+	if filtered := catalog.FilterProvider("gcp"); filtered == nil || filtered.Len() != 1 {
+		t.Fatalf("gcp catalog = %+v", filtered)
+	}
+	if filtered := catalog.FilterProvider("aws"); filtered == nil || filtered.Len() != 1 {
+		t.Fatalf("aws catalog = %+v", filtered)
+	}
+	if filtered := catalog.FilterProvider("azure"); filtered != nil {
+		t.Fatalf("unexpected azure catalog: %+v", filtered)
+	}
+}

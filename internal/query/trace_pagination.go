@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/radryc/doctor/internal/proxy"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
+	gcpstore "github.com/radryc/doctor/internal/store/gcp"
 	"github.com/radryc/doctor/internal/tracecontext"
 	"github.com/radryc/monofs/pkg/authz/policy"
 )
@@ -329,6 +331,128 @@ func (s *Service) queryAWSTracePage(
 	return out, len(summaries) >= awsLimit
 }
 
+// queryGCPTracePage fetches federated Cloud Trace summaries. GCP trace
+// summaries frequently omit span attributes, in which case the partition
+// falls back to the GCP region/project; the detail fetch resolves the Cloud Run
+// service and therefore the Guardian application partition.
+func (s *Service) queryGCPTracePage(
+	ctx context.Context,
+	service string,
+	identity signalIdentity,
+	from, to time.Time,
+	limit int,
+	cursor *tracePageCursor,
+) ([]traceSummary, bool) {
+	if !s.gcpDiscoveryReady() || limit <= 0 {
+		return nil, false
+	}
+	gcpLimit := limit
+	if gcpLimit < awsTracePageLimit {
+		gcpLimit = awsTracePageLimit
+	}
+	gcpTo := to
+	if cursor != nil && cursor.MinTime.Before(gcpTo) {
+		gcpTo = cursor.MinTime
+	}
+	gcpCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	summaries, err := s.gcp.QueryTraces(gcpCtx, gcpstore.TraceQuery{
+		Service: service,
+		From:    from,
+		To:      gcpTo,
+		Limit:   gcpLimit,
+	})
+	if err != nil {
+		return nil, false
+	}
+	// Cloud Trace list summaries do not carry the Cloud Run service name.
+	// Correlate trace IDs with GCP application logs, which do carry
+	// guardian_partition, so app-level partitions (diva-shared) work in the
+	// trace list as well as the detail view.
+	tracePartitions := s.gcpTracePartitionMap(ctx, from, gcpTo)
+
+	out := make([]traceSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		if summary.TraceID == "" {
+			continue
+		}
+		partition := proxy.GCPTracePartition(summary)
+		if mapped := tracePartitions[traceMergeKey(summary.TraceID)]; mapped != "" {
+			partition = mapped
+		}
+		if !identity.matches(partition, "", "") {
+			continue
+		}
+		spanCount := summary.SpanCount
+		if spanCount <= 0 {
+			spanCount = 1
+		}
+		trace := traceSummary{
+			TraceID:   summary.TraceID,
+			Service:   firstNonEmpty(summary.Service, proxy.SourceGCP),
+			Partition: partition,
+			MinTime:   summary.StartTime,
+			MaxTime:   summary.EndTime,
+			SpanCount: spanCount,
+		}
+		if !traceBeforeCursor(&trace, cursor) {
+			continue
+		}
+		out = append(out, trace)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].MinTime.Equal(out[j].MinTime) {
+			return traceMergeKey(out[i].TraceID) > traceMergeKey(out[j].TraceID)
+		}
+		return out[i].MinTime.After(out[j].MinTime)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, len(summaries) >= gcpLimit
+}
+
+// gcpTracePartitionMap correlates trace IDs with GCP application log records,
+// which carry guardian_partition. Cloud Trace list summaries do not include the
+// Cloud Run service name, so this is what makes app partitions such as
+// diva-shared filterable in the trace list.
+func (s *Service) gcpTracePartitionMap(ctx context.Context, from, to time.Time) map[string]string {
+	if !s.gcpDiscoveryReady() {
+		return nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	records, err := s.gcp.QueryLogs(callCtx, gcpstore.LogQuery{
+		LogName: "run.googleapis.com/stdout",
+		From:    from,
+		To:      to,
+		Limit:   1000,
+	})
+	if err != nil {
+		return nil
+	}
+	partitions := make(map[string]string)
+	for _, record := range records {
+		traceID := firstNonEmpty(
+			record.Fields["traceId"],
+			record.Fields["trace_id"],
+			record.Fields["logging.googleapis.com/trace"],
+		)
+		if traceID == "" {
+			continue
+		}
+		if idx := strings.LastIndex(traceID, "/"); idx >= 0 {
+			traceID = traceID[idx+1:]
+		}
+		partition := firstNonEmpty(record.Fields["guardian_partition"], record.Fields["partition"])
+		if partition == "" {
+			continue
+		}
+		partitions[traceMergeKey(traceID)] = partition
+	}
+	return partitions
+}
+
 // traceMergeKey folds W3C and X-Ray renderings of the same trace into one key.
 func traceMergeKey(traceID string) string {
 	if canonical, err := tracecontext.CanonicalTraceID(traceID); err == nil {
@@ -340,30 +464,18 @@ func traceMergeKey(traceID string) string {
 // mergeTracePages combines local and federated summaries without duplicates,
 // then applies the cursor and page size again so the union is globally ordered.
 func mergeTracePages(local []traceSummary, aws []traceSummary, limit int, cursor *tracePageCursor) ([]traceSummary, bool) {
-	byID := make(map[string]traceSummary, len(local)+len(aws))
-	for _, summary := range local {
-		key := traceMergeKey(summary.TraceID)
-		if existing, ok := byID[key]; ok {
-			if summary.MinTime.Before(existing.MinTime) {
-				existing.MinTime = summary.MinTime
-			}
-			if summary.MaxTime.After(existing.MaxTime) {
-				existing.MaxTime = summary.MaxTime
-			}
-			if summary.SpanCount > existing.SpanCount {
-				existing.SpanCount = summary.SpanCount
-			}
-			byID[key] = existing
-			continue
-		}
-		byID[key] = summary
-	}
-	for _, summary := range aws {
+	return mergeTracePagesWithGCP(local, aws, nil, limit, cursor)
+}
+
+// mergeTracePagesWithGCP is mergeTracePages including Cloud Trace summaries.
+func mergeTracePagesWithGCP(local, aws, gcp []traceSummary, limit int, cursor *tracePageCursor) ([]traceSummary, bool) {
+	byID := make(map[string]traceSummary, len(local)+len(aws)+len(gcp))
+	add := func(summary traceSummary) {
 		key := traceMergeKey(summary.TraceID)
 		existing, ok := byID[key]
 		if !ok {
 			byID[key] = summary
-			continue
+			return
 		}
 		if summary.MinTime.Before(existing.MinTime) {
 			existing.MinTime = summary.MinTime
@@ -375,6 +487,15 @@ func mergeTracePages(local []traceSummary, aws []traceSummary, limit int, cursor
 			existing.SpanCount = summary.SpanCount
 		}
 		byID[key] = existing
+	}
+	for _, summary := range local {
+		add(summary)
+	}
+	for _, summary := range aws {
+		add(summary)
+	}
+	for _, summary := range gcp {
+		add(summary)
 	}
 
 	merged := make([]traceSummary, 0, len(byID))
@@ -413,8 +534,9 @@ func (s *Service) recentTracePage(
 		return nil, nil, false, err
 	}
 	aws, awsHasMore := s.queryAWSTracePage(ctx, service, identity, from, to, limit, cursor)
-	merged, mergedHasMore := mergeTracePages(local, aws, limit, cursor)
-	hasMore := localHasMore || awsHasMore || mergedHasMore
+	gcp, gcpHasMore := s.queryGCPTracePage(ctx, service, identity, from, to, limit, cursor)
+	merged, mergedHasMore := mergeTracePagesWithGCP(local, aws, gcp, limit, cursor)
+	hasMore := localHasMore || awsHasMore || gcpHasMore || mergedHasMore
 	var next *tracePageCursor
 	if len(merged) > 0 && hasMore {
 		next = &tracePageCursor{MinTime: merged[len(merged)-1].MinTime, TraceID: merged[len(merged)-1].TraceID}

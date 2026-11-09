@@ -257,6 +257,7 @@ body {
 
 /* ── Top bar ── */
 .app-topbar {
+  position: relative;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -267,6 +268,48 @@ body {
   background: color-mix(in oklab, var(--ui-panel) 92%, transparent);
   border-bottom: 1px solid var(--ui-border);
   backdrop-filter: blur(12px);
+}
+
+.app-topbar__activity {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--ui-border);
+  border-radius: 999px;
+  background: var(--ui-overlay);
+  color: var(--ui-accent);
+  font-size: 0.68rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.app-topbar__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.app-topbar__progress.is-active { opacity: 1; }
+
+.app-topbar__progress::after {
+  content: "";
+  display: block;
+  width: 32%;
+  height: 100%;
+  background: var(--ui-accent);
+  animation: app-topbar-progress 1.1s ease-in-out infinite;
+}
+
+@keyframes app-topbar-progress {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(420%); }
 }
 
 .app-topbar__crumb {
@@ -1237,6 +1280,37 @@ pre {
 .trace-time  { color:var(--muted); font-size:0.78rem; }
 .trace-wf-wrap { display:none; padding:0.75rem 1.25rem 1rem; border-top:1px solid var(--border); background:var(--ui-scrim); }
 .trace-row.xp-expanded .trace-wf-wrap { display:block; }
+.trace-logs {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--ui-panel) 55%, transparent);
+  overflow: hidden;
+}
+.trace-logs__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+.trace-logs__head h3 { margin: 0; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ui-muted); }
+.trace-logs__empty { padding: 1rem 0.85rem; color: var(--muted); font-size: 0.82rem; }
+.trace-log-list { display: grid; }
+.trace-log-row {
+  display: grid;
+  grid-template-columns: 92px 180px minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: baseline;
+  padding: 0.5rem 0.85rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  font-size: 0.78rem;
+}
+.trace-log-row:last-child { border-bottom: 0; }
+.trace-log-row:hover { background: var(--ui-hover); }
+.trace-log-time { color: var(--ui-faint); font-variant-numeric: tabular-nums; }
+.trace-log-service { color: var(--teal); font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-log-body { color: var(--ui-text); font-family: monospace; white-space: pre-wrap; word-break: break-word; }
 .trace-span-table {
   border: 1px solid var(--border);
   border-radius: 12px;

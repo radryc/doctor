@@ -7,7 +7,7 @@ import { useTimeRange } from "../context/TimeRangeContext";
 import { copyText } from "../lib/clipboard";
 import { splitServiceIdentity } from "../lib/logs";
 import TraceDetails, { fmtTime } from "../components/charts/TraceDetails";
-import type { LogIdentityInfo, TraceSummary, TraceRecord } from "../types/api";
+import type { LogIdentityInfo, LogRecord, TraceSummary, TraceRecord } from "../types/api";
 
 // Accepts the two formats Doctor emits and returns the canonical 32-hex form:
 //   W3C:  4bf92f3577b34da6a3ce929d0e0e4736
@@ -101,6 +101,8 @@ function SingleTraceView({ traceId, tenant, onBack }: { traceId: string; tenant:
   const navigate = useNavigate();
   const [spans, setSpans] = useState<TraceRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogRecord[] | null>(null);
+  const [logsError, setLogsError] = useState<string | null>(null);
 
   useEffect(() => {
     setSpans(null);
@@ -118,6 +120,24 @@ function SingleTraceView({ traceId, tenant, onBack }: { traceId: string; tenant:
         setSpans(enriched);
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "Load failed"));
+  }, [traceId, tenant]);
+
+  useEffect(() => {
+    setLogs(null);
+    setLogsError(null);
+    const to = new Date();
+    const from = new Date(to.getTime() - 24 * 60 * 60 * 1000);
+    const params = new URLSearchParams({
+      tenant,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      limit: "200",
+      q: traceId,
+    });
+    api
+      .searchLogs(params)
+      .then((data) => setLogs(data.results ?? []))
+      .catch((err: unknown) => setLogsError(err instanceof Error ? err.message : "Log load failed"));
   }, [traceId, tenant]);
 
   return (
@@ -156,6 +176,44 @@ function SingleTraceView({ traceId, tenant, onBack }: { traceId: string; tenant:
           ) : (
             <div style={{ display: "grid", gap: "1rem", padding: "0.25rem 0" }}>
               <TraceDetails spans={spans} />
+              <div className="trace-logs">
+                <div className="trace-logs__head">
+                  <h3>Correlated logs{logs ? ` (${logs.length})` : ""}</h3>
+                  <button
+                    type="button"
+                    className="xp-live-btn"
+                    onClick={() => navigate(`/logs?q=${encodeURIComponent(traceId)}&range=1440`)}
+                  >
+                    <FileText size={12} /> Open in Logs
+                  </button>
+                </div>
+                {logsError ? (
+                  <div className="trace-logs__empty">Could not load logs: {logsError}</div>
+                ) : logs === null ? (
+                  <div className="trace-logs__empty">Loading correlated logs…</div>
+                ) : logs.length === 0 ? (
+                  <div className="trace-logs__empty">
+                    No correlated logs for this trace. Traces emitted by{" "}
+                    <code>./demo.sh load</code> / <code>./demo.sh deploy-shared</code> include one
+                    log per hop (k8s → GCP → AWS).
+                  </div>
+                ) : (
+                  <div className="trace-log-list">
+                    {logs.map((log, index) => (
+                      <div
+                        className="trace-log-row"
+                        key={`${log.timestamp}-${log.service}-${index}`}
+                      >
+                        <span className="trace-log-time">
+                          {new Date(log.timestamp).toLocaleTimeString()}
+                        </span>
+                        <span className="trace-log-service">{log.service}</span>
+                        <span className="trace-log-body">{log.body}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -191,8 +249,9 @@ export default function TracesPage() {
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [identities, setIdentities] = useState<LogIdentityInfo[]>([]);
   const [partitions, setPartitions] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState("Fetching traces…");
+  const [loading, setLoading] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [status, setStatus] = useState("Select a partition and press Run.");
   const [copiedView, setCopiedView] = useState(false);
   const [inputVal, setInputVal] = useState("");
   const [page, setPage] = useState(1);
@@ -203,8 +262,15 @@ export default function TracesPage() {
   const [nextCursor, setNextCursor] = useState("");
   const [hasMore, setHasMore] = useState(false);
   const [loadError, setLoadError] = useState("");
+  // Cursors are only valid for the window that produced them.
+  const rangeKey = `${from.getTime()}-${to.getTime()}`;
+  const [pagedRangeKey, setPagedRangeKey] = useState(rangeKey);
+  // Guards against out-of-order responses: a slow request for a previous time
+  // window must not overwrite the latest one.
+  const loadSeq = useRef(0);
 
-  const pageCursor = page > 1 ? pageCursors[page - 1] ?? "" : "";
+  const pageCursor =
+    pagedRangeKey === rangeKey && page > 1 ? pageCursors[page - 1] ?? "" : "";
 
   const resetPagination = () => {
     setPage(1);
@@ -214,7 +280,20 @@ export default function TracesPage() {
     setLoadError("");
   };
 
+  // Shifting/zooming the global time range invalidates the current page cursor.
+  // Reset to page 1 so a stale cursor cannot keep showing the previous window.
+  useEffect(() => {
+    if (pagedRangeKey === rangeKey) return;
+    setPagedRangeKey(rangeKey);
+    setPage(1);
+    setPageCursors([null]);
+    setNextCursor("");
+    setHasMore(false);
+    setLoadError("");
+  }, [rangeKey, pagedRangeKey]);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -229,17 +308,19 @@ export default function TracesPage() {
       if (assetFilter) params.set("asset", assetFilter);
       if (pageCursor) params.set("cursor", pageCursor);
       const data = await api.getRecentTraces(params);
+      if (seq !== loadSeq.current) return;
       setTraces(data.traces ?? []);
       setHasMore(Boolean(data.has_more));
       setNextCursor(data.next_cursor ?? "");
       setLoadError("");
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setTraces([]);
       setHasMore(false);
       setNextCursor("");
       setLoadError(err instanceof Error ? err.message : "unknown");
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [config.default_tenant, from, to, service, partitionFilter, intentFilter, assetFilter, pageCursor]);
 
@@ -329,19 +410,38 @@ export default function TracesPage() {
     setNextCursor("");
     setHasMore(false);
     setLoadError("");
+    // Deep links with explicit filters/range/tenant intent should query
+    // immediately; a bare /traces waits for Run.
+    const hasExplicitQuery = ["trace_id", "service", "partition", "intent", "asset", "range"].some(
+      (key) => Boolean(searchParams.get(key))
+    );
+    if (hasExplicitQuery) setStarted(true);
   }, [paramKey]);
 
+  // Traces default to a short window instead of the shared 1h default. Only do
+  // this on the first visit without an explicit range or a user-selected range;
+  // reopening traces keeps whatever the user chose elsewhere.
+  const appliedDefaultRange = useRef(false);
   useEffect(() => {
-    if (focusedTraceId) return;
+    if (appliedDefaultRange.current) return;
+    appliedDefaultRange.current = true;
+    if ((searchParams.get("range") ?? "").trim()) return;
+    if (!tr.userSelected && tr.mode === "relative") {
+      tr.setRelative("5m");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!started || focusedTraceId) return;
     void load();
-  }, [load, focusedTraceId]);
+  }, [load, focusedTraceId, started]);
 
   // Live refresh
   useEffect(() => {
-    if (!liveOn || focusedTraceId) return;
+    if (!liveOn || !started || focusedTraceId) return;
     const t = setInterval(() => void load(), 30000);
     return () => clearInterval(t);
-  }, [liveOn, load, focusedTraceId]);
+  }, [liveOn, load, focusedTraceId, started]);
 
   // Debounce text filter
   useEffect(() => {
@@ -369,7 +469,9 @@ export default function TracesPage() {
   });
 
   useEffect(() => {
-    if (loading) {
+    if (!started) {
+      setStatus("Select a partition and press Run.");
+    } else if (loading) {
       setStatus("Fetching traces…");
     } else if (loadError) {
       setStatus("Error: " + loadError);
@@ -377,7 +479,7 @@ export default function TracesPage() {
       const more = hasMore ? " · more available" : "";
       setStatus(`${filtered.length} traces on page ${page} — last ${rangeLabel}${more}`);
     }
-  }, [loading, loadError, filtered.length, rangeLabel, page, hasMore]);
+  }, [loading, started, loadError, filtered.length, rangeLabel, page, hasMore]);
 
   const goToNextPage = () => {
     if (loading || !hasMore || !nextCursor) return;
@@ -506,6 +608,18 @@ export default function TracesPage() {
               ))}
             </select>
           </label>
+          <button
+            type="button"
+            className="log-query-run"
+            onClick={() => {
+              if (started) void load();
+              else setStarted(true);
+            }}
+            disabled={loading}
+            title="Run the trace search with the selected partition and filters"
+          >
+            {loading ? "Running…" : "Run"}
+          </button>
           {service && (
             <span className="facet-chip">
               service: {service}

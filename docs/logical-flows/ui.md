@@ -98,6 +98,8 @@ is a shared component used by `FleetDashboard` and the partition asset pages.
 - `TraceWaterfall`, `TraceFlow`, `TraceDetails` render spans, service/resource attributes, events, and
   error status.
 - Live refresh every 30s when enabled.
+- Defaults to a 5-minute window on first open (unless the URL supplies `range` or the user already
+  selected a range elsewhere in the shared time picker).
 - Copy view link includes range and identity filters.
 
 ### 3.5 Logs (`LogsPage`)
@@ -114,13 +116,26 @@ is a shared component used by `FleetDashboard` and the partition asset pages.
 
 ### 3.6 Metrics (`MetricsPage`)
 
-- Metric names from `/api/v1/label/__name__/values` with tenant/time/partition.
+- Metric names from `/api/v1/label/__name__/values` with tenant/time/partition, plus optional
+  `source=all|doctor|aws|gcp`, `q=<search>` and `limit=<n>` for server-side catalog filtering. The
+  response exposes `X-Doctor-Metric-Total` and `X-Doctor-Metric-Truncated` so the UI can show
+  `N of total`.
+- The default `all` source asks Doctor, AWS, and GCP; the backend round-robins providers so a
+  limited response contains a balanced mix. Cloud Monitoring names are cached briefly because a
+  project can expose tens of thousands of them.
 - Intent/asset label values from `/api/v1/label/guardian_intent/values` and
   `guardian_asset/values`.
 - Partitions from Guardian overview plus `/v1/logs/services`.
-- Query editor supports instant/range, step, timeout, graph/table/raw views, URL state, quick ranges,
-  and a metric picker (250 names).
-- Auto-runs a preferred metric when opened with a query/metric or when a partition has data.
+- Query editor supports instant/range, step, timeout, graph/table/raw views, URL state.
+- Selecting a non-identifier metric name (for example a GCP `*.googleapis.com/...` name) builds a
+  `{__name__="…", source="gcp"}` selector automatically.
+- The selected partition is pushed into the query with a provider-specific matcher (Doctor
+  `guardian_partition`, AWS quoted `@aws.tag.guardian.io/partition`, GCP `location` or
+  `project_id`) and then re-applied to the merged result. Provider label aliases live in
+  `internal/telemetrylabels`.
+- If Cloud Monitoring reports that a metric has multiple possible `monitored_resource` types, the
+  GCP upstream retries once per type and merges the series instead of failing the query.
+- Auto-runs a preferred native metric when opened with a query/metric or when a partition has data.
 - Follows the global time picker; `$__rate_interval` is not used here—step is explicit.
 
 ### 3.7 Fleet and partition views
@@ -198,7 +213,8 @@ health rules, traces, logs, graphs).
 
 - Global time range is in React state, not URL.
 - Page filters are often mirrored to URL query params (`partition`, `intent`, `asset`, `service`,
-  `range`, `sev`, `q`, `trace_id`, `logGroup`, metric `query`/`from`/`to`/`step`/`mode`).
+  `range`, `sev`, `q`, `trace_id`, `logGroup`, metric `query`/`step`/`mode`). The time window itself
+  always comes from the global picker, including on the metrics page.
 - Dashboard variables use `var-*` params (client helper supports them), though the viewer currently
   mostly keeps them in component state.
 - Hash routing means deep links are `origin/path#/route?params`.

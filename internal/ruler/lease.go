@@ -121,7 +121,10 @@ func (m *LeaseManager) Run(ctx context.Context, onLeader func(context.Context)) 
 		if ctx.Err() != nil {
 			return
 		}
-		if m.TryAcquire(ctx) {
+		ok, err := m.tryAcquire(ctx)
+		if err != nil {
+			m.logf("lease acquire failed: %v", err)
+		} else if ok {
 			m.setLeader(true)
 			m.runLeader(ctx, onLeader)
 			m.setLeader(false)
@@ -137,40 +140,47 @@ func (m *LeaseManager) Run(ctx context.Context, onLeader func(context.Context)) 
 
 // TryAcquire attempts to take or renew leadership.
 func (m *LeaseManager) TryAcquire(ctx context.Context) bool {
+	ok, _ := m.tryAcquire(ctx)
+	return ok
+}
+
+// tryAcquire distinguishes "another replica owns the lease" (false, nil) from
+// a transient store error (false, err). The renewal loop must not step down on
+// a single read error.
+func (m *LeaseManager) tryAcquire(ctx context.Context) (bool, error) {
 	now := m.now()
 	content, err := json.Marshal(Lease{RulerID: m.RulerID, AcquiredAt: now, ExpiresAt: now.Add(m.TTL)})
 	if err != nil {
-		return false
+		return false, err
 	}
 
 	data, version, err := m.Store.Read(ctx, m.Path)
 	if err != nil {
-		m.logf("lease read failed: %v", err)
-		return false
+		return false, fmt.Errorf("read lease: %w", err)
 	}
 	if data == nil {
 		if err := m.Store.Create(ctx, m.Path, content); err != nil {
-			return false
+			return false, fmt.Errorf("create lease: %w", err)
 		}
 		m.logf("acquired lease")
-		return true
+		return true, nil
 	}
 
 	var lease Lease
 	if err := json.Unmarshal(data, &lease); err != nil {
 		m.logf("lease malformed; refusing leadership: %v", err)
-		return false
+		return false, nil
 	}
 	if now.Before(lease.ExpiresAt) && lease.RulerID != m.RulerID {
-		return false
+		return false, nil
 	}
 	if err := m.Store.Replace(ctx, m.Path, content, version); err != nil {
-		return false
+		return false, fmt.Errorf("replace lease: %w", err)
 	}
 	if lease.RulerID != m.RulerID {
 		m.logf("took over expired lease from %s", lease.RulerID)
 	}
-	return true
+	return true, nil
 }
 
 func (m *LeaseManager) runLeader(ctx context.Context, onLeader func(context.Context)) {
@@ -190,7 +200,12 @@ func (m *LeaseManager) runLeader(ctx context.Context, onLeader func(context.Cont
 			<-done
 			return
 		case <-ticker.C:
-			if !m.TryAcquire(ctx) {
+			ok, err := m.tryAcquire(ctx)
+			if err != nil {
+				m.logf("lease renew failed: %v", err)
+				continue
+			}
+			if !ok {
 				m.logf("lost lease; stepping down")
 				cancel()
 				<-done

@@ -33,6 +33,72 @@ const DATASET_HELP: Record<Dataset, string> = {
   traces: "Columns: time, timestamp, end_time, end_time_ts, trace_id, span_id, parent_span_id, service, name, status_code, attributes_json, partition.",
 };
 
+function SyntaxHelp() {
+  const code = "rounded bg-slate-800/70 px-1 py-0.5 font-mono text-slate-200";
+  return (
+    <details className="mt-3 rounded-lg border border-slate-700/50 bg-slate-950/50 px-3 py-2 text-[11px] leading-5 text-slate-400">
+      <summary className="cursor-pointer select-none font-medium text-slate-300">Syntax help</summary>
+      <div className="mt-3 grid gap-4 md:grid-cols-2">
+        <div>
+          <p className="font-semibold text-slate-300">Strings and identifiers</p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            <li>Text uses single quotes: <code className={code}>service = 'gcp'</code></li>
+            <li>
+              Double quotes are identifiers: <code className={code}>"gcp"</code> means a column named{" "}
+              <code className={code}>gcp</code>, causing <code className={code}>UNKNOWN_IDENTIFIER</code>.
+            </li>
+            <li>
+              Substring match: <code className={code}>service LIKE '%gcp%'</code>;{" "}
+              <code className={code}>ILIKE</code> ignores case. <code className={code}>LIKE 'gcp'</code> is exact.
+            </li>
+          </ul>
+        </div>
+        <div>
+          <p className="font-semibold text-slate-300">Labels and time</p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            <li>
+              DuckDB: <code className={code}>json_extract_string(labels_json, '$.env')</code>
+            </li>
+            <li>
+              ClickHouse: <code className={code}>JSONExtractString(labels_json, 'env')</code>
+            </li>
+            <li>Traces use <code className={code}>attributes_json</code>.</li>
+            <li>
+              <code className={code}>timestamp</code> is epoch nanoseconds; the range selector filters it
+              automatically. <code className={code}>time</code> differs by backend, so prefer{" "}
+              <code className={code}>timestamp</code> in predicates.
+            </li>
+          </ul>
+        </div>
+        <div>
+          <p className="font-semibold text-slate-300">Counting rows</p>
+          <pre className="mt-1 overflow-x-auto rounded bg-slate-950/80 p-2 font-mono text-[10px] leading-4 text-slate-300">{`SELECT service, level, count(*) AS rows
+FROM logs
+WHERE service ILIKE '%gcp%'
+GROUP BY service, level
+ORDER BY rows DESC
+LIMIT 50`}</pre>
+        </div>
+        <div>
+          <p className="font-semibold text-slate-300">Limits and results</p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            <li>One read-only <code className={code}>SELECT</code> / <code className={code}>WITH</code> statement.</li>
+            <li>Maximum 7 days, 5,000 rows, 32 KiB of SQL.</li>
+            <li>
+              DuckDB returns per-node partial aggregates because chunks are shard-local; ClickHouse
+              returns one global result.
+            </li>
+            <li>
+              Don't alias <code className={code}>labels_json</code> as <code className={code}>rows</code> and
+              sort by it; sort by a <code className={code}>count(*)</code> alias instead.
+            </li>
+          </ul>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 const RANGE_OPTIONS = [
   { label: "Last 1h", ms: 60 * 60 * 1000 },
   { label: "Last 6h", ms: 6 * 60 * 60 * 1000 },
@@ -182,6 +248,7 @@ export default function SqlPage() {
             aria-label="SQL query"
           />
           <p className="mt-2 text-[11px] text-slate-500">{DATASET_HELP[dataset]}</p>
+          <SyntaxHelp />
         </section>
 
         {error && (

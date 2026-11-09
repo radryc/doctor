@@ -5,6 +5,7 @@ import type {
   LogSearchResponse,
   LogServicesResponse,
   MetricRangeResponse,
+  MetricNameCatalog,
   PrometheusBuildInfoResponse,
   PrometheusLabelValuesResponse,
   PrometheusQueryResponse,
@@ -34,15 +35,36 @@ import type {
   Silence,
   SilenceListResponse,
   AWSPolicy,
+  GCPPolicy,
   SourceListResponse,
   DeliveryResponse,
   ReceiverConfig,
   SubspaceRequest,
   AlertRuleGroupsResponse,
+  AlertRuleFile,
+  AlertPreviewResponse,
+  AlertSpec,
+  RoutingOverviewResponse,
+  AlertSummaryResponse,
 } from "../types/alerts";
 
+// trackedFetch emits request start/end events so the shell can display a
+// consistent refresh indicator on every page.
+async function trackedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("doctor:request-start"));
+  }
+  try {
+    return await globalThis.fetch(input, init);
+  } finally {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("doctor:request-end"));
+    }
+  }
+}
+
 async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, {
+  const res = await trackedFetch(url, {
     headers: { Accept: "application/yaml, text/plain, */*" },
     signal: AbortSignal.timeout(60_000),
   });
@@ -54,7 +76,7 @@ async function fetchText(url: string): Promise<string> {
 }
 
 async function fetchJSONBody<T>(url: string, method: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
+  const res = await trackedFetch(url, {
     method,
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -76,7 +98,7 @@ async function fetchJSONText<T>(
   method: string,
   body: string
 ): Promise<T> {
-  const res = await fetch(url, {
+  const res = await trackedFetch(url, {
     method,
     headers: { Accept: "application/json", "Content-Type": "application/yaml" },
     body,
@@ -93,7 +115,7 @@ async function fetchJSONText<T>(
 }
 
 async function fetchJSON<T>(url: string, method = "GET"): Promise<T> {
-  const res = await fetch(url, {
+  const res = await trackedFetch(url, {
     method,
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(60_000),
@@ -107,6 +129,32 @@ async function fetchJSON<T>(url: string, method = "GET"): Promise<T> {
       (body as { error?: string }).error ?? `HTTP ${res.status}`
     );
   return body as T;
+}
+
+async function fetchMetricCatalog(url: string): Promise<MetricNameCatalog> {
+  const res = await trackedFetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(60_000),
+  });
+  const ct = res.headers.get("content-type") ?? "";
+  const body = ct.includes("application/json")
+    ? await res.json()
+    : { error: await res.text() };
+  if (!res.ok)
+    throw new Error(
+      (body as { error?: string }).error ?? `HTTP ${res.status}`
+    );
+  const data = Array.isArray((body as { data?: unknown }).data)
+    ? ((body as { data: string[] }).data ?? [])
+    : [];
+  const rawTotal = Number(res.headers.get("x-doctor-metric-total"));
+  return {
+    data,
+    total: Number.isFinite(rawTotal) && rawTotal >= 0 ? rawTotal : data.length,
+    truncated:
+      (res.headers.get("x-doctor-metric-truncated") ?? "").toLowerCase() === "true",
+    partial: res.headers.get("x-doctor-partial") ?? "",
+  };
 }
 
 export const api = {
@@ -158,11 +206,34 @@ export const api = {
     );
   },
 
+  /** Metric-name catalog with server-side source filtering, search and limit. */
+  getMetricCatalog: (params?: URLSearchParams) => {
+    const query = params?.toString();
+    return fetchMetricCatalog(
+      `/api/v1/label/__name__/values${query ? `?${query}` : ""}`
+    );
+  },
+
   getMetricLabelValues: (label: string, params?: URLSearchParams) => {
     const query = params?.toString();
     return fetchJSON<PrometheusLabelValuesResponse>(
       `/api/v1/label/${encodeURIComponent(label)}/values${query ? `?${query}` : ""}`
     );
+  },
+
+  getMetricLabels: (params?: URLSearchParams) => {
+    const query = params?.toString();
+    return fetchJSON<{ status: string; data: string[] }>(
+      `/api/v1/labels${query ? `?${query}` : ""}`
+    );
+  },
+
+  getMetricMetadata: (metric?: string) => {
+    const query = metric ? `?metric=${encodeURIComponent(metric)}` : "";
+    return fetchJSON<{
+      status: string;
+      data: Record<string, { type?: string; help?: string; unit?: string }>;
+    }>(`/api/v1/metadata${query}`);
   },
 
   queryPrometheus: (params: URLSearchParams) =>
@@ -304,6 +375,16 @@ export const api = {
       policy
     ),
 
+  getGCPPolicy: (params: URLSearchParams) =>
+    fetchJSON<GCPPolicy>(`/v1/alerts/sources/gcp/policy?${params}`),
+
+  putGCPPolicy: (params: URLSearchParams, policy: GCPPolicy) =>
+    fetchJSONBody<{ status: string; policy: GCPPolicy }>(
+      `/v1/alerts/sources/gcp/policy?${params}`,
+      "PUT",
+      policy
+    ),
+
   getDelivery: (params: URLSearchParams) =>
     fetchJSON<DeliveryResponse>(`/v1/alerts/delivery?${params}`),
 
@@ -325,17 +406,58 @@ export const api = {
       `/v1/alerts/rules?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
     ),
 
+  previewAlertRule: (
+    tenant: string,
+    partition: string,
+    body: { spec?: AlertSpec; expr?: string }
+  ) =>
+    fetchJSONBody<AlertPreviewResponse>(
+      `/v1/alerts/rules/preview?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST",
+      body
+    ),
+
+  compileAlertRule: (tenant: string, partition: string, spec: AlertSpec) =>
+    fetchJSONBody<{ expr: string }>(
+      `/v1/alerts/rules/compile?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST",
+      { spec }
+    ),
+
+  getRoutingOverview: (tenant: string) =>
+    fetchJSON<RoutingOverviewResponse>(
+      `/v1/alerts/routing/overview?tenant=${encodeURIComponent(tenant)}`
+    ),
+
+  getAlertSummary: (tenant: string) =>
+    fetchJSON<AlertSummaryResponse>(
+      `/v1/alerts/summary?tenant=${encodeURIComponent(tenant)}`
+    ),
+
   getAlertRuleGroup: (tenant: string, partition: string, group: string) =>
-    fetchText(
+    fetchJSON<AlertRuleFile>(
       `/v1/alerts/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`
     ),
 
-  putAlertRuleGroup: (tenant: string, partition: string, group: string, yaml: string) =>
-    fetchJSONText(
+  putAlertRuleGroup: (
+    tenant: string,
+    partition: string,
+    group: string,
+    file: AlertRuleFile | string
+  ) => {
+    if (typeof file === "string") {
+      return fetchJSONText<{ status: string }>(
+        `/v1/alerts/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`,
+        "PUT",
+        file
+      );
+    }
+    return fetchJSONBody<{ status: string }>(
       `/v1/alerts/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`,
       "PUT",
-      yaml
-    ),
+      file
+    );
+  },
 
   deleteAlertRuleGroup: (tenant: string, partition: string, group: string) =>
     fetchJSON<{ status: string }>(
@@ -366,7 +488,7 @@ export const api = {
 
   putDashboard: (tenant: string, id: string, doc: DashboardDocument, ifMatch?: string) => {
     const url = `/v1/dashboards/${encodeURIComponent(tenant)}/${encodeURIComponent(id)}`;
-    return fetch(url, {
+    return trackedFetch(url, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -399,7 +521,7 @@ export const api = {
 
   importDashboardsText: (text: string, tenant?: string, contentType = "application/json") => {
     const params = tenant ? `?tenant=${encodeURIComponent(tenant)}` : "";
-    return fetch(`/v1/dashboards/import${params}`, {
+    return trackedFetch(`/v1/dashboards/import${params}`, {
       method: "POST",
       headers: { "Content-Type": contentType, Accept: "application/json" },
       body: text,

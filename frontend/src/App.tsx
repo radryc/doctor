@@ -15,6 +15,7 @@ import RecordingRulesPage from "./pages/RecordingRulesPage";
 import AlertsPage from "./pages/AlertsPage";
 import PartitionViewPage from "./pages/PartitionViewPage";
 import PartitionAssetsPage from "./pages/PartitionAssetsPage";
+import PartitionAssetsLegacyPage from "./pages/PartitionAssetsLegacyPage";
 
 export default function App() {
   return (
@@ -39,6 +40,7 @@ export default function App() {
             <Route path="/fleet" element={<FleetDashboard />} />
             <Route path="/partition/:name" element={<PartitionViewPage />} />
             <Route path="/partition/:name/assets" element={<PartitionAssetsPage />} />
+            <Route path="/partition/:name/telemetry" element={<PartitionAssetsLegacyPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

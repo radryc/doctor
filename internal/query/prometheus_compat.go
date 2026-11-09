@@ -25,6 +25,7 @@ import (
 	promstorage "github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/annotations"
 	"github.com/radryc/doctor/internal/buildinfo"
+	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -1192,27 +1193,54 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	sources, err := parseMetricCatalogSource(r.URL.Query().Get("source"))
+	if err != nil {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
+	search := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := parseMetricCatalogLimit(r.URL.Query().Get("limit"))
+
 	partition := partitionFromRequest(r)
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
-	awsEnabled := s.awsDiscoveryReady(r.Context()) && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
+	awsEnabled := sources.aws && s.awsDiscoveryReady(r.Context()) && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
+	gcpEnabled := sources.gcp && s.gcpDiscoveryReady()
 
 	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
-	if selErr != nil && !hasAWS && !awsEnabled {
+	if selErr != nil && !hasAWS && !awsEnabled && !gcpEnabled {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", selErr.Error())
 		return
 	}
 
-	values := make(map[string]struct{})
-	if labelName == labelSource {
-		values[sourceDoctor] = struct{}{}
-		if awsEnabled {
-			values[awsSourceLabel] = struct{}{}
+	// Track the originating provider so the catalog can present a balanced
+	// Doctor/AWS/GCP mix instead of letting one provider's alphabetical head
+	// crowd out the others.
+	values := make(map[string]int)
+	addValues := func(priority int, list ...string) {
+		for _, value := range list {
+			if value == "" {
+				continue
+			}
+			if current, ok := values[value]; !ok || priority < current {
+				values[value] = priority
+			}
 		}
 	}
-	if selErr == nil {
+	if labelName == labelSource {
+		if sources.doctor {
+			addValues(metricCatalogDoctorPriority, sourceDoctor)
+		}
+		if awsEnabled {
+			addValues(metricCatalogAWSPriority, awsSourceLabel)
+		}
+		if gcpEnabled {
+			addValues(metricCatalogGCPPriority, proxy.SourceGCP)
+		}
+	}
+	if selErr == nil && sources.doctor {
 		querier, err := s.discoveryPrometheusQuerier(r)
-		if err != nil && !hasAWS && !awsEnabled {
+		if err != nil && !hasAWS && !awsEnabled && !gcpEnabled {
 			writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
 			return
 		}
@@ -1224,9 +1252,7 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 					writePrometheusDiscoveryError(w, labelErr)
 					return
 				}
-				for _, value := range results {
-					values[value] = struct{}{}
-				}
+				addValues(metricCatalogDoctorPriority, results...)
 			} else {
 				for _, selectorSet := range selectorSets {
 					results, _, labelErr := querier.LabelValues(r.Context(), labelName, nil, selectorSet...)
@@ -1234,9 +1260,7 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 						writePrometheusDiscoveryError(w, labelErr)
 						return
 					}
-					for _, value := range results {
-						values[value] = struct{}{}
-					}
+					addValues(metricCatalogDoctorPriority, results...)
 				}
 			}
 		}
@@ -1247,17 +1271,13 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 		awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if resp, awsErr := s.aws.PrometheusLabelValues(awsCtx, labelName, forwardedMatches, start, end); awsErr == nil {
-			for _, value := range extractPrometheusStringList(resp) {
-				values[value] = struct{}{}
-			}
+			addValues(metricCatalogAWSPriority, extractPrometheusStringList(resp)...)
 		}
 		if labelName == promlabels.MetricName {
 			// CloudWatch's PromQL API has no label-values route, so fall back to
 			// ListMetrics to populate the Grafana metric-name browser.
 			if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
-				for _, name := range s.awsMetricNames(awsCtx) {
-					values[name] = struct{}{}
-				}
+				addValues(metricCatalogAWSPriority, s.awsMetricNames(awsCtx)...)
 			}
 		} else if len(forwardedMatches) > 0 {
 			// Derive label values from series when a metric selector is
@@ -1265,14 +1285,184 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 			if resp, seriesErr := s.aws.PrometheusSeries(awsCtx, forwardedMatches, start, end); seriesErr == nil {
 				for _, labels := range extractPrometheusSeries(resp) {
 					if value := labels[labelName]; value != "" {
-						values[value] = struct{}{}
+						addValues(metricCatalogAWSPriority, value)
 					}
 				}
 			}
 		}
 	}
 
-	writePrometheusSuccess(w, sortedStrings(values))
+	if gcpEnabled {
+		if labelName == promlabels.MetricName {
+			// Cloud Monitoring exposes tens of thousands of metric names. The
+			// provider list is cached and then filtered/limited below so the
+			// browser never receives the entire catalog.
+			addValues(metricCatalogGCPPriority, s.gcpMetricNames(r.Context())...)
+		} else {
+			start, end := prometheusDiscoveryRange(r)
+			gcpCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+			defer cancel()
+			if resp, gcpErr := s.gcp.PrometheusLabelValues(gcpCtx, labelName, forwardedMatches, start, end); gcpErr == nil {
+				addValues(metricCatalogGCPPriority, extractPrometheusStringList(resp)...)
+			}
+		}
+	}
+
+	if labelName != promlabels.MetricName {
+		returned := sortedPriorityValues(values)
+		if limit > 0 && len(returned) > limit {
+			returned = returned[:limit]
+		}
+		writePrometheusSuccess(w, returned)
+		return
+	}
+
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	names = filterMetricCatalog(names, search)
+	w.Header().Set("X-Doctor-Metric-Total", strconv.Itoa(len(names)))
+	out := arrangeMetricCatalog(names, values, limit)
+	if limit > 0 && len(names) > limit {
+		w.Header().Set("X-Doctor-Metric-Truncated", "true")
+	}
+	writePrometheusSuccess(w, out)
+}
+
+const (
+	metricCatalogDoctorPriority = 0
+	metricCatalogAWSPriority    = 1
+	metricCatalogGCPPriority    = 2
+)
+
+// sortedPriorityValues returns values ordered by provider priority and then
+// alphabetically. Used for non-metric label values where provider mixing does
+// not matter.
+func sortedPriorityValues(values map[string]int) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if values[out[i]] != values[out[j]] {
+			return values[out[i]] < values[out[j]]
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+// arrangeMetricCatalog round-robins providers (Doctor, AWS, GCP) so a limit
+// yields a representative sample of every enabled source. With no limit the
+// filtered, alphabetically ordered list is returned unchanged.
+func arrangeMetricCatalog(names []string, priorities map[string]int, limit int) []string {
+	if limit <= 0 || len(names) <= limit {
+		return names
+	}
+	groups := make([][]string, 3)
+	for _, name := range names {
+		priority := priorities[name]
+		if priority < 0 || priority > 2 {
+			priority = metricCatalogGCPPriority
+		}
+		groups[priority] = append(groups[priority], name)
+	}
+	out := make([]string, 0, limit)
+	for index := 0; len(out) < limit; index++ {
+		progressed := false
+		for _, group := range groups {
+			if index >= len(group) {
+				continue
+			}
+			out = append(out, group[index])
+			progressed = true
+			if len(out) == limit {
+				break
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	return out
+}
+
+// metricCatalogSource selects which discovery providers contribute label
+// values. An empty source keeps the historical Prometheus behaviour (local
+// plus the legacy AWS federation) for clients such as Grafana; the Doctor UI
+// asks for source=all explicitly.
+type metricCatalogSource struct {
+	doctor bool
+	aws    bool
+	gcp    bool
+}
+
+func parseMetricCatalogSource(raw string) (metricCatalogSource, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return metricCatalogSource{doctor: true, aws: true}, nil
+	}
+	var out metricCatalogSource
+	for _, part := range strings.Split(raw, ",") {
+		switch strings.TrimSpace(part) {
+		case "", "all":
+			out.doctor, out.aws, out.gcp = true, true, true
+		case sourceDoctor:
+			out.doctor = true
+		case proxy.SourceAWS:
+			out.aws = true
+		case proxy.SourceGCP:
+			out.gcp = true
+		default:
+			return metricCatalogSource{}, fmt.Errorf("unknown metric source %q", strings.TrimSpace(part))
+		}
+	}
+	return out, nil
+}
+
+// metricCatalogLimit caps how many discovery values one request can return.
+const metricCatalogLimit = 2000
+
+func parseMetricCatalogLimit(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	if parsed > metricCatalogLimit {
+		return metricCatalogLimit
+	}
+	return parsed
+}
+
+// filterMetricCatalog applies a case-insensitive substring search and ranks
+// prefix matches first so typing "run." surfaces run.googleapis.com metrics
+// before unrelated names that merely contain the same characters.
+func filterMetricCatalog(names []string, search string) []string {
+	search = strings.ToLower(strings.TrimSpace(search))
+	if search == "" {
+		sort.Strings(names)
+		return names
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if strings.Contains(strings.ToLower(name), search) {
+			out = append(out, name)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left, right := strings.ToLower(out[i]), strings.ToLower(out[j])
+		leftPrefix, rightPrefix := strings.HasPrefix(left, search), strings.HasPrefix(right, search)
+		if leftPrefix != rightPrefix {
+			return leftPrefix
+		}
+		return out[i] < out[j]
+	})
+	return out
 }
 
 func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request) {
@@ -1703,15 +1893,21 @@ func writePrometheusSuccess(w http.ResponseWriter, data any) {
 }
 
 func writePrometheusError(w http.ResponseWriter, statusCode int, errorType, message string) {
+	cause := ""
 	if statusCode >= http.StatusInternalServerError {
 		log.Printf("prometheus error: %s", message)
+		cause = internalCause(message)
 		message = internalErrorMessage
 	}
-	writeJSON(w, statusCode, map[string]any{
+	payload := map[string]any{
 		"status":    "error",
 		"errorType": errorType,
 		"error":     message,
-	})
+	}
+	if cause != "" {
+		payload["cause"] = cause
+	}
+	writeJSON(w, statusCode, payload)
 }
 
 func writePrometheusDiscoveryError(w http.ResponseWriter, err error) {

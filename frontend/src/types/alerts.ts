@@ -21,6 +21,7 @@ export interface Alert {
   endsAt?: string | null;
   value?: string;
   delivery: "sentinel" | "native" | string;
+  notify?: string[];
   acked?: boolean;
   ackedBy?: string;
   ackedAt?: string | null;
@@ -85,6 +86,19 @@ export interface AWSPolicy {
   unscoped?: string;
 }
 
+export interface GCPPolicyRule {
+  nameRegex?: string;
+  severity?: string;
+  label?: string;
+  equals?: string;
+}
+
+export interface GCPPolicy {
+  default: "import-all" | "ignore-all" | string;
+  include?: GCPPolicyRule[];
+  exclude?: GCPPolicyRule[];
+}
+
 export interface SourceStatus {
   name: string;
   mode: string;
@@ -118,6 +132,7 @@ export interface DeliveryResponse {
 export interface Receiver {
   name: string;
   type: string;
+  description?: string;
   url?: string;
   secretEnv?: string;
   headers?: Record<string, string>;
@@ -126,15 +141,80 @@ export interface Receiver {
 
 export interface Route {
   name: string;
+  tenant?: string;
+  partition?: string;
   matchers?: Record<string, string>;
+  match?: Matcher[];
   receivers: string[];
   repeatInterval?: string;
   continue?: boolean;
+  default?: boolean;
+}
+
+/**
+ * AlertRoute assigns an explicit destination to a source-generated alert. It
+ * matches the alert's source and alertname labels, and sits between a rule's
+ * explicit destination and the partition destination.
+ */
+export interface AlertRoute {
+  source: string;
+  alertname: string;
+  receivers: string[];
 }
 
 export interface ReceiverConfig {
   receivers: Receiver[];
   routes: Route[];
+  alertRoutes?: AlertRoute[];
+  partitionReceiver?: string;
+  defaultReceiver?: string;
+}
+
+export type SignalType =
+  | "errors"
+  | "latency"
+  | "traffic"
+  | "saturation"
+  | "availability";
+
+export type RuleMode = "guided" | "promql";
+
+export interface SignalQuery {
+  metric: string;
+  filters?: Matcher[];
+  function?: string;
+  reduce?: string;
+  quantile?: number;
+  by?: string[];
+}
+
+export interface AlertCondition {
+  op: "gt" | "gte" | "lt" | "lte" | "eq" | "neq" | "absent" | string;
+  value: number;
+  unit?: string;
+}
+
+export interface AlertSpec {
+  signal: SignalType | string;
+  primary: SignalQuery;
+  denominator?: SignalQuery | null;
+  condition: AlertCondition;
+  window?: string;
+  for?: string;
+  keepFiringFor?: string;
+  severity?: string;
+  summary?: string;
+  runbookUrl?: string;
+  destinations?: string[];
+}
+
+export interface AlertRuleSummary {
+  alert: string;
+  mode?: RuleMode | string;
+  signal?: string;
+  severity?: string;
+  notify?: string[];
+  summary?: string;
 }
 
 export interface AlertRuleGroupSummary {
@@ -143,10 +223,76 @@ export interface AlertRuleGroupSummary {
   group: string;
   interval: string;
   rules: number;
+  alerts?: AlertRuleSummary[];
 }
 
 export interface AlertRuleGroupsResponse {
   groups: AlertRuleGroupSummary[];
+}
+
+export interface AlertRule {
+  mode?: RuleMode | string;
+  alert: string;
+  spec?: AlertSpec | null;
+  expr: string;
+  for?: string;
+  keep_firing_for?: string;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  notify?: string[];
+}
+
+export interface AlertRuleGroup {
+  name: string;
+  tenant?: string;
+  partition?: string;
+  interval?: string;
+  rules: AlertRule[];
+}
+
+export interface AlertRuleFile {
+  version?: number;
+  groups: AlertRuleGroup[];
+}
+
+export interface AlertPreviewInstance {
+  labels: Record<string, string>;
+  value?: string;
+}
+
+export interface AlertPreviewResponse {
+  expr: string;
+  data?: unknown;
+  partial?: boolean;
+  instances?: AlertPreviewInstance[];
+  wouldFire?: boolean;
+}
+
+export interface RoutingOverviewPartition {
+  tenant: string;
+  partition: string;
+  receivers: number;
+  routes: number;
+  partitionReceiver?: string;
+  defaultReceiver?: string;
+  receiverNames?: string[];
+}
+
+export interface RoutingOverviewResponse {
+  partitions: RoutingOverviewPartition[];
+}
+
+export interface PartitionAlertSummary {
+  tenant: string;
+  partition: string;
+  firing: number;
+  pending: number;
+  critical: number;
+  total: number;
+}
+
+export interface AlertSummaryResponse {
+  partitions: PartitionAlertSummary[];
 }
 
 export interface SubspaceRequest {

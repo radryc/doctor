@@ -23,6 +23,17 @@ type LogEngineClient struct {
 	router pb.MonoFSRouterClient
 }
 
+// bearerToken attaches the MonoFS service token to gRPC calls. The MonoFS
+// router authenticates gRPC callers from the authorization metadata; without
+// it the SQL console sees an anonymous identity and denies every partition.
+type bearerToken string
+
+func (t bearerToken) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + string(t)}, nil
+}
+
+func (bearerToken) RequireTransportSecurity() bool { return false }
+
 // DuckDBSQLResult is the row result returned by one MonoFS node.
 type DuckDBSQLResult struct {
 	Dataset    string   `json:"dataset"`
@@ -48,6 +59,12 @@ type DuckDBSQLResponse struct {
 
 // NewLogEngineClient dials the monofs router and returns a client.
 func NewLogEngineClient(ctx context.Context, routerAddr string) (*LogEngineClient, error) {
+	return NewLogEngineClientWithToken(ctx, routerAddr, "")
+}
+
+// NewLogEngineClientWithToken dials the monofs router with a service bearer
+// token so the router can apply the caller's partition scope.
+func NewLogEngineClientWithToken(ctx context.Context, routerAddr, token string) (*LogEngineClient, error) {
 	if routerAddr == "" {
 		return nil, fmt.Errorf("monofs router address is required")
 	}
@@ -55,15 +72,18 @@ func NewLogEngineClient(ctx context.Context, routerAddr string) (*LogEngineClien
 	if err != nil {
 		return nil, fmt.Errorf("configure monofs logengine TLS: %w", err)
 	}
-	conn, err := grpc.NewClient(
-		routerAddr,
+	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(256*1024*1024),
 			grpc.MaxCallSendMsgSize(256*1024*1024),
 		),
-	)
+	}
+	if strings.TrimSpace(token) != "" {
+		opts = append(opts, grpc.WithPerRPCCredentials(bearerToken(strings.TrimSpace(token))))
+	}
+	conn, err := grpc.NewClient(routerAddr, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connect to monofs router: %w", err)
 	}

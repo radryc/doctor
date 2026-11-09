@@ -5,6 +5,7 @@ import CommandPalette from "./CommandPalette";
 import TopBar from "./TopBar";
 import InspectorDrawer from "./InspectorDrawer";
 import { TimeRangeProvider } from "../../context/TimeRangeContext";
+import { RequestActivityProvider } from "../../context/RequestActivityContext";
 import { InspectorProvider } from "../../context/InspectorContext";
 
 const GO_ROUTES: Record<string, string> = {
@@ -83,23 +84,25 @@ export default function AppLayout() {
 
   return (
     <TimeRangeProvider>
-      <InspectorProvider>
-        <div className="app">
-          <a className="s-skip-link" href="#main-content">
-            Skip to content
-          </a>
-          <Sidebar onOpenPalette={() => setPaletteOpen(true)} mobileOpen={sidebarOpen} />
-          {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
-          <main className="main" id="main-content">
-            <TopBar onToggleSidebar={() => setSidebarOpen((open) => !open)} />
-            <div className="main-view">
-              <Outlet />
-            </div>
-          </main>
-          <CommandPalette open={paletteOpen} onClose={closePalette} />
-          <InspectorDrawer />
-        </div>
-      </InspectorProvider>
+      <RequestActivityProvider>
+        <InspectorProvider>
+          <div className="app">
+            <a className="s-skip-link" href="#main-content">
+              Skip to content
+            </a>
+            <Sidebar onOpenPalette={() => setPaletteOpen(true)} mobileOpen={sidebarOpen} />
+            {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
+            <main className="main" id="main-content">
+              <TopBar onToggleSidebar={() => setSidebarOpen((open) => !open)} />
+              <div className="main-view">
+                <Outlet />
+              </div>
+            </main>
+            <CommandPalette open={paletteOpen} onClose={closePalette} />
+            <InspectorDrawer />
+          </div>
+        </InspectorProvider>
+      </RequestActivityProvider>
     </TimeRangeProvider>
   );
 }

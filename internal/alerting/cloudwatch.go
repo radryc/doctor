@@ -62,6 +62,10 @@ type SourceSummary struct {
 	Excluded   int `json:"excluded"`
 	Imported   int `json:"imported"`
 	Unscoped   int `json:"unscoped"`
+	// Healthy and Resolved are used by state-based sources that continuously
+	// reconcile to a healthy state (currently Guardian partition status).
+	Healthy  int `json:"healthy,omitempty"`
+	Resolved int `json:"resolved,omitempty"`
 }
 
 // Run polls until ctx is cancelled.

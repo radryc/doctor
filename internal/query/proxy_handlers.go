@@ -15,7 +15,7 @@ import (
 // handlePrometheusQueryViaRouter executes an instant query through the
 // multi-backend router, surfacing partial failures as a response header.
 func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.Request, query string, at time.Time) {
-	data, warnings, err := s.proxyRouter.MetricsInstant(r.Context(), s.tenantFromRequest(r), query, at)
+	data, warnings, err := s.proxyRouter.MetricsInstantForPartition(r.Context(), s.tenantFromRequest(r), query, at, partitionFromRequest(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, proxy.ErrScopeRequired), errors.Is(err, proxy.ErrTooBroad):
@@ -34,7 +34,7 @@ func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.
 // handlePrometheusQueryRangeViaRouter executes a range query through the
 // multi-backend router.
 func (s *Service) handlePrometheusQueryRangeViaRouter(w http.ResponseWriter, r *http.Request, query string, start, end time.Time, step time.Duration) {
-	data, warnings, err := s.proxyRouter.MetricsRange(r.Context(), s.tenantFromRequest(r), query, start, end, step)
+	data, warnings, err := s.proxyRouter.MetricsRangeForPartition(r.Context(), s.tenantFromRequest(r), query, start, end, step, partitionFromRequest(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, proxy.ErrScopeRequired), errors.Is(err, proxy.ErrTooBroad):
@@ -150,9 +150,21 @@ func isAccessDenied(err error) bool {
 
 // logSearchPushdown converts the native log-search parameters into the reduced
 // LogQL form used by proxy upstreams.
+func isGCPLogName(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	return strings.Contains(value, ".googleapis.com/") ||
+		strings.Contains(value, ".googleapis.com%2f") ||
+		strings.Contains(value, "/logs/")
+}
+
 func logSearchPushdown(service, text, logGroup string, identity signalIdentity) proxy.LogPushdown {
 	selector := identity.logSelector(service)
 	switch {
+	case isGCPLogName(logGroup):
+		selector = `{source="gcp", gcp_log_name="` + escapeLogQL(strings.TrimSpace(logGroup)) + `"}`
 	case strings.TrimSpace(logGroup) != "":
 		// CloudWatch log groups are not labelled with Doctor identity. Filter
 		// the fetched records after the upstream returns them.

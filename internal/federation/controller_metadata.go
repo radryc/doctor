@@ -262,6 +262,11 @@ func (c *Controller) refreshMetadata(ctx context.Context, pushers []PusherInfo, 
 		}()
 	}
 	for _, pusher := range pushers {
+		// /v1/aws/meta is AWS-specific. GCP catalog metadata is discovered
+		// lazily by the read API client.
+		if normalizeProvider(pusher.Provider) != "aws" {
+			continue
+		}
 		item := job{pusher: pusher, token: tokens[pusher.Name]}
 		select {
 		case jobs <- item:

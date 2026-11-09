@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,6 +50,9 @@ type scheduledGroup struct {
 	interval time.Duration
 	next     time.Time
 	index    int
+	// running prevents a slow evaluation from overlapping the next tick of the
+	// same group. It is accessed from worker goroutines, hence atomic.
+	running atomic.Bool
 }
 
 type groupHeap []*scheduledGroup
@@ -153,11 +157,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if !group.next.After(now) {
 				group.next = now.Add(group.interval)
 			}
+			if group.running.Load() {
+				// The previous evaluation is still in flight. Reschedule instead
+				// of starting an overlapping copy of the same rule group.
+				heap.Push(pending, group)
+				continue
+			}
+			group.running.Store(true)
 			heap.Push(pending, group)
 
 			s.mu.Lock()
 			s.stats.Due++
-			s.stats.Evaluated++
 			s.mu.Unlock()
 
 			select {
@@ -167,16 +177,22 @@ func (s *Scheduler) Run(ctx context.Context) {
 				return
 			}
 			wg.Add(1)
-			go func(ref GroupRef) {
+			go func(group *scheduledGroup, ref GroupRef) {
 				defer wg.Done()
 				defer func() { <-sem }()
+				defer func() {
+					group.running.Store(false)
+					s.mu.Lock()
+					s.stats.Evaluated++
+					s.mu.Unlock()
+				}()
 				results := s.Evaluator.EvaluateGroup(ctx, groupForRef(ref))
 				for _, result := range results {
 					if result.Error != "" && s.Logger != nil {
 						s.Logger.Printf("rules: group=%s rule=%s error=%s", result.Group, result.Rule, result.Error)
 					}
 				}
-			}(group.ref)
+			}(group, group.ref)
 			continue
 		}
 

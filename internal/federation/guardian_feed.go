@@ -97,6 +97,7 @@ func (g *GuardianFeed) Pushers(ctx context.Context) ([]PusherInfo, map[string]st
 			health := Health{State: strings.TrimSpace(item.Status), LastHeartbeat: item.LastHeartbeat}
 			pushers = append(pushers, PusherInfo{
 				Name:     name,
+				Provider: strings.ToLower(strings.TrimSpace(item.Provider)),
 				Account:  strings.TrimSpace(item.Account),
 				Region:   strings.TrimSpace(item.Region),
 				Endpoint: endpoint,

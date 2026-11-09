@@ -411,14 +411,20 @@ func writeLokiQueryError(w http.ResponseWriter, err error) {
 }
 
 func writeLokiError(w http.ResponseWriter, statusCode int, message string) {
+	cause := ""
 	if statusCode >= http.StatusInternalServerError {
 		log.Printf("loki error: %s", message)
+		cause = internalCause(message)
 		message = internalErrorMessage
 	}
-	writeJSON(w, statusCode, map[string]any{
+	payload := map[string]any{
 		"status": "error",
 		"error":  message,
-	})
+	}
+	if cause != "" {
+		payload["cause"] = cause
+	}
+	writeJSON(w, statusCode, payload)
 }
 
 func lokiDiscoveryRange(r *http.Request) (time.Time, time.Time, error) {

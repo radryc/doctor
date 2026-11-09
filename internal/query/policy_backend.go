@@ -138,3 +138,31 @@ func (s *Service) policyPartitionAllowed(ctx context.Context, account, region, c
 	canonical := s.policyGate.CanonicalPartition(account, region, current)
 	return canonical, s.policyGate.PartitionVisible(identityFromContext(ctx), canonical, signal)
 }
+
+// GCPUpstream adapts the GCP client with the same access-policy filters as the
+// AWS upstream.
+func (s *Service) GCPUpstream() *proxy.GCPUpstream {
+	up := &proxy.GCPUpstream{Client: s.gcp}
+	gate := s.policyGate
+	if gate == nil || s.gcp == nil {
+		return up
+	}
+	up.FilterLogs = func(ctx context.Context, records []segment.LogRecord) []segment.LogRecord {
+		return gate.FilterLogs(identityFromContext(ctx), records)
+	}
+	up.FilterSpans = func(ctx context.Context, spans []segment.TraceRecord) []segment.TraceRecord {
+		return gate.FilterSpans(identityFromContext(ctx), spans)
+	}
+	up.FilterSummaries = func(ctx context.Context, summaries []proxy.TraceSummary) []proxy.TraceSummary {
+		id := identityFromContext(ctx)
+		kept := make([]proxy.TraceSummary, 0, len(summaries))
+		for _, summary := range summaries {
+			partition := gate.CanonicalPartition(summary.Account, summary.Region, summary.Partition)
+			if gate.PartitionVisible(id, partition, policy.SignalTraces) {
+				kept = append(kept, summary)
+			}
+		}
+		return kept
+	}
+	return up
+}

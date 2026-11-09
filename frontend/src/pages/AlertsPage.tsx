@@ -5,26 +5,28 @@ import {
   BellOff,
   CheckCircle2,
   Clock3,
-  Mail,
   RefreshCw,
   Send,
   Trash2,
   XCircle,
 } from "lucide-react";
 import { api } from "../api/client";
+import AlertRulesTab from "../components/alerts/AlertRulesTab";
+import RoutingBoard from "../components/alerts/RoutingBoard";
 import Tabs from "../components/ui/Tabs";
 import { useConfig } from "../context/ConfigContext";
 import type {
   Alert,
   AlertListResponse,
+  AlertRuleGroupSummary,
   Capabilities,
   DeliveryRecord,
   ReceiverConfig,
   Silence,
   SourceStatus,
   AWSPolicy,
+  GCPPolicy,
   SubspaceRequest,
-  AlertRuleGroupSummary,
 } from "../types/alerts";
 
 const TABS = [
@@ -33,7 +35,7 @@ const TABS = [
   { key: "rules", label: "Rules" },
   { key: "silences", label: "Silences" },
   { key: "sources", label: "Sources" },
-  { key: "receivers", label: "Receivers" },
+  { key: "receivers", label: "Routing" },
   { key: "delivery", label: "Delivery" },
 ] as const;
 
@@ -107,15 +109,14 @@ export default function AlertsPage() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [subspaceAlerts, setSubspaceAlerts] = useState<Alert[]>([]);
   const [ruleGroups, setRuleGroups] = useState<AlertRuleGroupSummary[]>([]);
-  const [ruleSelected, setRuleSelected] = useState<AlertRuleGroupSummary | null>(null);
-  const [ruleYaml, setRuleYaml] = useState("");
-  const [ruleResult, setRuleResult] = useState("");
   const [silences, setSilences] = useState<Silence[]>([]);
   const [sources, setSources] = useState<SourceStatus[]>([]);
   const [policy, setPolicy] = useState<AWSPolicy | null>(null);
   const [policyText, setPolicyText] = useState("");
+  const [gcpPolicy, setGCPPolicy] = useState<GCPPolicy | null>(null);
+  const [gcpPolicyText, setGCPPolicyText] = useState("");
   const [receivers, setReceivers] = useState<ReceiverConfig | null>(null);
-  const [receiverText, setReceiverText] = useState("");
+  const [routingAlerts, setRoutingAlerts] = useState<Alert[]>([]);
   const [delivery, setDelivery] = useState<DeliveryRecord[]>([]);
   const [selected, setSelected] = useState<Alert | null>(null);
   const [loading, setLoading] = useState(false);
@@ -257,8 +258,18 @@ export default function AlertsPage() {
         setSubspaceAlerts(data.alerts ?? []);
       }
       if (tab === "rules" && partition) {
-        const data = await api.getAlertRuleGroups(tenant, partition);
+        const [data, receiverData] = await Promise.all([
+          api.getAlertRuleGroups(tenant, partition),
+          api.getReceivers(params),
+        ]);
         setRuleGroups(data.groups ?? []);
+        setReceivers({
+          receivers: Array.isArray(receiverData?.receivers) ? receiverData.receivers : [],
+          routes: Array.isArray(receiverData?.routes) ? receiverData.routes : [],
+          alertRoutes: Array.isArray(receiverData?.alertRoutes) ? receiverData.alertRoutes : [],
+          partitionReceiver: receiverData?.partitionReceiver || "",
+          defaultReceiver: receiverData?.defaultReceiver || "",
+        });
       }
       if (tab === "silences") {
         const p = new URLSearchParams(params);
@@ -266,22 +277,32 @@ export default function AlertsPage() {
         setSilences(data.silences ?? []);
       }
       if (tab === "sources") {
-        const [sourceData, policyData] = await Promise.all([
+        const [sourceData, policyData, gcpPolicyData] = await Promise.all([
           api.getSources(params),
           api.getAWSPolicy(params),
+          api.getGCPPolicy(params),
         ]);
         setSources(sourceData.sources ?? []);
         setPolicy(policyData);
         setPolicyText(JSON.stringify(policyData, null, 2));
+        setGCPPolicy(gcpPolicyData);
+        setGCPPolicyText(JSON.stringify(gcpPolicyData, null, 2));
       }
       if (tab === "receivers") {
-        const data = await api.getReceivers(params);
-        const normalized: ReceiverConfig = {
+        const [data, groupsData, alertsData] = await Promise.all([
+          api.getReceivers(params),
+          api.getAlertRuleGroups(tenant, partition),
+          api.getAlerts(params),
+        ]);
+        setReceivers({
           receivers: Array.isArray(data?.receivers) ? data.receivers : [],
           routes: Array.isArray(data?.routes) ? data.routes : [],
-        };
-        setReceivers(normalized);
-        setReceiverText(JSON.stringify(normalized, null, 2));
+          alertRoutes: Array.isArray(data?.alertRoutes) ? data.alertRoutes : [],
+          partitionReceiver: data?.partitionReceiver || "",
+          defaultReceiver: data?.defaultReceiver || "",
+        });
+        setRuleGroups(groupsData.groups ?? []);
+        setRoutingAlerts(alertsData.alerts ?? []);
       }
       if (tab === "delivery") {
         const data = await api.getDelivery(params);
@@ -387,19 +408,14 @@ export default function AlertsPage() {
     }
   };
 
-  const saveReceivers = async () => {
+  const saveGCPPolicy = async () => {
     try {
-      const parsed = JSON.parse(receiverText) as ReceiverConfig;
-      const normalized: ReceiverConfig = {
-        receivers: Array.isArray(parsed?.receivers) ? parsed.receivers : [],
-        routes: Array.isArray(parsed?.routes) ? parsed.routes : [],
-      };
-      await api.putReceivers(params, normalized);
-      setReceivers(normalized);
-      setReceiverText(JSON.stringify(normalized, null, 2));
-      setNotice("Receiver configuration saved");
+      const parsed = JSON.parse(gcpPolicyText) as GCPPolicy;
+      const result = await api.putGCPPolicy(params, parsed);
+      setGCPPolicy(result.policy);
+      setNotice("GCP policy selection saved");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "invalid receiver JSON");
+      setError(e instanceof Error ? e.message : "invalid GCP policy JSON");
     }
   };
 
@@ -445,67 +461,6 @@ export default function AlertsPage() {
       await loadTab();
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not resolve subspace alert");
-    }
-  };
-
-  const openRule = async (group: AlertRuleGroupSummary) => {
-    setRuleSelected(group);
-    setRuleResult("");
-    try {
-      setRuleYaml(await api.getAlertRuleGroup(group.tenant, group.partition, group.group));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "could not load rule group");
-    }
-  };
-
-  const newRule = () => {
-    setRuleSelected({ tenant, partition, group: "new-group", interval: "1m", rules: 0 });
-    setRuleYaml(`version: 1
-groups:
-  - name: new-group
-    tenant: ${tenant}
-    partition: ${partition}
-    interval: 1m
-    rules:
-      - alert: ExampleAlert
-        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) > 0.05
-        for: 5m
-        labels:
-          severity: warning
-`);
-    setRuleResult("");
-  };
-
-  const saveRule = async () => {
-    if (!ruleSelected) return;
-    try {
-      await api.putAlertRuleGroup(ruleSelected.tenant, ruleSelected.partition, ruleSelected.group, ruleYaml);
-      setNotice("Rule group saved");
-      await loadTab();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "could not save rule group");
-    }
-  };
-
-  const testRule = async () => {
-    if (!ruleSelected) return;
-    try {
-      const result = await api.testAlertRuleGroup(ruleSelected.tenant, ruleSelected.partition, ruleSelected.group);
-      setRuleResult(JSON.stringify(result, null, 2));
-    } catch (e) {
-      setRuleResult(e instanceof Error ? e.message : "evaluation failed");
-    }
-  };
-
-  const deleteRule = async () => {
-    if (!ruleSelected) return;
-    try {
-      await api.deleteAlertRuleGroup(ruleSelected.tenant, ruleSelected.partition, ruleSelected.group);
-      setRuleSelected(null);
-      setNotice("Rule group deleted");
-      await loadTab();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "could not delete rule group");
     }
   };
 
@@ -759,48 +714,17 @@ groups:
           )}
 
           {tab === "rules" && partition && (
-            <div className="grid min-h-full grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-              <section className="flex flex-col rounded-lg border border-slate-800 bg-slate-900/50">
-                <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
-                  <div>
-                    <h2 className="text-sm font-semibold">Sentinel rules</h2>
-                    <p className="text-[11px] text-slate-500">PromQL alert rules for {partition}.</p>
-                  </div>
-                  {can(caps, "alerts.rules.write") && <button type="button" onClick={newRule} className="btn text-xs">New</button>}
-                </div>
-                <div className="min-h-0 flex-1 divide-y divide-slate-800 overflow-auto">
-                  {ruleGroups.map((group) => (
-                    <button key={`${group.tenant}/${group.partition}/${group.group}`} type="button" onClick={() => void openRule(group)} className={`block w-full px-4 py-3 text-left hover:bg-slate-800/60 ${ruleSelected?.group === group.group ? "bg-slate-800/70" : ""}`}>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-medium text-slate-200">{group.group}</span>
-                        <span className="text-[10px] text-slate-500">{group.rules} rules</span>
-                      </div>
-                      <div className="mt-1 text-[10px] text-slate-500">{group.tenant} · {group.partition} · every {group.interval}</div>
-                    </button>
-                  ))}
-                  {ruleGroups.length === 0 && <div className="px-4 py-10 text-center text-xs text-slate-500">No Sentinel rules in this partition.</div>}
-                </div>
-              </section>
-              <section className="flex flex-col rounded-lg border border-slate-800 bg-slate-900/50">
-                {ruleSelected ? (
-                  <div className="flex min-h-[480px] flex-1 flex-col">
-                    <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
-                      <input value={ruleSelected.group} onChange={(e) => setRuleSelected({ ...ruleSelected, group: e.target.value })} className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs" />
-                      <span className="text-[10px] text-slate-500">{ruleSelected.tenant} · {ruleSelected.partition}</span>
-                      <div className="ml-auto flex gap-2">
-                        <button type="button" onClick={() => void testRule()} disabled={!can(caps, "alerts.rules.read")} className="btn text-xs">Test</button>
-                        <button type="button" onClick={() => void saveRule()} disabled={!can(caps, "alerts.rules.write")} className="btn btn--primary text-xs">Save</button>
-                        <button type="button" onClick={() => void deleteRule()} disabled={!can(caps, "alerts.rules.write")} className="btn text-xs text-rose-300">Delete</button>
-                      </div>
-                    </div>
-                    <textarea value={ruleYaml} onChange={(e) => setRuleYaml(e.target.value)} className="min-h-[360px] flex-1 resize-y bg-slate-950 p-4 font-mono text-[11px] text-slate-300" spellCheck={false} />
-                    {ruleResult && <pre className="max-h-48 overflow-auto border-t border-slate-800 bg-slate-950 p-3 text-[10px] text-slate-300">{ruleResult}</pre>}
-                  </div>
-                ) : (
-                  <div className="flex min-h-[480px] flex-1 items-center justify-center p-6 text-xs text-slate-500">Select a rule group or create a new one.</div>
-                )}
-              </section>
-            </div>
+            <AlertRulesTab
+              tenant={tenant}
+              partition={partition}
+              groups={ruleGroups}
+              endpoints={receivers?.receivers ?? []}
+              caps={caps}
+              canWrite={can(caps, "alerts.rules.write")}
+              onReload={loadTab}
+              onNotice={setNotice}
+              onError={setError}
+            />
           )}
 
           {tab === "silences" && partition && (
@@ -867,30 +791,46 @@ groups:
                 />
                 {policy && <p className="mt-2 text-[11px] text-slate-500">Default: {policy.default} · unscoped: {policy.unscoped || "ignore"}</p>}
               </section>
+              <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-sm font-semibold">GCP policy selection</h2>
+                    <p className="text-[11px] text-slate-500">Only matching Cloud Monitoring alert policies are processed by Sentinel.</p>
+                  </div>
+                  <button type="button" onClick={() => void saveGCPPolicy()} disabled={!can(caps, "alerts.sources.write")} className="btn text-xs">Save</button>
+                </div>
+                <textarea
+                  value={gcpPolicyText}
+                  onChange={(event) => setGCPPolicyText(event.target.value)}
+                  className="mt-3 h-72 w-full rounded border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] text-slate-300"
+                  spellCheck={false}
+                />
+                {gcpPolicy && <p className="mt-2 text-[11px] text-slate-500">Default: {gcpPolicy.default}</p>}
+              </section>
             </div>
           )}
 
-          {tab === "receivers" && (
-            <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-sm font-semibold">Receivers and routes</h2>
-                  <p className="text-[11px] text-slate-500">Secrets are referenced by environment variable, never stored inline.</p>
-                </div>
-                <button type="button" onClick={() => void saveReceivers()} disabled={!can(caps, "alerts.receivers.write")} className="btn text-xs"><Mail size={13} /> Save</button>
-              </div>
-              <textarea
-                value={receiverText}
-                onChange={(event) => setReceiverText(event.target.value)}
-                className="mt-3 h-80 w-full rounded border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] text-slate-300"
-                spellCheck={false}
-              />
-              {receivers && (
-                <p className="mt-2 text-[11px] text-slate-500">
-                  {receivers.receivers?.length ?? 0} receivers · {receivers.routes?.length ?? 0} routes
-                </p>
-              )}
-            </section>
+          {tab === "receivers" && partition && (
+            <RoutingBoard
+              tenant={tenant}
+              partition={partition}
+              config={
+                receivers ?? {
+                  receivers: [],
+                  routes: [],
+                  alertRoutes: [],
+                  partitionReceiver: "",
+                  defaultReceiver: "",
+                }
+              }
+              groups={ruleGroups}
+              alerts={routingAlerts}
+              caps={caps}
+              canWrite={can(caps, "alerts.receivers.write")}
+              onReload={loadTab}
+              onNotice={setNotice}
+              onError={setError}
+            />
           )}
 
           {tab === "delivery" && partition && (

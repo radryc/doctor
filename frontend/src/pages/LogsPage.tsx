@@ -179,11 +179,15 @@ export default function LogsPage() {
   const [identities, setIdentities] = useState<LogIdentityInfo[]>([]);
   const [partitions, setPartitions] = useState<string[]>([]);
   const [logGroups, setLogGroups] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState("Searching…");
+  const [loading, setLoading] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [status, setStatus] = useState("Select a partition and press Run.");
   const [copiedView, setCopiedView] = useState(false);
   const [facetFilters, setFacetFilters] = useState<Record<string, string>>({});
   const autoAwsTried = useRef(false);
+  // Guards against out-of-order responses: a slow request for a previous time
+  // window (or filter set) must not overwrite the latest one.
+  const loadSeq = useRef(0);
 
   useEffect(() => {
     api
@@ -236,11 +240,12 @@ export default function LogsPage() {
   }, [partitionFilter]);
 
   useEffect(() => {
+    if (!started) return;
     if (!autoAwsTried.current && !loading && !logGroup && allRecords.length === 0 && logGroups.length > 0) {
       autoAwsTried.current = true;
       setLogGroup(logGroups[0]);
     }
-  }, [allRecords.length, loading, logGroup, logGroups]);
+  }, [allRecords.length, loading, logGroup, logGroups, started]);
 
   useEffect(() => {
     const seen = new Set(partitions);
@@ -257,6 +262,17 @@ export default function LogsPage() {
   // Keep params in sync when navigated here from elsewhere.
   const paramKey = searchParams.toString();
   useEffect(() => {
+    // Deep links such as /logs?range=15 from the command palette and on-call
+    // triage must move the shared time window, not just the local filters.
+    const rawRange = (searchParams.get("range") ?? "").trim();
+    if (rawRange) {
+      let preset = rawRange;
+      if (/^\d+$/.test(rawRange)) {
+        const mins = Number(rawRange);
+        preset = mins <= 5 ? "5m" : mins <= 15 ? "15m" : mins <= 60 ? "1h" : mins <= 360 ? "6h" : "24h";
+      }
+      tr.setRelative(preset);
+    }
     const nextQuery = searchParams.get("q") ?? "";
     const service = searchParams.get("service") ?? "";
     const identity = splitServiceIdentity(service);
@@ -268,9 +284,15 @@ export default function LogsPage() {
     setAssetFilter(searchParams.get("asset") ?? identity?.asset ?? "");
     setLogGroup(searchParams.get("logGroup") ?? "");
     setSevActive(parseSevParam(searchParams.get("sev")));
+    // Deep links carry an explicit intent to query; a bare /logs does not.
+    const hasExplicitQuery = ["q", "service", "partition", "intent", "asset", "logGroup", "range", "sev"].some(
+      (key) => Boolean(searchParams.get(key))
+    );
+    if (hasExplicitQuery) setStarted(true);
   }, [paramKey]);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const { from, to } = tr.resolve();
@@ -289,23 +311,26 @@ export default function LogsPage() {
       if (assetFilter) params.set("asset", assetFilter);
       if (logGroup) params.set("logGroup", logGroup);
       const data = await api.searchLogs(params);
+      if (seq !== loadSeq.current) return;
       setAllRecords(data.results ?? []);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setStatus("Error: " + (err instanceof Error ? err.message : "unknown"));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [config.default_tenant, tr, queryApplied, componentFilter, partitionFilter, intentFilter, assetFilter, logGroup]);
 
   useEffect(() => {
+    if (!started) return;
     void load();
-  }, [load, tr.refreshTick]);
+  }, [load, tr.refreshTick, started]);
 
   useEffect(() => {
-    if (!liveOn) return;
+    if (!liveOn || !started) return;
     const t = setInterval(() => void load(), 30000);
     return () => clearInterval(t);
-  }, [liveOn, load]);
+  }, [liveOn, load, started]);
 
   // Debounce text filter
   useEffect(() => {
@@ -343,14 +368,16 @@ export default function LogsPage() {
   const rangeLabel = tr.rangeString();
 
   useEffect(() => {
-    if (loading) {
+    if (!started) {
+      setStatus("Select a partition and press Run.");
+    } else if (loading) {
       setStatus("Searching…");
     } else if (allRecords.length === 0) {
       setStatus(`0 logs — last ${rangeLabel}`);
     } else {
       setStatus(`${filtered.length} of ${allRecords.length} logs — last ${rangeLabel}`);
     }
-  }, [loading, filtered.length, allRecords.length, rangeLabel]);
+  }, [loading, started, filtered.length, allRecords.length, rangeLabel]);
 
   const openTrace = (traceId: string) => {
     navigate("/traces?trace_id=" + encodeURIComponent(traceId));
@@ -457,6 +484,18 @@ export default function LogsPage() {
               ))}
             </select>
           </label>
+          <button
+            type="button"
+            className="log-query-run"
+            onClick={() => {
+              if (started) void load();
+              else setStarted(true);
+            }}
+            disabled={loading}
+            title="Run the log query with the selected partition and filters"
+          >
+            {loading ? "Running…" : "Run"}
+          </button>
           {componentFilter && (
             <span className="facet-chip">
               service: {componentFilter}
@@ -465,7 +504,7 @@ export default function LogsPage() {
           )}
           {(logGroupOptions.length > 0 || logGroup) && (
             <label className="filter-label">
-              CloudWatch log group
+              CloudWatch log group / GCP log name
               <select
                 className="xp-select"
                 value={logGroup}
@@ -532,6 +571,7 @@ export default function LogsPage() {
           onSubmit={(e) => {
             e.preventDefault();
             setQueryApplied(queryInput.trim());
+            setStarted(true);
           }}
         >
           <span className="log-query-label">Query</span>

@@ -66,10 +66,12 @@ func (c *discoveryCache) getOrLoad(ctx context.Context, key string, timeout time
 		}
 		c.mu.Unlock()
 
-		loadCtx := ctx
+		// The load is shared by every waiter. Deriving it from the leader's
+		// request context would make one client disconnect fail all of them.
+		loadCtx := context.WithoutCancel(ctx)
 		var cancel context.CancelFunc
 		if timeout > 0 {
-			loadCtx, cancel = context.WithTimeout(ctx, timeout)
+			loadCtx, cancel = context.WithTimeout(loadCtx, timeout)
 			defer cancel()
 		}
 		body, loadErr := load(loadCtx)

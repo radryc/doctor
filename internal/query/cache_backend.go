@@ -144,14 +144,49 @@ func cloneLogRecords(records []segment.LogRecord) []segment.LogRecord {
 	if len(records) == 0 {
 		return records
 	}
-	return append([]segment.LogRecord(nil), records...)
+	out := make([]segment.LogRecord, len(records))
+	for i, record := range records {
+		record.Attributes = cloneStringMap(record.Attributes)
+		record.ResourceAttributes = cloneStringMap(record.ResourceAttributes)
+		out[i] = record
+	}
+	return out
 }
 
+// cloneTraceRecords performs a deep copy. The cache stores the original
+// records, and downstream canonicalization (internal/query/proxy_wiring.go)
+// writes into Attributes. A shallow slice copy would let concurrent requests
+// mutate the same map and crash with "concurrent map read and map write".
 func cloneTraceRecords(records []segment.TraceRecord) []segment.TraceRecord {
 	if len(records) == 0 {
 		return records
 	}
-	return append([]segment.TraceRecord(nil), records...)
+	out := make([]segment.TraceRecord, len(records))
+	for i, record := range records {
+		record.Attributes = cloneStringMap(record.Attributes)
+		record.ResourceAttributes = cloneStringMap(record.ResourceAttributes)
+		if len(record.Events) > 0 {
+			events := make([]segment.TraceEvent, len(record.Events))
+			for j, event := range record.Events {
+				event.Attributes = cloneStringMap(event.Attributes)
+				events[j] = event
+			}
+			record.Events = events
+		}
+		out[i] = record
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 type resultCacheEntry struct {
@@ -204,7 +239,9 @@ func (c *resultCache) getOrLoad(ctx context.Context, key string, load func(conte
 		}
 		c.mu.Unlock()
 
-		loadCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		// The load is shared by every waiter. Deriving it from the leader's
+		// request context would make one client disconnect fail all of them.
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		value, loadErr := load(loadCtx)
 		if loadErr != nil {

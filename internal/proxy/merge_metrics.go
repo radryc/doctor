@@ -104,11 +104,16 @@ func ExtractPrometheusStringList(response map[string]any) []string {
 		for _, value := range data {
 			appendValue(value)
 		}
+	case []string:
+		out = append(out, data...)
 	case map[string]any:
 		if result, ok := data["result"].([]any); ok {
 			for _, value := range result {
 				appendValue(value)
 			}
+		}
+		if result, ok := data["result"].([]string); ok {
+			out = append(out, result...)
 		}
 	}
 	return out

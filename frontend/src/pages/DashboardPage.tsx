@@ -20,6 +20,7 @@ import {
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import { copyText } from "../lib/clipboard";
+import { guardianPartitionUrl } from "../lib/links";
 import EChart from "../components/charts/EChart";
 import { escapeHtml, useChartTheme } from "../lib/chartTheme";
 import type { GuardianOverview } from "../types/api";
@@ -636,6 +637,17 @@ export default function DashboardPage() {
                         <Link className="triage-action" to={`/metrics?partition=${encoded}`}>
                           <BarChart3 size={11} /> Metrics
                         </Link>
+                        {config.guardian_url && (
+                          <a
+                            className="triage-action"
+                            href={guardianPartitionUrl(config.guardian_url, partition.name)}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`Open ${partition.name} in Guardian to inspect failing assets`}
+                          >
+                            <ShieldCheck size={11} /> Guardian
+                          </a>
+                        )}
                         <button
                           type="button"
                           className={"triage-action" + (copiedPartition === partition.name ? " triage-action--primary" : "")}

@@ -43,6 +43,40 @@ func TestCachingBackendCachesSmallLogQueries(t *testing.T) {
 	}
 }
 
+func TestCloneTraceRecordsDoesNotShareMutableMaps(t *testing.T) {
+	records := []segment.TraceRecord{{
+		TraceID:            "trace-1",
+		Service:            "api",
+		Partition:          "doctor",
+		Attributes:         map[string]string{"http.method": "GET"},
+		ResourceAttributes: map[string]string{"service.name": "api"},
+		Events: []segment.TraceEvent{{
+			Name:       "exception",
+			Attributes: map[string]string{"exception.type": "boom"},
+		}},
+	}}
+	cloned := cloneTraceRecords(records)
+	if len(cloned) != 1 {
+		t.Fatalf("cloneTraceRecords() returned %d records", len(cloned))
+	}
+
+	// Canonicalization writes into Attributes; the clone must be independent or
+	// concurrent requests using the same cache entry race on the map.
+	cloned[0].Attributes["canonical"] = "1"
+	cloned[0].ResourceAttributes["service.name"] = "mutated"
+	cloned[0].Events[0].Attributes["exception.type"] = "mutated"
+
+	if _, ok := records[0].Attributes["canonical"]; ok {
+		t.Fatal("clone shares Attributes map with the cached record")
+	}
+	if got := records[0].ResourceAttributes["service.name"]; got != "api" {
+		t.Fatalf("clone shares ResourceAttributes map: got %q", got)
+	}
+	if got := records[0].Events[0].Attributes["exception.type"]; got != "boom" {
+		t.Fatalf("clone shares event Attributes map: got %q", got)
+	}
+}
+
 func TestCachingBackendCachesDiscoverySizedQueries(t *testing.T) {
 	now := time.Now().UTC()
 	inner := &countingLogBackend{}
