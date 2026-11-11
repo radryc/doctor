@@ -11,9 +11,11 @@ alert state, receiver config, and the delivery outbox in MonoFS.
 - Guardian partition `Error`/`Failing`/`Invalid` and `Attention` state pulled
   from `GET /api/partitions`. This source creates `GuardianPartitionError`
   (critical) and `GuardianPartitionAttention` (warning) alerts and resolves them
-  when the partition recovers. Nightwatch reads these through the Sentinel API,
-  so Guardian errors and attentions become Nightwatch incidents without any
-  Nightwatch-side change.
+  when the partition recovers. Locked-only drift is treated as intentional and
+  does not raise `GuardianPartitionAttention`; real errors and failing assets
+  still raise `GuardianPartitionError`. Nightwatch reads these through the
+  Sentinel API, so Guardian errors and attentions become Nightwatch incidents
+  without any Nightwatch-side change.
 - AWS CloudWatch alarms pulled through `guardian-pusher-aws`
   (`GET /v1/aws/alarms`).
 - Alertmanager-compatible webhooks via
@@ -140,6 +142,45 @@ alerts together, use the same receiver for both entries. Removing the explicit
 route falls back to the partition destination or default route.
 
 
+## Guardian alert policy
+
+Guardian partition alerts are source-generated rather than PromQL rules, so
+their timing is configured per partition:
+
+```text
+{store}/config/sources/guardian/{tenant}/{partition}.yaml
+```
+
+```yaml
+version: 1
+alertOnLocked: false
+
+alerts:
+  GuardianPartitionError:
+    for: 5m
+  GuardianPartitionAttention:
+    for: 30m
+```
+
+- `for` delays firing until the condition has been observed continuously for
+  that duration. While waiting, the alert is `pending` and is not delivered.
+- `for: 0s` (or an omitted alert entry) fires on the first observation.
+- A condition that clears while pending resolves without notifying.
+- `alertOnLocked` defaults to `false`. Set it to `true` only for partitions
+  where drift on a locked intent should raise `GuardianPartitionAttention`.
+- Existing firing alerts are never downgraded to `pending` when a delay is
+  added to the policy.
+
+The policy is available through:
+
+```text
+GET /v1/alerts/sources/guardian/policy?tenant=&partition=
+PUT /v1/alerts/sources/guardian/policy?tenant=&partition=
+```
+
+The Doctor Sources tab exposes the attention delay, error delay, and
+`alertOnLocked` checkbox for the selected partition.
+
 ## PagerDuty receiver
 
 Create a PagerDuty service with an Events API v2 integration key, then add a
@@ -184,6 +225,8 @@ POST   /v1/alerts/rules/test
 GET    /v1/alerts/sources
 GET    /v1/alerts/sources/aws/policy
 PUT    /v1/alerts/sources/aws/policy
+GET    /v1/alerts/sources/guardian/policy?tenant=&partition=
+PUT    /v1/alerts/sources/guardian/policy?tenant=&partition=
 GET    /v1/alerts/receivers?tenant=&partition=
 PUT    /v1/alerts/receivers?tenant=&partition=
 GET    /v1/alerts/routing/overview?tenant=

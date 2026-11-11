@@ -1,8 +1,7 @@
 # Doctor engineering documentation
 
-This documentation set was regenerated from the source tree on **2026-10-30**. The previous
-`docs/` tree and the root `README.md` were moved to
-[`docs-backup-20261030-184342/`](../docs-backup-20261030-184342/) before this work started.
+This documentation set is derived from the source tree and is updated with the code. The previous
+`docs/` tree and the root `README.md` were replaced during the October 2026 documentation pass.
 
 Scope:
 
@@ -27,15 +26,10 @@ the intended design.
 | [logical-flows/federation.md](logical-flows/federation.md) | platform/SRE | catalog controller, snapshots, tokens, planner, fan-out |
 | [logical-flows/rules-dashboards.md](logical-flows/rules-dashboards.md) | platform/SRE | recording rules, dashboards, CAS storage |
 | [logical-flows/ui.md](logical-flows/ui.md) | frontend/SRE | page routes, data dependencies, refresh/correlation behavior |
+| [partition-quotas.md](partition-quotas.md) | platform/SRE | partition, user, group, and client quota model, enforcement, dashboard |
 | [sql-console-syntax.md](sql-console-syntax.md) | console users / SRE | SQL dialect, quoting, datasets, label/time filters, limits |
 | [design/graph-spec.md](design/graph-spec.md) | graph authors / agents | importable graph, dashboard, and saved-graph bundle schemas, query rules, and examples |
-| [security-architecture.md](security-architecture.md) | security/SRE | trust boundaries, authentication, authorization, secrets, threats, gaps |
-| [internal/code-inventory.md](internal/code-inventory.md) | engineers | every source/test file and what it does |
-| [internal/missing-pieces.md](internal/missing-pieces.md) | maintainers | unimplemented or unenforced capabilities, with priority |
-| [internal/duplicate-functionality.md](internal/duplicate-functionality.md) | maintainers | overlapping implementations and consolidation candidates |
-| [internal/overcomplexity.md](internal/overcomplexity.md) | maintainers | areas that are too large or too clever, with simplification proposals |
-| [internal/remediation-log.md](internal/remediation-log.md) | maintainers | findings addressed in code, tests, and remaining high-priority work |
-| [../TODO.md](../TODO.md) | maintainers | actionable remaining backlog with priorities and acceptance criteria |
+| [security-architecture.md](security-architecture.md) | security/SRE | trust boundaries, authentication, authorization, secrets, threats, controls |
 
 ## Repository map
 
@@ -107,4 +101,3 @@ See [architecture/components.md](architecture/components.md) for the full config
 3. [logical-flows/ingest.md](logical-flows/ingest.md)
 4. [logical-flows/query.md](logical-flows/query.md)
 5. [security-architecture.md](security-architecture.md)
-6. the internal documents before making structural changes

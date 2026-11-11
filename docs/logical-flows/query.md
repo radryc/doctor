@@ -172,6 +172,13 @@ Local engine details:
   above 16 names the store is scanned once and filtered client-side.
 - Per-query budgets: 4M samples, 100k series; global 8M samples. Exceeding them returns HTTP 422.
 - `count by (__name__)` / bare `count` are served from the chunk series index, not samples.
+- Native-histogram functions (`histogram_avg`, `histogram_count`, `histogram_sum`,
+  `histogram_stddev`, `histogram_stdvar`, `histogram_quantile`, `histogram_fraction`) synthesize a
+  native histogram series from the classic `_bucket` / `_count` / `_sum` siblings of an exact base
+  metric name. This keeps existing storage and historical data queryable with those functions;
+  stored native histogram samples are not required. Explicit `_bucket` selectors keep using the
+  classic bucket path. The synthesized custom-bucket histogram starts its real buckets at 0 for
+  non-negative observations so `histogram_stddev` / `histogram_stdvar` stay finite.
 - Broad all-series range selectors (`{__name__=~".+"}`) are rejected when the range exceeds 15
   minutes.
 - A `?timeout=` duration is honored up to 5 minutes; otherwise the engine uses 30s or the caller

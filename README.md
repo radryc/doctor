@@ -7,9 +7,7 @@ proxy other observability backends.
 
 ## Documentation
 
-The previous documentation tree was archived at
-[`docs-backup-20261030-184342/`](docs-backup-20261030-184342/). The current docs were regenerated
-from the source:
+The current docs are derived from the source and updated with the code:
 
 - [Documentation index](docs/README.md)
 - [Architecture overview](docs/architecture/overview.md)
@@ -20,13 +18,10 @@ from the source:
 - [Federation flow](docs/logical-flows/federation.md)
 - [Rules and dashboards](docs/logical-flows/rules-dashboards.md)
 - [UI flow](docs/logical-flows/ui.md)
+- [Alerts](docs/alerts.md)
+- [Partition quotas](docs/partition-quotas.md)
+- [SQL console syntax](docs/sql-console-syntax.md)
 - [Security architecture](docs/security-architecture.md)
-- [Code inventory](docs/internal/code-inventory.md)
-- [Missing pieces](docs/internal/missing-pieces.md)
-- [Duplicate functionality](docs/internal/duplicate-functionality.md)
-- [Overcomplexity and simplification](docs/internal/overcomplexity.md)
-- [Remediation log](docs/internal/remediation-log.md)
-- [Remaining TODO](TODO.md)
 
 ## Services
 

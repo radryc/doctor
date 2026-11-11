@@ -3,7 +3,7 @@
 > This document describes the security properties of the code as it is wired today, including
 > controls that are present but not used, and controls that look correct but are not. It is not a
 > claim that the system is secure. The highest-risk findings are summarized in
-> [§11](#11-risk-register) and tracked in [internal/missing-pieces.md](internal/missing-pieces.md).
+> [§11](#11-risk-register).
 
 ## 1. Scope and trust model
 
@@ -213,8 +213,7 @@ Doctor has two independent authorization implementations:
 
 Both can be active at once. The repo gate wraps the local log backend; the legacy gate controls
 remote proxy backends. They can disagree, and a local backend registered in the proxy router is
-subject to the legacy gate as well. See
-[internal/duplicate-functionality.md](internal/duplicate-functionality.md).
+subject to the legacy gate as well.
 
 ### 3.3 Observe mode defect
 
@@ -458,8 +457,7 @@ must enforce tenant identity and partition membership outside Doctor (gateway + 
 ## 11. Risk register
 
 Severity reflects the current wiring, assuming network reachability. The first table lists residual
-risks after the remediation pass; the second lists findings that were fixed in code (details and
-tests are in [internal/remediation-log.md](internal/remediation-log.md)).
+risks after the remediation pass; the second lists findings that were fixed in code.
 
 ### Residual risks
 

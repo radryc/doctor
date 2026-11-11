@@ -16,7 +16,8 @@ flowchart LR
   W --> LE[MonoFS log-engine]
 ```
 
-- `ruler.Store` persists YAML rule groups at `/doctor/v1/rules/<tenant>/<group>.yaml`.
+- `ruler.Store` persists YAML rule groups at `/doctor/v1/rules/<partition>/<group>.yaml`.
+- `ruler.Scheduler` enforces `rules.maxEvaluationCostPerSecond` with a per-partition token budget; skipped ticks increment `scheduler.skipped`.
 - `ruler.LeaseManager` uses a CAS lease at `/doctor/v1/rules/.lease/leader.json`.
 - `ruler.Scheduler` reloads groups every `DOCTOR_RULES_POLL_INTERVAL`, keeps a min-heap of next
   evaluation times, spreads new groups across the first 10% of their interval, and evaluates with a
@@ -73,16 +74,16 @@ Details:
 | Method | Path | Behavior |
 |---|---|---|
 | GET | `/healthz` | 200 |
-| GET | `/v1/rules` | group summaries (`tenant`, `group`, `interval`, `rules`) |
+| GET | `/v1/rules` | group summaries (`partition`, `group`, `interval`, `rules`) |
 | GET | `/v1/rules/status` | enabled, ruler ID, leader, lease status, scheduler stats |
-| POST | `/v1/rules/evaluate?tenant=&group=` | load and evaluate all groups in the file |
-| GET | `/v1/rules/{tenant}/{group}` | YAML rule file |
-| PUT | `/v1/rules/{tenant}/{group}` | parse + validate + store (authenticated authorizer) |
-| DELETE | `/v1/rules/{tenant}/{group}` | delete with CAS (authenticated authorizer) |
+| POST | `/v1/rules/evaluate?partition=&group=` | load and evaluate all groups in the file |
+| GET | `/v1/rules/{partition}/{group}` | YAML rule file |
+| PUT | `/v1/rules/{partition}/{group}` | parse + validate + store (authenticated authorizer + rule quota) |
+| DELETE | `/v1/rules/{partition}/{group}` | delete with CAS (authenticated authorizer) |
 
 The server requires `DOCTOR_RULES_API_TOKEN` on every route except `/healthz` and `/metrics`. The
 authorizer is `ruler.AuthenticatedAuthorizer`, so mutations require an authenticated service
-principal. This is still all-or-nothing: any holder of the service token can modify any tenant/group.
+principal. This is still all-or-nothing: any holder of the service token can modify any partition/group.
 The query service’s rules proxy only allows GET and POST `/v1/rules/evaluate` and injects the same
 service token.
 
@@ -96,8 +97,8 @@ service token.
 
 ### 1.5 Known gaps
 
-- the rules API token is all-or-nothing; there is no per-tenant ownership;
-- no tenant validation beyond the URL path;
+- the rules API token is all-or-nothing; there is no per-partition ownership;
+- no partition validation beyond the URL path;
 - no dry-run/backtest API;
 - no rule evaluation history/audit;
 - the scheduler now skips missed intervals after a pause, but there is no catch-up policy;

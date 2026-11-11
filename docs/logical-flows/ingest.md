@@ -180,6 +180,8 @@ helpers are still unused. This endpoint is not a working Guardian event sink.
 | MonoFS write error | 500 / `Unknown` |
 | missing/invalid ingest bearer token | 401 / gRPC `Unauthenticated` |
 | tenant outside allowlist | 403 / gRPC `PermissionDenied` |
+| partition over ingest/bytes/series quota | 429 / gRPC `ResourceExhausted` |
+| unknown partition in enforce mode | 400 / gRPC `InvalidArgument` |
 | malformed OTLP | 400 / gRPC decode error |
 | JSON OTLP with hex IDs | normalized before decode |
 | Guardian events | 501 Not Implemented (no event storage) |
@@ -190,6 +192,6 @@ helpers are still unused. This endpoint is not a working Guardian event sink.
 - No mTLS or per-collector authorization beyond a shared bearer token.
 - No per-tenant credential mapping (one token can write any allowlisted tenant).
 - No retry/backoff or durable queue for pipeline writes.
-- No cost enforcement (`CostController` is unused).
+- No storage-byte/retention enforcement (`CostController` is still unused); partition ingest, cardinality, query, and rule quotas are enforced by `internal/quota`.
 - No legacy segment WAL (`internal/wal.WAL` is unused).
 - No request IDs, structured access logs, or audit trail for accepted telemetry.

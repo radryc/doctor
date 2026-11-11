@@ -85,9 +85,11 @@ is a shared component used by `FleetDashboard` and the partition asset pages.
 
 - Catalog: `discoverServices` with the global window; filter by partition/intent/search; show
   signals (M/T/L), trace/log counts, error rate, alias, kind.
-- Detail: RED cards (rate, errors, p95) queried from Prometheus with fallbacks to Tempo metrics;
-  probe cards from Prometheus; recent traces via `/v1/traces/recent` and `/v1/traces/{id}`; recent
-  logs via `/v1/logs/search`.
+- Detail: RED cards (rate, errors, p95, p99) queried from application Prometheus metrics, then Tempo
+  metrics, then Guardian probe counters/histograms (`guardian_probe_runs`,
+  `guardian_probe_failures`, `guardian_probe_duration_histogram_seconds_bucket`) for services
+  covered only by synthetic probes; probe cards from Prometheus; recent traces via
+  `/v1/traces/recent` and `/v1/traces/{id}`; recent logs via `/v1/logs/search`.
 
 ### 3.4 Traces (`TracesPage`)
 
@@ -127,6 +129,8 @@ is a shared component used by `FleetDashboard` and the partition asset pages.
   `guardian_asset/values`.
 - Partitions from Guardian overview plus `/v1/logs/services`.
 - Query editor supports instant/range, step, timeout, graph/table/raw views, URL state.
+- Native histogram results (`histogram` / `histograms`) are rendered by the graph and table views
+  using their count/sum summary; the raw view preserves the full bucket payload.
 - Selecting a non-identifier metric name (for example a GCP `*.googleapis.com/...` name) builds a
   `{__name__="…", source="gcp"}` selector automatically.
 - The selected partition is pushed into the query with a provider-specific matcher (Doctor

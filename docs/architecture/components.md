@@ -1,7 +1,6 @@
 # Components and interfaces
 
-This document explains what each package and binary owns. The line-by-line file inventory is in
-[internal/code-inventory.md](../internal/code-inventory.md).
+This document explains what each package and binary owns.
 
 ## 1. Binaries
 
