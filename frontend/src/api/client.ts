@@ -16,6 +16,7 @@ import type {
   GuardianEventsResponse,
   RecordingRulesResponse,
   RecordingRulesStatus,
+  QuotaDashboardResponse,
   UIUser,
   ProxyEndpointsResponse,
   ServiceDiscoveryResponse,
@@ -36,6 +37,7 @@ import type {
   SilenceListResponse,
   AWSPolicy,
   GCPPolicy,
+  GuardianPolicy,
   SourceListResponse,
   DeliveryResponse,
   ReceiverConfig,
@@ -254,17 +256,32 @@ export const api = {
   guardianOverview: () =>
     fetchJSON<GuardianOverview>("/v1/guardian/overview"),
 
+  getQuota: () => fetchJSON<QuotaDashboardResponse>("/v1/quota"),
+
   getRecordingRuleGroups: () =>
     fetchJSON<RecordingRulesResponse>("/v1/rules"),
 
   getRecordingRuleStatus: () =>
     fetchJSON<RecordingRulesStatus>("/v1/rules/status"),
 
-  getRecordingRuleGroup: (tenant: string, group: string) =>
-    fetchText(`/v1/rules/${encodeURIComponent(tenant)}/${encodeURIComponent(group)}`),
+  getRecordingRuleGroup: (partition: string, group: string) =>
+    fetchText(`/v1/rules/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`),
 
-  evaluateRecordingRuleGroup: (tenant: string, group: string) => {
-    const params = new URLSearchParams({ tenant, group });
+  putRecordingRuleGroup: (partition: string, group: string, body: string) =>
+    fetchJSONText<unknown>(
+      `/v1/rules/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`,
+      "PUT",
+      body
+    ),
+
+  deleteRecordingRuleGroup: (partition: string, group: string) =>
+    fetchJSON<unknown>(
+      `/v1/rules/${encodeURIComponent(partition)}/${encodeURIComponent(group)}`,
+      "DELETE"
+    ),
+
+  evaluateRecordingRuleGroup: (partition: string, group: string) => {
+    const params = new URLSearchParams({ partition, group });
     return fetchJSON<unknown>(`/v1/rules/evaluate?${params}`, "POST");
   },
 
@@ -381,6 +398,16 @@ export const api = {
   putGCPPolicy: (params: URLSearchParams, policy: GCPPolicy) =>
     fetchJSONBody<{ status: string; policy: GCPPolicy }>(
       `/v1/alerts/sources/gcp/policy?${params}`,
+      "PUT",
+      policy
+    ),
+
+  getGuardianPolicy: (params: URLSearchParams) =>
+    fetchJSON<GuardianPolicy>(`/v1/alerts/sources/guardian/policy?${params}`),
+
+  putGuardianPolicy: (params: URLSearchParams, policy: GuardianPolicy) =>
+    fetchJSONBody<{ status: string; policy: GuardianPolicy }>(
+      `/v1/alerts/sources/guardian/policy?${params}`,
       "PUT",
       policy
     ),

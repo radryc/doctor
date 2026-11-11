@@ -18,6 +18,10 @@ func withMutationOriginCheck(next http.Handler) http.Handler {
 		}
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		referer := strings.TrimSpace(r.Header.Get("Referer"))
+		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if origin != "" {
 			if !sameOrigin(origin, r.Host) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin mutation is not allowed"})

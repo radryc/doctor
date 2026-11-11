@@ -130,10 +130,19 @@ func (s *GuardianSource) PollOnce(ctx context.Context) (SourceSummary, error) {
 		}
 		partition.Name = name
 		alertName := guardianPartitionAlertName(partition)
+		var policy *GuardianPolicy
+		if alertName != "" || guardianPartitionLocked(partition) {
+			policy = s.policyFor(ctx, partition)
+		}
+		if alertName == "" && guardianPartitionLocked(partition) && policy.AlertOnLocked {
+			// Locked drift is intentional by default. Only partitions that
+			// explicitly opt in raise an attention alert for it.
+			alertName = GuardianPartitionAttentionAlert
+		}
 		switch alertName {
 		case GuardianPartitionErrorAlert:
 			summary.Included++
-			applied, err := s.applyPartitionAlert(ctx, partition, GuardianPartitionErrorAlert, "critical", now)
+			applied, err := s.applyPartitionAlert(ctx, state, partition, GuardianPartitionErrorAlert, "critical", policy.For(GuardianPartitionErrorAlert), now)
 			if err != nil {
 				return summary, err
 			}
@@ -148,7 +157,7 @@ func (s *GuardianSource) PollOnce(ctx context.Context) (SourceSummary, error) {
 			}
 		case GuardianPartitionAttentionAlert:
 			summary.Included++
-			applied, err := s.applyPartitionAlert(ctx, partition, GuardianPartitionAttentionAlert, "warning", now)
+			applied, err := s.applyPartitionAlert(ctx, state, partition, GuardianPartitionAttentionAlert, "warning", policy.For(GuardianPartitionAttentionAlert), now)
 			if err != nil {
 				return summary, err
 			}
@@ -281,12 +290,19 @@ func guardianPartitionAlertName(partition GuardianPartitionSummary) string {
 	if len(partition.Errors) > 0 {
 		return GuardianPartitionErrorAlert
 	}
+	if partition.FailingAssets > 0 || partition.FailedIntents > 0 {
+		return GuardianPartitionErrorAlert
+	}
+	// A locked partition reports "Locked" health while its partition state may
+	// still be "Attention" (drift is expected on locked intents). Locked drift
+	// is intentional, so it must not raise an attention alert. Real errors and
+	// failing assets were handled above and still alert.
+	if guardianPartitionLocked(partition) {
+		return ""
+	}
 	primary := []string{partition.Status, partition.Health, partition.DisplayStatus}
 	if name := guardianAlertNameForTokens(primary); name != "" {
 		return name
-	}
-	if partition.FailingAssets > 0 || partition.FailedIntents > 0 {
-		return GuardianPartitionErrorAlert
 	}
 	// Only fall back to the last resolved health when the live fields are
 	// empty; otherwise a partition that is currently progressing would keep
@@ -318,8 +334,52 @@ func guardianAlertNameForTokens(tokens []string) string {
 	return ""
 }
 
-func (s *GuardianSource) applyPartitionAlert(ctx context.Context, partition GuardianPartitionSummary, alertName, severity string, now time.Time) (*Alert, error) {
+// guardianPartitionLocked reports whether the partition's only outstanding
+// state is drift on locked intents. Guardian exposes this as the detail health
+// "locked" / display status "Locked" while the partition-state status can still
+// read "Attention".
+func guardianPartitionLocked(partition GuardianPartitionSummary) bool {
+	// Use the detail health fields. partition.Status is the runtime partition
+	// state and can still say "Attention" while every intent is locked.
+	for _, value := range []string{partition.Health, partition.DisplayStatus} {
+		if strings.EqualFold(strings.TrimSpace(value), "locked") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *GuardianSource) policyFor(ctx context.Context, partition GuardianPartitionSummary) *GuardianPolicy {
+	if s.Store == nil {
+		return DefaultGuardianPolicy()
+	}
+	policy, err := s.Store.GetGuardianPolicy(ctx, s.tenant(), partition.Name)
+	if err != nil {
+		// A malformed policy must not stop alerting for the whole fleet. Fall
+		// back to the defaults and surface the error in the poll log.
+		s.logf("guardian policy %s: %v", partition.Name, err)
+		return DefaultGuardianPolicy()
+	}
+	return policy
+}
+
+func (s *GuardianSource) applyPartitionAlert(ctx context.Context, state map[string]Alert, partition GuardianPartitionSummary, alertName, severity string, delay time.Duration, now time.Time) (*Alert, error) {
 	alert := s.normalizePartitionAlert(partition, alertName, severity, now)
+	if delay > 0 {
+		existing, ok := state[alertStateKey(alert.Partition, alert.Fingerprint)]
+		switch {
+		case ok && existing.Status == StatusFiring:
+			// Never downgrade a firing alert when the policy is made stricter.
+			alert.StartsAt = existing.StartsAt
+		case ok && existing.Status == StatusPending:
+			alert.StartsAt = existing.StartsAt
+			if now.Sub(existing.StartsAt) < delay {
+				alert.Status = StatusPending
+			}
+		default:
+			alert.Status = StatusPending
+		}
+	}
 	return s.Service.Apply(ctx, alert)
 }
 

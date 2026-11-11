@@ -6,6 +6,7 @@ import (
 	"time"
 
 	gcpstore "github.com/radryc/doctor/internal/store/gcp"
+	"github.com/radryc/doctor/internal/telemetrylabels"
 )
 
 type fakeGCPClient struct {
@@ -181,6 +182,75 @@ func TestGCPUpstreamGetTrace(t *testing.T) {
 	}
 	if records[0].Partition != "europe-west1" {
 		t.Errorf("partition = %q", records[0].Partition)
+	}
+}
+
+func TestNormalizeGCPSpanID(t *testing.T) {
+	cases := map[string]string{
+		"":                     "",
+		"17573671006029764517": "f3e238abb1fc57a5",
+		"16395347731126193946": "e387f9e52ac88f1a",
+		"15607790297623973958": "d89a029502aa5046",
+		"f3e238abb1fc57a5":     "f3e238abb1fc57a5",
+		"F3E238ABB1FC57A5":     "f3e238abb1fc57a5",
+	}
+	for input, want := range cases {
+		if got := normalizeGCPSpanID(input); got != want {
+			t.Fatalf("normalizeGCPSpanID(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestGCPUpstreamGetTraceUsesCloudRunIdentity(t *testing.T) {
+	client := &fakeGCPClient{spans: []gcpstore.Span{{
+		TraceID:      "abc",
+		SpanID:       "17573671006029764517",
+		ParentSpanID: "16395347731126193946",
+		Name:         "/trace/through",
+		Service:      "/trace/through",
+		StartTime:    time.Now().Add(-time.Second),
+		EndTime:      time.Now(),
+		Region:       "europe-west1",
+		Project:      "strata-gcp-dev",
+		Attributes: map[string]string{
+			"faas.name": "guardian-diva-shared-gcp-app",
+		},
+	}}}
+	upstream := &GCPUpstream{Client: client}
+	records, found, err := upstream.GetTrace(context.Background(), "default", "abc")
+	if err != nil || !found || len(records) != 1 {
+		t.Fatalf("GetTrace: found=%v err=%v records=%+v", found, err, records)
+	}
+	record := records[0]
+	if record.SpanID != "f3e238abb1fc57a5" || record.ParentSpanID != "e387f9e52ac88f1a" {
+		t.Errorf("span IDs = %q/%q", record.SpanID, record.ParentSpanID)
+	}
+	if record.Partition != "diva-shared" {
+		t.Errorf("partition = %q, want diva-shared", record.Partition)
+	}
+	if got := record.Attributes[telemetrylabels.GuardianPartition]; got != "diva-shared" {
+		t.Errorf("guardian_partition = %q, want diva-shared", got)
+	}
+}
+
+func TestGCPUpstreamQueryLogsUsesCloudRunIdentity(t *testing.T) {
+	client := &fakeGCPClient{logs: []gcpstore.LogRecord{{
+		Timestamp: time.Now(),
+		LogGroup:  "run.googleapis.com%2Fstdout",
+		Message:   "hello",
+		Region:    "europe-west1",
+		Project:   "strata-gcp-dev",
+		Fields: map[string]string{
+			"faas.name": "guardian-diva-shared-gcp-app",
+		},
+	}}}
+	upstream := &GCPUpstream{Client: client}
+	records, err := upstream.QueryLogs(context.Background(), "default", LogPushdown{}, time.Now().Add(-time.Hour), time.Now(), 10)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("QueryLogs: err=%v records=%+v", err, records)
+	}
+	if records[0].Partition != "diva-shared" {
+		t.Errorf("partition = %q, want diva-shared", records[0].Partition)
 	}
 }
 

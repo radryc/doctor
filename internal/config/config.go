@@ -6,7 +6,85 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/radryc/doctor/internal/quota"
+	"github.com/radryc/monofs/pkg/authz/policy"
 )
+
+// QuotaConfig is the shared data-plane quota configuration.
+type QuotaConfig struct {
+	Enabled     bool
+	PolicyURL   string
+	PolicyToken string
+	Interval    time.Duration
+	Replicas    int
+	Enforce     bool
+	Defaults    policy.Quota
+}
+
+// LoadQuota builds the quota configuration for one service. fallbackURL and
+// fallbackToken let services reuse DOCTOR_ACCESS_POLICY_* when the dedicated
+// quota variables are not set.
+func LoadQuota(service, fallbackURL, fallbackToken string) QuotaConfig {
+	url := envString("DOCTOR_QUOTA_POLICY_URL", fallbackURL)
+	token := envString("DOCTOR_QUOTA_POLICY_TOKEN", fallbackToken)
+	enabled := envBool("DOCTOR_QUOTA_ENABLED", strings.TrimSpace(url) != "")
+	return QuotaConfig{
+		Enabled:     enabled,
+		PolicyURL:   url,
+		PolicyToken: token,
+		Interval:    envDuration("DOCTOR_QUOTA_POLICY_INTERVAL", 30*time.Second),
+		Replicas:    int(envInt64("DOCTOR_QUOTA_REPLICAS", 1)),
+		Enforce:     envBool("DOCTOR_QUOTA_ENFORCE", false),
+		Defaults:    loadQuotaDefaults(),
+	}
+}
+
+func loadQuotaDefaults() policy.Quota {
+	q := quota.Defaults()
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_QUERY_RPS", 0); value > 0 {
+		q.Query.RequestsPerSecond = float64(value)
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_QUERY_CONCURRENT", 0); value > 0 {
+		q.Query.MaxConcurrent = int(value)
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_QUERY_BUDGET", 0); value > 0 {
+		q.Query.BudgetPerSecond = value
+	}
+	if value := envDuration("DOCTOR_QUOTA_DEFAULT_QUERY_MAX_RANGE", 0); value > 0 {
+		q.Query.MaxRange = value.String()
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_QUERY_MAX_SAMPLES", 0); value > 0 {
+		q.Query.MaxSamples = value
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_QUERY_MAX_SERIES", 0); value > 0 {
+		q.Query.MaxSeries = value
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_INGEST_BYTES_PER_SECOND", 0); value > 0 {
+		q.Ingest.Traces.BytesPerSecond = value
+		q.Ingest.Logs.BytesPerSecond = value
+		q.Ingest.Metrics.BytesPerSecond = value
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_INGEST_RECORDS_PER_SECOND", 0); value > 0 {
+		q.Ingest.Traces.RecordsPerSecond = value
+		q.Ingest.Logs.RecordsPerSecond = value
+		q.Ingest.Metrics.RecordsPerSecond = value
+		q.Ingest.Metrics.SamplesPerSecond = value
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_MAX_SERIES", 0); value > 0 {
+		q.Ingest.Metrics.MaxActiveSeries = int(value)
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_RULES_MAX", 0); value > 0 {
+		q.Rules.MaxRules = int(value)
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_RULES_COST", 0); value > 0 {
+		q.Rules.MaxEvaluationCostPerSecond = value
+	}
+	if value := envInt64("DOCTOR_QUOTA_DEFAULT_STORAGE_BYTES", 0); value > 0 {
+		q.Storage.MaxBytes = value
+	}
+	return q
+}
 
 type PrivacyConfig struct {
 	HMACKey string
@@ -75,6 +153,7 @@ type IngestConfig struct {
 	WAL                 WALConfig
 	Pipeline            PipelineConfig
 	Cost                CostConfig
+	Quota               QuotaConfig
 }
 
 type QueryConfig struct {
@@ -180,6 +259,11 @@ type QueryConfig struct {
 
 	// Dashboards
 	DashboardsStoreRoot string
+
+	// Quota enforcement and dashboard usage proxy.
+	Quota       QuotaConfig
+	IngestURL   string
+	IngestToken string
 }
 
 // RulesConfig holds doctor-rules settings.
@@ -201,6 +285,7 @@ type RulesConfig struct {
 	MonoFSLogEngineAddr string
 	MonoFSToken         string
 	MonoFSClientID      string
+	Quota               QuotaConfig
 }
 
 // LoadRules loads the doctor-rules configuration from the environment.
@@ -231,6 +316,7 @@ func LoadRules(service string) RulesConfig {
 		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
 		MonoFSToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
 		MonoFSClientID:      envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-rules"),
+		Quota:               LoadQuota("doctor-rules", envString("DOCTOR_ACCESS_POLICY_URL", ""), envString("DOCTOR_ACCESS_POLICY_TOKEN", "")),
 	}
 }
 
@@ -397,6 +483,7 @@ func LoadIngest(service string) (IngestConfig, error) {
 	if len(cfg.AllowedTenants) == 0 {
 		cfg.AllowedTenants = []string{cfg.DefaultTenant}
 	}
+	cfg.Quota = LoadQuota("doctor-ingest", envString("DOCTOR_ACCESS_POLICY_URL", ""), envString("DOCTOR_ACCESS_POLICY_TOKEN", ""))
 	return cfg, nil
 }
 
@@ -498,6 +585,9 @@ func LoadQuery(service string) QueryConfig {
 		MonoFSFileToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
 		MonoFSClientID:          envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-query"),
 		DashboardsStoreRoot:     envString("DOCTOR_DASHBOARDS_STORE_ROOT", "/doctor/v1/dashboards"),
+		Quota:                   LoadQuota("doctor-query", envString("DOCTOR_ACCESS_POLICY_URL", ""), envString("DOCTOR_ACCESS_POLICY_TOKEN", "")),
+		IngestURL:               envString("DOCTOR_INGEST_URL", ""),
+		IngestToken:             envString("DOCTOR_INGEST_AUTH_TOKEN", ""),
 	}
 }
 

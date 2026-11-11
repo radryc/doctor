@@ -13,6 +13,7 @@ import {
   Waypoints,
 } from "lucide-react";
 import { useConfig } from "../context/ConfigContext";
+import { guardianPartitionUrl } from "../lib/links";
 import RtoPanel from "../components/fleet/RtoPanel";
 import TrafficGraph from "../components/fleet/TrafficGraph";
 import { computeRto, formatDurationMs, rtoStatus } from "../components/fleet/rto";
@@ -233,6 +234,17 @@ export default function PartitionAssetsPage() {
           >
             <ExternalLink size={13} /> Deep telemetry
           </button>
+          {config.guardian_url && name && (
+            <a
+              href={guardianPartitionUrl(config.guardian_url, name)}
+              target="_blank"
+              rel="noreferrer"
+              className="btn text-xs"
+              title={`Open partition ${name} in Guardian`}
+            >
+              <ExternalLink size={13} /> Guardian partition
+            </a>
+          )}
           <button type="button" onClick={() => void fleet.refresh()} className="btn text-xs" disabled={fleet.loading}>
             <RefreshCw size={13} className={fleet.loading ? "animate-spin" : ""} /> Refresh
           </button>

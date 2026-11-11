@@ -10,10 +10,10 @@ import (
 func TestInternalCauseClassification(t *testing.T) {
 	cases := map[string]string{
 		"rpc error: code = Unknown desc = no healthy nodes available": causeStorageUnavailable,
-		"context deadline exceeded":                                    causeBackendTimeout,
-		"dial tcp 10.0.0.1:9000: connect: connection refused":          causeBackendUnavailable,
-		"permission denied":                                            causeAccessDenied,
-		"unexpected number of samples":                                 causeInternal,
+		"context deadline exceeded":                                   causeBackendTimeout,
+		"dial tcp 10.0.0.1:9000: connect: connection refused":         causeBackendUnavailable,
+		"permission denied":                                           causeAccessDenied,
+		"unexpected number of samples":                                causeInternal,
 	}
 	for message, want := range cases {
 		if got := internalCause(message); got != want {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/radryc/doctor/internal/auth"
 	"github.com/radryc/doctor/internal/config"
+	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/ruler"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/doctor/internal/telemetry"
@@ -75,6 +76,19 @@ func main() {
 	}
 	defer logEngine.Close()
 
+	var limits *quota.Provider
+	if cfg.Quota.Enabled {
+		limits = quota.NewProvider(quota.ProviderOptions{
+			PolicyURL:   cfg.Quota.PolicyURL,
+			PolicyToken: cfg.Quota.PolicyToken,
+			Interval:    cfg.Quota.Interval,
+			Defaults:    cfg.Quota.Defaults,
+			Enforce:     cfg.Quota.Enforce,
+			Logger:      log.Default(),
+		})
+		go limits.Run(ctx)
+		log.Printf("rule quota enabled (policy=%q)", cfg.Quota.PolicyURL)
+	}
 	store := ruler.NewStore(files, cfg.MonoFSToken, cfg.StoreRoot)
 	evaluator := &ruler.Evaluator{
 		Querier: ruler.NewHTTPQuerier(cfg.QueryURL, cfg.QueryToken, nil),
@@ -85,6 +99,7 @@ func main() {
 	scheduler := &ruler.Scheduler{
 		Evaluator:    evaluator,
 		Load:         store.List,
+		Limits:       limits,
 		Workers:      cfg.Workers,
 		PollInterval: cfg.PollInterval,
 		Logger:       log.Default(),
@@ -102,6 +117,7 @@ func main() {
 		Store:      store,
 		Evaluator:  evaluator,
 		Authorizer: ruler.AuthenticatedAuthorizer{},
+		Limits:     limits,
 		Scheduler:  scheduler,
 		Lease:      lease,
 		Logger:     log.Default(),

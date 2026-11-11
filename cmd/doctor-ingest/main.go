@@ -19,6 +19,7 @@ import (
 	"github.com/radryc/doctor/internal/config"
 	"github.com/radryc/doctor/internal/ingest"
 	"github.com/radryc/doctor/internal/privacy"
+	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/telemetry"
 	"github.com/radryc/doctor/internal/wal"
 	"github.com/radryc/monofs/pkg/authz"
@@ -194,6 +195,22 @@ func main() {
 
 	service := ingest.NewServiceWithBuffers(cfg.TenantHeader, cfg.DefaultTenant, writer, pipeline, traceBuffer, logBuffer, metricBuffer, privacyEngine)
 	service.SetAllowedTenants(cfg.AllowedTenants)
+	if cfg.Quota.Enabled {
+		provider := quota.NewProvider(quota.ProviderOptions{
+			PolicyURL:   cfg.Quota.PolicyURL,
+			PolicyToken: cfg.Quota.PolicyToken,
+			Interval:    cfg.Quota.Interval,
+			Defaults:    cfg.Quota.Defaults,
+			Enforce:     cfg.Quota.Enforce,
+			Logger:      log.Default(),
+		})
+		go provider.Run(ctx)
+		service.SetQuotaEngine(quota.NewEngine(provider, cfg.Quota.Replicas, log.Default()))
+		log.Printf("partition quota enabled (policy=%q replicas=%d enforce=%v observe-first=%v)",
+			cfg.Quota.PolicyURL, cfg.Quota.Replicas, cfg.Quota.Enforce, !cfg.Quota.Enforce)
+	} else {
+		log.Printf("partition quota disabled: set DOCTOR_QUOTA_POLICY_URL or DOCTOR_QUOTA_ENABLED=true")
+	}
 
 	verifier := authz.NewStaticTokenVerifier()
 	verifier.Add(cfg.AuthToken, authz.Identity{Subject: "telemetry-ingest", ClientID: "telemetry-ingest"})

@@ -886,6 +886,72 @@ func (s *Store) PutGCPPolicy(ctx context.Context, policy GCPPolicy) error {
 	return err
 }
 
+func (s *Store) guardianPolicyPath(tenant, partition string) string {
+	return fmt.Sprintf("%s/config/sources/guardian/%s/%s.yaml", s.Root, tenant, partition)
+}
+
+// GetGuardianPolicy loads one partition's Guardian source policy. A missing
+// document uses the defaults so locked drift stays quiet and alerts fire
+// immediately.
+func (s *Store) GetGuardianPolicy(ctx context.Context, tenant, partition string) (*GuardianPolicy, error) {
+	data, err := s.Files.ReadFile(ctx, s.guardianPolicyPath(tenant, partition))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			policy := DefaultGuardianPolicy()
+			policy.Tenant = tenant
+			policy.Partition = partition
+			return policy, nil
+		}
+		return nil, err
+	}
+	var policy GuardianPolicy
+	if err := yaml.Unmarshal(data, &policy); err != nil {
+		return nil, fmt.Errorf("alerting: decode guardian policy: %w", err)
+	}
+	if policy.Version == 0 {
+		policy.Version = 1
+	}
+	if policy.Tenant == "" {
+		policy.Tenant = tenant
+	}
+	if policy.Partition == "" {
+		policy.Partition = partition
+	}
+	if policy.Alerts == nil {
+		policy.Alerts = map[string]GuardianAlertPolicy{}
+	}
+	if err := policy.Validate(); err != nil {
+		return nil, err
+	}
+	return &policy, nil
+}
+
+// PutGuardianPolicy stores one partition's Guardian source policy.
+func (s *Store) PutGuardianPolicy(ctx context.Context, tenant, partition string, policy GuardianPolicy) error {
+	policy.Tenant = tenant
+	policy.Partition = partition
+	if policy.Version == 0 {
+		policy.Version = 1
+	}
+	if policy.Alerts == nil {
+		policy.Alerts = map[string]GuardianAlertPolicy{}
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	path := s.guardianPolicyPath(tenant, partition)
+	_, err = s.Files.UpsertPaths(ctx, s.Token, []doctorstore.PathWrite{{
+		LogicalPath:       path,
+		Content:           data,
+		ExpectedVersionID: s.latestVersion(ctx, path),
+	}}, doctorstore.MutationContext{PrincipalID: s.Principal, Reason: "guardian alert policy update"})
+	return err
+}
+
 func (s *Store) latestVersion(ctx context.Context, logicalPath string) string {
 	versions, err := s.Files.ListVersions(ctx, s.Token, logicalPath)
 	if err != nil || len(versions) == 0 {

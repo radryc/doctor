@@ -87,11 +87,15 @@ func (s *Service) handleLokiQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		records = plan.applyStages(records)
+		result := plan.evaluateInstant(records, queryTime)
+		if !s.enforceSeriesLimit(w, r, result) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status": "success",
 			"data": map[string]any{
 				"resultType": "vector",
-				"result":     plan.evaluateInstant(records, queryTime),
+				"result":     result,
 				"stats":      map[string]any{},
 			},
 		})
@@ -161,11 +165,15 @@ func (s *Service) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		}
 		records = plan.applyStages(records)
 		step := parseLokiStep(r.URL.Query().Get("step"), start, end)
+		result := plan.evaluateRange(records, start, end, step)
+		if !s.enforceSeriesLimit(w, r, result) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status": "success",
 			"data": map[string]any{
 				"resultType": "matrix",
-				"result":     plan.evaluateRange(records, start, end, step),
+				"result":     result,
 				"stats":      map[string]any{},
 			},
 		})
@@ -183,11 +191,15 @@ func (s *Service) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		logs = logs[:limit]
 	}
 
+	streams := buildLokiStreams(logs, direction)
+	if !s.enforceSeriesLimit(w, r, streams) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "success",
 		"data": map[string]any{
 			"resultType": "streams",
-			"result":     buildLokiStreams(logs, direction),
+			"result":     streams,
 			"stats":      map[string]any{},
 		},
 	})

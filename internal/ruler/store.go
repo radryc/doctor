@@ -28,9 +28,9 @@ type FileStore interface {
 
 // GroupRef identifies one stored group.
 type GroupRef struct {
-	Tenant string
-	Group  string
-	File   *File
+	Partition string
+	Group     string
+	File      *File
 }
 
 // Store persists rule group files.
@@ -50,13 +50,13 @@ func NewStore(files FileStore, token, root string) *Store {
 	return &Store{Files: files, Token: token, Root: "/" + root, Principal: "doctor-rules"}
 }
 
-func (s *Store) groupPath(tenant, group string) string {
-	return fmt.Sprintf("%s/%s/%s.yaml", s.Root, tenant, group)
+func (s *Store) groupPath(partition, group string) string {
+	return fmt.Sprintf("%s/%s/%s.yaml", s.Root, partition, group)
 }
 
 // Get loads one group file.
-func (s *Store) Get(ctx context.Context, tenant, group string) (*File, error) {
-	data, err := s.Files.ReadFile(ctx, s.groupPath(tenant, group))
+func (s *Store) Get(ctx context.Context, partition, group string) (*File, error) {
+	data, err := s.Files.ReadFile(ctx, s.groupPath(partition, group))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
@@ -68,8 +68,8 @@ func (s *Store) Get(ctx context.Context, tenant, group string) (*File, error) {
 		return nil, err
 	}
 	for i := range file.Groups {
-		if strings.TrimSpace(file.Groups[i].Tenant) == "" {
-			file.Groups[i].Tenant = tenant
+		if strings.TrimSpace(file.Groups[i].Partition) == "" {
+			file.Groups[i].Partition = partition
 		}
 	}
 	return file, nil
@@ -77,7 +77,7 @@ func (s *Store) Get(ctx context.Context, tenant, group string) (*File, error) {
 
 // List walks the store and returns all groups.
 func (s *Store) List(ctx context.Context) ([]GroupRef, error) {
-	tenants, err := s.Files.ListDir(ctx, s.Root)
+	partitions, err := s.Files.ListDir(ctx, s.Root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -85,11 +85,11 @@ func (s *Store) List(ctx context.Context) ([]GroupRef, error) {
 		return nil, err
 	}
 	refs := make([]GroupRef, 0)
-	for _, tenant := range tenants {
-		if !tenant.IsDir {
+	for _, partition := range partitions {
+		if !partition.IsDir {
 			continue
 		}
-		files, err := s.Files.ListDir(ctx, s.Root+"/"+tenant.Name)
+		files, err := s.Files.ListDir(ctx, s.Root+"/"+partition.Name)
 		if err != nil {
 			continue
 		}
@@ -98,34 +98,82 @@ func (s *Store) List(ctx context.Context) ([]GroupRef, error) {
 				continue
 			}
 			group := strings.TrimSuffix(entry.Name, ".yaml")
-			file, err := s.Get(ctx, tenant.Name, group)
+			file, err := s.Get(ctx, partition.Name, group)
 			if err != nil {
 				continue
 			}
-			refs = append(refs, GroupRef{Tenant: tenant.Name, Group: group, File: file})
+			refs = append(refs, GroupRef{Partition: partition.Name, Group: group, File: file})
 		}
 	}
 	sort.Slice(refs, func(i, j int) bool {
-		if refs[i].Tenant != refs[j].Tenant {
-			return refs[i].Tenant < refs[j].Tenant
+		if refs[i].Partition != refs[j].Partition {
+			return refs[i].Partition < refs[j].Partition
 		}
 		return refs[i].Group < refs[j].Group
 	})
 	return refs, nil
 }
 
+// Count returns the number of groups and rules stored for a partition.
+func (s *Store) Count(ctx context.Context, partition string) (groups int, rules int, err error) {
+	partition = strings.TrimSpace(partition)
+	entries, err := s.Files.ListDir(ctx, s.Root+"/"+partition)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir || !strings.HasSuffix(entry.Name, ".yaml") {
+			continue
+		}
+		groups++
+		group := strings.TrimSuffix(entry.Name, ".yaml")
+		file, err := s.Get(ctx, partition, group)
+		if err != nil {
+			continue
+		}
+		rules += countRules(file)
+	}
+	return groups, rules, nil
+}
+
+// CountGroup returns the number of rules in one group, or zero when absent.
+func (s *Store) CountGroup(ctx context.Context, partition, group string) (int, error) {
+	file, err := s.Get(ctx, partition, group)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return countRules(file), nil
+}
+
+func countRules(file *File) int {
+	if file == nil {
+		return 0
+	}
+	total := 0
+	for _, group := range file.Groups {
+		total += len(group.Rules)
+	}
+	return total
+}
+
 // Put writes a group file. createOnly uses an "absent" precondition.
-func (s *Store) Put(ctx context.Context, tenant, group string, file *File, createOnly bool) error {
+func (s *Store) Put(ctx context.Context, partition, group string, file *File, createOnly bool) error {
 	data, err := yaml.Marshal(file)
 	if err != nil {
 		return fmt.Errorf("ruler: encode rules: %w", err)
 	}
 	expected := "absent"
 	if !createOnly {
-		expected = s.latestVersion(ctx, s.groupPath(tenant, group))
+		expected = s.latestVersion(ctx, s.groupPath(partition, group))
 	}
 	_, err = s.Files.UpsertPaths(ctx, s.Token, []store.PathWrite{{
-		LogicalPath:       s.groupPath(tenant, group),
+		LogicalPath:       s.groupPath(partition, group),
 		Content:           data,
 		ExpectedVersionID: expected,
 	}}, store.MutationContext{PrincipalID: s.Principal, Reason: "rules update"})
@@ -133,13 +181,13 @@ func (s *Store) Put(ctx context.Context, tenant, group string, file *File, creat
 }
 
 // Delete removes a group file with a version precondition.
-func (s *Store) Delete(ctx context.Context, tenant, group string) error {
-	expected := s.latestVersion(ctx, s.groupPath(tenant, group))
+func (s *Store) Delete(ctx context.Context, partition, group string) error {
+	expected := s.latestVersion(ctx, s.groupPath(partition, group))
 	if expected == "absent" {
 		return ErrNotFound
 	}
 	_, err := s.Files.DeletePaths(ctx, s.Token, []store.PathDelete{{
-		LogicalPath:       s.groupPath(tenant, group),
+		LogicalPath:       s.groupPath(partition, group),
 		ExpectedVersionID: expected,
 	}}, store.MutationContext{PrincipalID: s.Principal, Reason: "rules delete"})
 	return err

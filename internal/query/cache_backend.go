@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,10 +24,11 @@ const (
 	queryDiscoveryCacheEntries = 32
 )
 
-// cachingBackend wraps the raw MonoFS backend, before the access-policy
-// decorator. That ordering is intentional: the cache stores unfiltered
-// records and the existing policyBackend applies per-user partition filtering
-// after every read, so a cache hit can never leak another user's data.
+// cachingBackend wraps the raw MonoFS backend, below the access-policy
+// decorator. Restricted reads are scoped to the caller's visible partitions
+// before they reach storage, so the cache stores already-scoped results and
+// includes that scope in the key; policyBackend still re-filters every result
+// defensively. Unrestricted reads keep the original no-scope key.
 type cachingBackend struct {
 	inner      LogEngineBackend
 	cache      *resultCache
@@ -54,16 +56,28 @@ func queryCacheTTLFromEnv() time.Duration {
 }
 
 func (b *cachingBackend) QueryLogs(ctx context.Context, tenant, query, service string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
+	return b.queryLogs(ctx, tenant, query, service, from, to, limit, nil, false)
+}
+
+func (b *cachingBackend) QueryLogsScoped(ctx context.Context, tenant, query, service string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.LogRecord, error) {
+	return b.queryLogs(ctx, tenant, query, service, from, to, limit, visiblePartitions, restricted)
+}
+
+func (b *cachingBackend) queryLogs(ctx context.Context, tenant, query, service string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.LogRecord, error) {
+	load := func(ctx context.Context) ([]segment.LogRecord, error) {
+		return queryLogsBackend(ctx, b.inner, tenant, query, service, from, to, limit, visiblePartitions, restricted)
+	}
 	if limit <= 0 || limit > queryCacheMaxDiscoveryRows {
-		return b.inner.QueryLogs(ctx, tenant, query, service, from, to, limit)
+		return load(ctx)
 	}
 	cache := b.cache
 	if limit > queryCacheMaxRows {
 		cache = b.largeCache
 	}
-	key := fmt.Sprintf("logs\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", tenant, query, service, limit, cacheBucket(from), cacheBucket(to))
+	key := fmt.Sprintf("logs\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", tenant, query, service, limit, cacheBucket(from), cacheBucket(to)) +
+		scopeCacheKey(visiblePartitions, restricted)
 	value, err := cache.getOrLoad(ctx, key, func(ctx context.Context) (any, error) {
-		return b.inner.QueryLogs(ctx, tenant, query, service, from, to, limit)
+		return load(ctx)
 	})
 	if err != nil {
 		return nil, err
@@ -73,16 +87,27 @@ func (b *cachingBackend) QueryLogs(ctx context.Context, tenant, query, service s
 }
 
 func (b *cachingBackend) QueryLogsRaw(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	raw, ok := b.inner.(rawLogQueryBackend)
-	if !ok {
-		return b.inner.QueryLogs(ctx, tenant, query, "", from, to, limit)
+	return b.queryLogsRaw(ctx, tenant, query, from, to, limit, nil, false)
+}
+
+func (b *cachingBackend) QueryLogsRawScoped(ctx context.Context, tenant, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.LogRecord, error) {
+	return b.queryLogsRaw(ctx, tenant, query, from, to, limit, visiblePartitions, restricted)
+}
+
+func (b *cachingBackend) queryLogsRaw(ctx context.Context, tenant, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.LogRecord, error) {
+	if _, ok := b.inner.(rawLogQueryBackend); !ok {
+		return b.queryLogs(ctx, tenant, query, "", from, to, limit, visiblePartitions, restricted)
+	}
+	load := func(ctx context.Context) ([]segment.LogRecord, error) {
+		return queryRawLogsBackend(ctx, b.inner, tenant, query, from, to, limit, visiblePartitions, restricted)
 	}
 	if limit <= 0 || limit > queryCacheMaxRows {
-		return raw.QueryLogsRaw(ctx, tenant, query, from, to, limit)
+		return load(ctx)
 	}
-	key := fmt.Sprintf("logs-raw\x00%s\x00%s\x00%d\x00%s\x00%s", tenant, query, limit, cacheBucket(from), cacheBucket(to))
+	key := fmt.Sprintf("logs-raw\x00%s\x00%s\x00%d\x00%s\x00%s", tenant, query, limit, cacheBucket(from), cacheBucket(to)) +
+		scopeCacheKey(visiblePartitions, restricted)
 	value, err := b.cache.getOrLoad(ctx, key, func(ctx context.Context) (any, error) {
-		return raw.QueryLogsRaw(ctx, tenant, query, from, to, limit)
+		return load(ctx)
 	})
 	if err != nil {
 		return nil, err
@@ -92,16 +117,28 @@ func (b *cachingBackend) QueryLogsRaw(ctx context.Context, tenant, query string,
 }
 
 func (b *cachingBackend) QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error) {
+	return b.queryTraces(ctx, tenant, traceID, service, from, to, limit, nil, false)
+}
+
+func (b *cachingBackend) QueryTracesScoped(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.TraceRecord, error) {
+	return b.queryTraces(ctx, tenant, traceID, service, from, to, limit, visiblePartitions, restricted)
+}
+
+func (b *cachingBackend) queryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.TraceRecord, error) {
+	load := func(ctx context.Context) ([]segment.TraceRecord, error) {
+		return queryTracesBackend(ctx, b.inner, tenant, traceID, service, from, to, limit, visiblePartitions, restricted)
+	}
 	if limit <= 0 || limit > queryCacheMaxDiscoveryRows {
-		return b.inner.QueryTraces(ctx, tenant, traceID, service, from, to, limit)
+		return load(ctx)
 	}
 	cache := b.cache
 	if limit > queryCacheMaxRows {
 		cache = b.largeCache
 	}
-	key := fmt.Sprintf("traces\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", tenant, traceID, service, limit, cacheBucket(from), cacheBucket(to))
+	key := fmt.Sprintf("traces\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", tenant, traceID, service, limit, cacheBucket(from), cacheBucket(to)) +
+		scopeCacheKey(visiblePartitions, restricted)
 	value, err := cache.getOrLoad(ctx, key, func(ctx context.Context) (any, error) {
-		return b.inner.QueryTraces(ctx, tenant, traceID, service, from, to, limit)
+		return load(ctx)
 	})
 	if err != nil {
 		return nil, err
@@ -286,4 +323,18 @@ func (c *resultCache) pruneLocked(now time.Time) {
 
 func cacheBucket(t time.Time) string {
 	return t.UTC().Truncate(15 * time.Second).Format(time.RFC3339)
+}
+
+// scopeCacheKey keeps cached scoped reads separate from unrestricted reads
+// and from other users with a different visible partition set.
+func scopeCacheKey(visiblePartitions []string, restricted bool) string {
+	if !restricted {
+		return "\x00scope=all"
+	}
+	if len(visiblePartitions) == 0 {
+		return "\x00scope=none"
+	}
+	parts := append([]string(nil), visiblePartitions...)
+	sort.Strings(parts)
+	return "\x00scope=" + strings.Join(parts, ",")
 }

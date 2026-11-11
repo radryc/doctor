@@ -109,6 +109,8 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleAWSPolicy(w, r)
 	case path == "sources/gcp/policy":
 		a.handleGCPPolicy(w, r)
+	case path == "sources/guardian/policy":
+		a.handleGuardianPolicy(w, r)
 	case path == "sources/aws/excluded":
 		a.handleExcluded(w, r)
 	case path == "receivers":
@@ -456,6 +458,56 @@ func (a *API) handleGCPPolicy(w http.ResponseWriter, r *http.Request) {
 		if err := a.Store.PutGCPPolicy(r.Context(), policy); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "policy": policy})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *API) handleGuardianPolicy(w http.ResponseWriter, r *http.Request) {
+	identity := IdentityFromRequest(r, a.AllowAll)
+	tenant, partition := tenantPartition(r)
+	if tenant == "" && a.Service != nil {
+		tenant = strings.TrimSpace(a.Service.DefaultTenant)
+	}
+	if tenant == "" {
+		tenant = "default"
+	}
+	if partition == "" {
+		writeError(w, http.StatusBadRequest, "partition is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if !identity.Can(CapSourcesRead, tenant, partition) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		policy, err := a.Store.GetGuardianPolicy(r.Context(), tenant, partition)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, policy)
+	case http.MethodPut:
+		if !identity.Can(CapSourcesWrite, tenant, partition) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		var policy GuardianPolicy
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&policy); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := a.Store.PutGuardianPolicy(r.Context(), tenant, partition, policy); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		policy.Tenant = tenant
+		policy.Partition = partition
+		if policy.Version == 0 {
+			policy.Version = 1
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "policy": policy})
 	default:

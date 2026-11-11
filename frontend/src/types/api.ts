@@ -3,6 +3,11 @@ export interface UIConfig {
   default_tenant: string;
   guardian_url: string;
   default_partition: string;
+  /**
+   * Partitions the signed-in identity may read at all. Present only for
+   * restricted identities; absence means unrestricted (admin / policy off).
+   */
+  accessible_partitions?: string[];
 }
 
 export interface UIUser {
@@ -173,14 +178,14 @@ export type PrometheusHistogramPoint = [number, PrometheusHistogram];
 
 export interface PrometheusVectorResult {
   metric: PrometheusSeriesMetric;
-  value: [number, string];
+  value?: [number, string];
   // Native Prometheus histograms use `histogram` instead of `value`.
   histogram?: PrometheusHistogramPoint;
 }
 
 export interface PrometheusMatrixResult {
   metric: PrometheusSeriesMetric;
-  values: Array<[number, string]>;
+  values?: Array<[number, string]>;
   // Native Prometheus histograms use `histograms` instead of `values`.
   histograms?: PrometheusHistogramPoint[];
 }
@@ -548,7 +553,7 @@ export interface ServiceDiscoveryResponse {
 
 // ── Recording Rules ─────────────────────────────────────────────────────────
 export interface RecordingRuleGroupSummary {
-  tenant: string;
+  partition: string;
   group: string;
   interval?: string;
   rules: number;
@@ -601,4 +606,107 @@ export interface DuckDBSQLResponse {
   nodes: DuckDBSQLNodeResult[];
   restricted: boolean;
   visible_partitions?: string[];
+}
+
+// ── Partition quotas ────────────────────────────────────────────────────────
+export interface QuotaSignalIngest {
+  bytes_per_second?: number;
+  records_per_second?: number;
+  max_batch_bytes?: number;
+}
+
+export interface QuotaMetricsIngest extends QuotaSignalIngest {
+  samples_per_second?: number;
+  max_metric_names?: number;
+  max_active_series?: number;
+  max_series_per_metric?: number;
+  max_labels_per_series?: number;
+}
+
+export interface QuotaIngest {
+  traces?: QuotaSignalIngest;
+  logs?: QuotaSignalIngest;
+  metrics?: QuotaMetricsIngest;
+}
+
+export interface QuotaQuery {
+  requests_per_second?: number;
+  max_concurrent?: number;
+  budget_per_second?: number;
+  max_range?: string;
+  max_samples?: number;
+  max_series?: number;
+  max_partitions?: number;
+}
+
+export interface QuotaRules {
+  max_groups?: number;
+  max_rules?: number;
+  max_rules_per_group?: number;
+  max_evaluation_cost_per_second?: number;
+}
+
+export interface QuotaStorage {
+  max_bytes?: number;
+  retention_traces?: string;
+  retention_logs?: string;
+  retention_metrics?: string;
+}
+
+export interface Quota {
+  profile?: string;
+  enforcement?: string;
+  blocked?: boolean;
+  ingest?: QuotaIngest;
+  query?: QuotaQuery;
+  rules?: QuotaRules;
+  storage?: QuotaStorage;
+}
+
+export interface QuotaUsage {
+  key: string;
+  scope: string;
+  resource: string;
+  limit: number;
+  used: number;
+  remaining?: number;
+  inflight?: number;
+  accepted: number;
+  rejected: number;
+}
+
+export interface ScopedQuota {
+  key: string;
+  quota: Quota;
+  usage?: QuotaUsage[];
+}
+
+export interface QuotaPartition {
+  name: string;
+  profile?: string;
+  enforcement: string;
+  blocked?: boolean;
+  quota: Quota;
+  usage?: QuotaUsage[];
+}
+
+export interface IngestQuotaUsage {
+  configured: boolean;
+  enabled?: boolean;
+  policy_ready?: boolean;
+  usage?: QuotaUsage[];
+  error?: string;
+}
+
+export interface QuotaDashboardResponse {
+  enabled: boolean;
+  policy_ready: boolean;
+  policy_version?: string;
+  mode: string;
+  defaults: Quota;
+  subject?: ScopedQuota[];
+  partitions: QuotaPartition[];
+  ingest?: IngestQuotaUsage;
+  truncated?: boolean;
+  generated_at: string;
 }

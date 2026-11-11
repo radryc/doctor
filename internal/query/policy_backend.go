@@ -29,9 +29,11 @@ func identityFromContext(ctx context.Context) authz.Identity {
 	return id
 }
 
-// QueryLogs filters log records by the caller's log partitions.
+// QueryLogs pushes the caller's visible partitions into storage, then filters
+// the returned records as a second line of defence.
 func (b *policyBackend) QueryLogs(ctx context.Context, tenant, query, service string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	records, err := b.inner.QueryLogs(ctx, tenant, query, service, from, to, limit)
+	visible, restricted := b.readScope(ctx, policy.SignalLogs)
+	records, err := queryLogsBackend(ctx, b.inner, tenant, query, service, from, to, limit, visible, restricted)
 	if err != nil {
 		return records, err
 	}
@@ -43,11 +45,8 @@ func (b *policyBackend) QueryLogs(ctx context.Context, tenant, query, service st
 // the LogQL selector is passed as a text filter to QueryLogs and matches
 // nothing.
 func (b *policyBackend) QueryLogsRaw(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	raw, ok := b.inner.(rawLogQueryBackend)
-	if !ok {
-		return nil, fmt.Errorf("log backend does not support raw queries")
-	}
-	records, err := raw.QueryLogsRaw(ctx, tenant, query, from, to, limit)
+	visible, restricted := b.readScope(ctx, policy.SignalLogs)
+	records, err := queryRawLogsBackend(ctx, b.inner, tenant, query, from, to, limit, visible, restricted)
 	if err != nil {
 		return records, err
 	}
@@ -72,11 +71,25 @@ func (b *policyBackend) StreamMetricSeries(ctx context.Context, tenant string, q
 // QueryTraces filters spans by the caller's trace partitions (span-level: a
 // trace remains visible while at least one span survives).
 func (b *policyBackend) QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error) {
-	spans, err := b.inner.QueryTraces(ctx, tenant, traceID, service, from, to, limit)
+	visible, restricted := b.readScope(ctx, policy.SignalTraces)
+	spans, err := queryTracesBackend(ctx, b.inner, tenant, traceID, service, from, to, limit, visible, restricted)
 	if err != nil {
 		return spans, err
 	}
 	return b.gate.FilterSpans(identityFromContext(ctx), spans), nil
+}
+
+// QueryTracesPage is the bounded trace-scan variant used by the recent-trace
+// list. truncated reflects the storage batch before policy filtering, so a
+// scoped scan keeps walking older batches even when most of a batch is
+// invisible to the caller.
+func (b *policyBackend) QueryTracesPage(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, bool, time.Time, error) {
+	visible, restricted := b.readScope(ctx, policy.SignalTraces)
+	spans, truncated, watermark, err := queryTracesPageBackend(ctx, b.inner, tenant, traceID, service, from, to, limit, visible, restricted)
+	if err != nil {
+		return nil, false, time.Time{}, err
+	}
+	return b.gate.FilterSpans(identityFromContext(ctx), spans), truncated, watermark, nil
 }
 
 // QueryDuckDBSQL runs a read-only SQL statement against the caller's visible

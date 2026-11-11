@@ -15,3 +15,29 @@ spec:
     topology: docker-host
     managedBy: external-compose
     endpoint: http://localhost:18080
+  # Quota is optional. Without a loaded policy bundle the data plane keeps its
+  # pre-quota behavior; with one, these values become the doctor-telemetry
+  # partition envelope and are visible on the Doctor Quotas page.
+  quota:
+    enforcement: observe
+    ingest:
+      traces:
+        bytesPerSecond: 5242880
+        recordsPerSecond: 20000
+        maxBatchBytes: 4194304
+      logs:
+        bytesPerSecond: 5242880
+        recordsPerSecond: 20000
+      metrics:
+        bytesPerSecond: 5242880
+        samplesPerSecond: 50000
+        maxActiveSeries: 100000
+    query:
+      requestsPerSecond: 50
+      maxConcurrent: 10
+      maxRange: 168h
+      maxPartitions: 8
+    rules:
+      maxGroups: 25
+      maxRules: 500
+      maxRulesPerGroup: 100

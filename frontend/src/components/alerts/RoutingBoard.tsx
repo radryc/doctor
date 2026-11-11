@@ -139,6 +139,87 @@ function parseDragged(event: React.DragEvent<HTMLElement>): DraggedItem | null {
   return parseDraggedRule(event) ?? parseDraggedSource(event);
 }
 
+function severityBadgeClass(severity: string): string {
+  switch (severity.toLowerCase()) {
+    case "critical":
+      return "border-rose-500/40 bg-rose-500/10 text-rose-300";
+    case "warning":
+      return "border-amber-500/40 bg-amber-500/10 text-amber-300";
+    case "info":
+      return "border-sky-500/40 bg-sky-500/10 text-sky-300";
+    default:
+      return "border-slate-600 bg-slate-800/70 text-slate-300";
+  }
+}
+
+interface RouteAlertRowProps {
+  name: string;
+  severity?: string;
+  meta?: string;
+  description?: string;
+  destination: string;
+  receivers: Receiver[];
+  ariaLabel: string;
+  onDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+  onAssign: (destination: string) => void;
+}
+
+function RouteAlertRow({
+  name,
+  severity,
+  meta,
+  description,
+  destination,
+  receivers,
+  ariaLabel,
+  onDragStart,
+  onDragEnd,
+  onAssign,
+}: RouteAlertRowProps) {
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      className="flex cursor-grab flex-col gap-2 rounded-md border border-slate-800 bg-slate-900 p-2.5 transition-colors hover:border-slate-700 active:cursor-grabbing sm:flex-row sm:items-center"
+      title="Drag onto a destination"
+    >
+      <GripVertical size={13} className="hidden shrink-0 text-slate-600 sm:block" />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="break-words text-[11px] font-medium text-slate-200">{name}</span>
+          {severity ? (
+            <span className={`rounded border px-1 py-0.5 text-[9px] font-semibold uppercase ${severityBadgeClass(severity)}`}>
+              {severity}
+            </span>
+          ) : null}
+        </div>
+        {meta ? <div className="mt-0.5 break-words text-[10px] leading-snug text-slate-500">{meta}</div> : null}
+        {description ? (
+          <div className="mt-1 break-words text-[10px] leading-snug text-slate-500/80">{description}</div>
+        ) : null}
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
+        <span className="text-[9px] uppercase tracking-wide text-slate-600">to</span>
+        <select
+          value={destination}
+          onChange={(event) => onAssign(event.target.value)}
+          className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] text-slate-300 sm:w-40"
+          aria-label={ariaLabel}
+        >
+          <option value="">Default routing</option>
+          {receivers.map((receiver) => (
+            <option key={receiver.name} value={receiver.name}>
+              {receiver.name}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 export default function RoutingBoard({
   tenant,
   partition,
@@ -466,24 +547,29 @@ export default function RoutingBoard({
               <div
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={(event) => void handleDrop(event, null)}
-                className="rounded-lg border border-dashed border-slate-700 bg-slate-950/50 p-3"
+                className="rounded-lg border border-dashed border-slate-700 bg-slate-950/50 p-3.5"
               >
-                <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-300">
-                  <GripVertical size={13} className="text-slate-500" /> Default destination
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-slate-300">
+                  <GripVertical size={13} className="text-slate-500" />
+                  Default destination
+                  <span className="rounded border border-slate-700 px-1 text-[9px] font-normal uppercase text-slate-500">fallback</span>
                 </div>
-                <p className="mt-1 text-[10px] text-slate-500">
+                <p className="mt-1 text-[10px] leading-snug text-slate-500">
                   Alerts with no explicit or partition assignment go here. Drop an alert to clear its explicit route.
                 </p>
-                <select
-                  value={local.defaultReceiver || ""}
-                  onChange={(event) => updateLocal({ ...local, defaultReceiver: event.target.value })}
-                  className="mt-2 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
-                >
-                  <option value="">No default (alerts without a route are dropped)</option>
-                  {local.receivers.map((receiver) => (
-                    <option key={receiver.name} value={receiver.name}>{receiver.name}</option>
-                  ))}
-                </select>
+                <label className="mt-3 block text-[10px] uppercase tracking-wide text-slate-500">
+                  Send unmatched alerts to
+                  <select
+                    value={local.defaultReceiver || ""}
+                    onChange={(event) => updateLocal({ ...local, defaultReceiver: event.target.value })}
+                    className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-200"
+                  >
+                    <option value="">No default (alerts without a route are dropped)</option>
+                    {local.receivers.map((receiver) => (
+                      <option key={receiver.name} value={receiver.name}>{receiver.name}</option>
+                    ))}
+                  </select>
+                </label>
               </div>
 
               <div
@@ -505,24 +591,29 @@ export default function RoutingBoard({
                   }
                   void assignGroup(dragged.group, target);
                 }}
-                className="rounded-lg border border-dashed border-slate-700 bg-slate-950/50 p-3"
+                className="rounded-lg border border-dashed border-slate-700 bg-slate-950/50 p-3.5"
               >
-                <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-300">
-                  <GripVertical size={13} className="text-slate-500" /> Partition destination
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-slate-300">
+                  <GripVertical size={13} className="text-slate-500" />
+                  Partition destination
+                  <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1 text-[9px] font-normal uppercase text-sky-300">{partition}</span>
                 </div>
-                <p className="mt-1 text-[10px] text-slate-500">
+                <p className="mt-1 text-[10px] leading-snug text-slate-500">
                   Send every alert in {partition} to one destination. Explicit alerts still win.
                 </p>
-                <select
-                  value={local.partitionReceiver || ""}
-                  onChange={(event) => updateLocal({ ...local, partitionReceiver: event.target.value })}
-                  className="mt-2 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
-                >
-                  <option value="">Not set (use label routes)</option>
-                  {local.receivers.map((receiver) => (
-                    <option key={receiver.name} value={receiver.name}>{receiver.name}</option>
-                  ))}
-                </select>
+                <label className="mt-3 block text-[10px] uppercase tracking-wide text-slate-500">
+                  Send all partition alerts to
+                  <select
+                    value={local.partitionReceiver || ""}
+                    onChange={(event) => updateLocal({ ...local, partitionReceiver: event.target.value })}
+                    className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-200"
+                  >
+                    <option value="">Not set (use label routes)</option>
+                    {local.receivers.map((receiver) => (
+                      <option key={receiver.name} value={receiver.name}>{receiver.name}</option>
+                    ))}
+                  </select>
+                </label>
               </div>
             </div>
 
@@ -532,49 +623,73 @@ export default function RoutingBoard({
                 <span className="text-[10px] text-slate-500">{local.receivers.length} configured</span>
               </div>
               <div className="mt-2 grid grid-cols-1 gap-3 xl:grid-cols-2">
-                {local.receivers.map((receiver, index) => (
-                  <div
-                    key={`${receiver.name}-${index}`}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={(event) => void handleDrop(event, receiver.name)}
-                    className="rounded-lg border border-slate-800 bg-slate-950/60 p-3"
-                  >
-                    <div className="flex items-start gap-2">
-                      <div className="mt-0.5 text-[var(--strata-accent-text)]">{endpointIcon(receiver.type)}</div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-xs font-semibold text-slate-200">{receiver.name}</span>
-                          <span className="rounded border border-slate-700 px-1 text-[9px] uppercase text-slate-400">
-                            {TYPE_LABELS[receiver.type] || receiver.type}
-                          </span>
-                          {local.defaultReceiver === receiver.name && (
-                            <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1 text-[9px] text-emerald-300">default</span>
-                          )}
-                          {local.partitionReceiver === receiver.name && (
-                            <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1 text-[9px] text-sky-300">partition</span>
-                          )}
+                {local.receivers.map((receiver, index) => {
+                  const isDefault = local.defaultReceiver === receiver.name;
+                  const isPartition = local.partitionReceiver === receiver.name;
+                  return (
+                    <div
+                      key={`${receiver.name}-${index}`}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => void handleDrop(event, receiver.name)}
+                      className={`rounded-lg border bg-slate-950/60 p-3.5 transition-colors ${
+                        isDefault
+                          ? "border-emerald-500/40"
+                          : isPartition
+                            ? "border-sky-500/40"
+                            : "border-slate-800 hover:border-slate-700"
+                      }`}
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded border border-slate-800 bg-slate-900 text-[var(--strata-accent-text)]">
+                          {endpointIcon(receiver.type)}
                         </div>
-                        <p className="mt-1 text-[10px] text-slate-500">{receiver.description || "No description"}</p>
-                        <div className="mt-1 truncate text-[10px] text-slate-500">
-                          {receiver.secretEnv ? `credential: ${receiver.secretEnv}` : receiver.url || "no url"}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="break-all text-xs font-semibold text-slate-200">{receiver.name}</span>
+                            <span className="rounded border border-slate-700 px-1 py-0.5 text-[9px] uppercase text-slate-400">
+                              {TYPE_LABELS[receiver.type] || receiver.type}
+                            </span>
+                            {isDefault && (
+                              <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1 py-0.5 text-[9px] text-emerald-300">default</span>
+                            )}
+                            {isPartition && (
+                              <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1 py-0.5 text-[9px] text-sky-300">partition</span>
+                            )}
+                          </div>
+                          <p className="mt-1 text-[11px] leading-snug text-slate-400">{receiver.description || "No description"}</p>
                         </div>
-                        <div className="mt-2 text-[10px] text-slate-500">
-                          {assignedCount.get(receiver.name) ?? 0} alert(s) routed here
-                        </div>
+                        {canWrite && (
+                          <div className="flex shrink-0 gap-1">
+                            <button type="button" onClick={() => openEditEndpoint(index)} className="rounded p-0.5 text-slate-500 hover:bg-slate-800 hover:text-slate-200" aria-label="Edit destination">
+                              <Pencil size={13} />
+                            </button>
+                            <button type="button" onClick={() => deleteEndpoint(index)} className="rounded p-0.5 text-slate-500 hover:bg-slate-800 hover:text-rose-300" aria-label="Delete destination">
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      {canWrite && (
-                        <div className="flex gap-1">
-                          <button type="button" onClick={() => openEditEndpoint(index)} className="text-slate-500 hover:text-slate-200" aria-label="Edit destination">
-                            <Pencil size={13} />
-                          </button>
-                          <button type="button" onClick={() => deleteEndpoint(index)} className="text-slate-500 hover:text-rose-300" aria-label="Delete destination">
-                            <Trash2 size={13} />
-                          </button>
+                      <dl className="mt-3 grid grid-cols-1 gap-2 border-t border-slate-800/80 pt-2 sm:grid-cols-2">
+                        <div className="min-w-0">
+                          <dt className="text-[9px] uppercase tracking-wide text-slate-600">Endpoint</dt>
+                          <dd className="break-all font-mono text-[10px] leading-snug text-slate-400">
+                            {receiver.url || "—"}
+                          </dd>
                         </div>
-                      )}
+                        <div className="min-w-0">
+                          <dt className="text-[9px] uppercase tracking-wide text-slate-600">Credential</dt>
+                          <dd className="break-all font-mono text-[10px] leading-snug text-slate-400">
+                            {receiver.secretEnv || "—"}
+                          </dd>
+                        </div>
+                      </dl>
+                      <div className="mt-2 flex items-center gap-1.5 text-[10px] text-slate-500">
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-slate-600" />
+                        {assignedCount.get(receiver.name) ?? 0} alert(s) routed here
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
                 {local.receivers.length === 0 && (
                   <div className="rounded border border-dashed border-slate-700 p-6 text-center text-xs text-slate-500 xl:col-span-2">
                     No destinations yet. Add a PagerDuty service, Slack channel, GoAlert service, or webhook.
@@ -594,44 +709,60 @@ export default function RoutingBoard({
               </div>
               <div className="mt-2 space-y-2">
                 {local.routes.map((route, index) => (
-                  <div key={`${route.name}-${index}`} className="grid grid-cols-1 gap-2 rounded border border-slate-800 bg-slate-950/60 p-2 md:grid-cols-[1fr_1fr_1fr_28px]">
-                    <input
-                      value={route.name}
-                      onChange={(event) => updateRoute(index, { ...route, name: event.target.value })}
-                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px]"
-                      placeholder="route name"
-                    />
-                    <input
-                      value={(route.match ?? []).map((matcher) => `${matcher.name}${matcher.operator}${matcher.value}`).join(",")}
-                      onChange={(event) => {
-                        const matchers = event.target.value
-                          .split(",")
-                          .map((part) => part.trim())
-                          .filter(Boolean)
-                          .map((part) => {
-                            const found = part.match(/^([^=!~]+)(=~|!~|!=|=)(.*)$/);
-                            return found
-                              ? { name: found[1], operator: found[2], value: found[3] }
-                              : { name: part, operator: "=", value: "" };
-                          });
-                        updateRoute(index, { ...route, match: matchers });
-                      }}
-                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[11px]"
-                      placeholder="severity=critical"
-                    />
-                    <select
-                      value={route.receivers[0] || ""}
-                      onChange={(event) => updateRoute(index, { ...route, receivers: event.target.value ? [event.target.value] : [] })}
-                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px]"
-                    >
-                      <option value="">Choose destination</option>
-                      {local.receivers.map((receiver) => (
-                        <option key={receiver.name} value={receiver.name}>{receiver.name}</option>
-                      ))}
-                    </select>
-                    <button type="button" onClick={() => removeRoute(index)} className="text-slate-500 hover:text-rose-300" aria-label="Remove route">
-                      <X size={13} />
-                    </button>
+                  <div key={`${route.name}-${index}`} className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] font-semibold uppercase tracking-wide text-slate-500">
+                        Route {index + 1}
+                      </span>
+                      <button type="button" onClick={() => removeRoute(index)} className="rounded p-0.5 text-slate-500 hover:bg-slate-800 hover:text-rose-300" aria-label="Remove route">
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)]">
+                      <label className="block text-[10px] text-slate-500">
+                        Name
+                        <input
+                          value={route.name}
+                          onChange={(event) => updateRoute(index, { ...route, name: event.target.value })}
+                          className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200"
+                          placeholder="critical-to-pagerduty"
+                        />
+                      </label>
+                      <label className="block text-[10px] text-slate-500">
+                        Match
+                        <input
+                          value={(route.match ?? []).map((matcher) => `${matcher.name}${matcher.operator}${matcher.value}`).join(",")}
+                          onChange={(event) => {
+                            const matchers = event.target.value
+                              .split(",")
+                              .map((part) => part.trim())
+                              .filter(Boolean)
+                              .map((part) => {
+                                const found = part.match(/^([^=!~]+)(=~|!~|!=|=)(.*)$/);
+                                return found
+                                  ? { name: found[1], operator: found[2], value: found[3] }
+                                  : { name: part, operator: "=", value: "" };
+                              });
+                            updateRoute(index, { ...route, match: matchers });
+                          }}
+                          className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[11px] text-slate-200"
+                          placeholder="severity=critical"
+                        />
+                      </label>
+                      <label className="block text-[10px] text-slate-500">
+                        Destination
+                        <select
+                          value={route.receivers[0] || ""}
+                          onChange={(event) => updateRoute(index, { ...route, receivers: event.target.value ? [event.target.value] : [] })}
+                          className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200"
+                        >
+                          <option value="">Choose destination</option>
+                          {local.receivers.map((receiver) => (
+                            <option key={receiver.name} value={receiver.name}>{receiver.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
                   </div>
                 ))}
                 {local.routes.length === 0 && (
@@ -654,16 +785,18 @@ export default function RoutingBoard({
         </div>
         <div className="space-y-3 p-4">
           {groups.map((group) => (
-            <div key={`${group.tenant}/${group.partition}/${group.group}`} className="rounded border border-slate-800 bg-slate-950/50 p-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-medium text-slate-200">{group.group}</span>
-                <span className="text-[10px] text-slate-500">{group.partition} · {group.alerts?.length ?? 0} alerts</span>
+            <div key={`${group.tenant}/${group.partition}/${group.group}`} className="overflow-hidden rounded-md border border-slate-800 bg-slate-950/50">
+              <div className="flex flex-col gap-2 border-b border-slate-800/80 bg-slate-950 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="break-words text-xs font-medium text-slate-200">{group.group}</div>
+                  <div className="text-[10px] text-slate-500">{group.partition} · {group.alerts?.length ?? 0} alerts</div>
+                </div>
                 <select
                   value=""
                   onChange={(event) => {
                     if (event.target.value) void assignGroup(group.group, event.target.value === "__default__" ? null : event.target.value);
                   }}
-                  className="ml-auto rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px]"
+                  className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] text-slate-300 sm:w-48"
                   aria-label={`Assign all alerts in ${group.group}`}
                 >
                   <option value="">Route whole group…</option>
@@ -673,44 +806,28 @@ export default function RoutingBoard({
                   ))}
                 </select>
               </div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {(group.alerts ?? []).map((alert) => {
-                  const destination = alert.notify?.[0] || "";
-                  return (
-                    <div
-                      key={alert.alert}
-                      draggable
-                      onDragStart={(event) => {
-                        const payload: DraggedRule = { kind: "rule", group: group.group, alert: alert.alert };
-                        setDragging(payload);
-                        event.dataTransfer.setData("application/x-sentinel-rule", JSON.stringify(payload));
-                        event.dataTransfer.effectAllowed = "move";
-                      }}
-                      onDragEnd={() => setDragging(null)}
-                      className="flex max-w-full cursor-grab items-center gap-2 rounded border border-slate-700 bg-slate-900 px-2 py-1.5 active:cursor-grabbing"
-                      title="Drag onto a destination"
-                    >
-                      <GripVertical size={12} className="text-slate-500" />
-                      <div className="min-w-0">
-                        <div className="truncate text-[11px] font-medium text-slate-200">{alert.alert}</div>
-                        <div className="truncate text-[9px] text-slate-500">
-                          {alert.mode === "promql" ? "PromQL" : alert.signal || "guided"} · {alert.severity || "warning"}
-                        </div>
-                      </div>
-                      <select
-                        value={destination}
-                        onChange={(event) => void assignRule({ kind: "rule", group: group.group, alert: alert.alert }, event.target.value || null)}
-                        className="rounded border border-slate-700 bg-slate-950 px-1 py-0.5 text-[9px]"
-                        aria-label={`Destination for ${alert.alert}`}
-                      >
-                        <option value="">default</option>
-                        {local.receivers.map((receiver) => (
-                          <option key={receiver.name} value={receiver.name}>{receiver.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  );
-                })}
+              <div className="grid grid-cols-1 gap-2 p-3 lg:grid-cols-2">
+                {(group.alerts ?? []).map((alert) => (
+                  <RouteAlertRow
+                    key={alert.alert}
+                    name={alert.alert}
+                    severity={alert.severity || "warning"}
+                    meta={alert.mode === "promql" ? "PromQL" : alert.signal || "Guided"}
+                    destination={alert.notify?.[0] || ""}
+                    receivers={local.receivers}
+                    ariaLabel={`Destination for ${alert.alert}`}
+                    onDragStart={(event) => {
+                      const payload: DraggedRule = { kind: "rule", group: group.group, alert: alert.alert };
+                      setDragging(payload);
+                      event.dataTransfer.setData("application/x-sentinel-rule", JSON.stringify(payload));
+                      event.dataTransfer.effectAllowed = "move";
+                    }}
+                    onDragEnd={() => setDragging(null)}
+                    onAssign={(value) =>
+                      void assignRule({ kind: "rule", group: group.group, alert: alert.alert }, value || null)
+                    }
+                  />
+                ))}
                 {(group.alerts?.length ?? 0) === 0 && (
                   <span className="text-[10px] text-slate-500">No alerts in this group yet.</span>
                 )}
@@ -718,89 +835,62 @@ export default function RoutingBoard({
             </div>
           ))}
           {sourceAlerts.length > 0 && (
-            <div className="rounded border border-slate-800 bg-slate-950/50 p-3">
+            <div className="rounded-md border border-slate-800 bg-slate-950/50 p-3">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-medium text-slate-200">Source alerts</span>
                 <span className="text-[10px] text-slate-500">
                   generated by Guardian, CloudWatch, Cloud Monitoring, or Alertmanager
                 </span>
               </div>
-              <p className="mt-1 text-[10px] text-slate-500">
+              <p className="mt-1 text-[10px] leading-snug text-slate-500">
                 These alerts have no rule, so they are routed by{" "}
-                <span className="font-mono">source</span> and{" "}
-                <span className="font-mono">alertname</span>. Dragging one here writes an
+                <span className="font-mono text-slate-400">source</span> and{" "}
+                <span className="font-mono text-slate-400">alertname</span>. Dragging one here writes an
                 alert route; save routing to apply it and deliver the currently firing alert.
               </p>
-              <div className="mt-3 space-y-3">
-                {[...new Set(sourceAlerts.map((card) => card.source))].map((source) => (
-                  <div key={source}>
-                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
-                      {SOURCE_LABELS[source] || source}
+              <div className="mt-3 space-y-4">
+                {[...new Set(sourceAlerts.map((card) => card.source))].map((source) => {
+                  const cards = sourceAlerts.filter((card) => card.source === source);
+                  return (
+                    <div key={source}>
+                      <div className="mb-2 flex items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                          {SOURCE_LABELS[source] || source}
+                        </span>
+                        <span className="text-[10px] text-slate-600">{cards.length}</span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+                        {cards.map((card) => (
+                          <RouteAlertRow
+                            key={`${card.source}/${card.alert}`}
+                            name={card.alert}
+                            severity={card.severity || "warning"}
+                            meta={SOURCE_LABELS[card.source] || card.source}
+                            description={card.description}
+                            destination={sourceRouteDestination(local.alertRoutes, card.source, card.alert)}
+                            receivers={local.receivers}
+                            ariaLabel={`Destination for ${card.alert}`}
+                            onDragStart={(event) => {
+                              const payload: DraggedSource = {
+                                kind: "source",
+                                source: card.source,
+                                alert: card.alert,
+                              };
+                              setDragging(payload);
+                              event.dataTransfer.setData(
+                                "application/x-sentinel-source",
+                                JSON.stringify(payload)
+                              );
+                              event.dataTransfer.effectAllowed = "move";
+                            }}
+                            onDragEnd={() => setDragging(null)}
+                            onAssign={(value) => assignSourceAlert(card.source, card.alert, value || null)}
+                          />
+                        ))}
+                      </div>
                     </div>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {sourceAlerts
-                        .filter((card) => card.source === source)
-                        .map((card) => {
-                          const destination = sourceRouteDestination(
-                            local.alertRoutes,
-                            card.source,
-                            card.alert
-                          );
-                          return (
-                            <div
-                              key={`${card.source}/${card.alert}`}
-                              draggable
-                              onDragStart={(event) => {
-                                const payload: DraggedSource = {
-                                  kind: "source",
-                                  source: card.source,
-                                  alert: card.alert,
-                                };
-                                setDragging(payload);
-                                event.dataTransfer.setData(
-                                  "application/x-sentinel-source",
-                                  JSON.stringify(payload)
-                                );
-                                event.dataTransfer.effectAllowed = "move";
-                              }}
-                              onDragEnd={() => setDragging(null)}
-                              className="flex max-w-full cursor-grab items-center gap-2 rounded border border-slate-700 bg-slate-900 px-2 py-1.5 active:cursor-grabbing"
-                              title="Drag onto a destination"
-                            >
-                              <GripVertical size={12} className="text-slate-500" />
-                              <div className="min-w-0">
-                                <div className="truncate text-[11px] font-medium text-slate-200">
-                                  {card.alert}
-                                </div>
-                                <div className="truncate text-[9px] text-slate-500">
-                                  {card.severity || "warning"} · {card.description}
-                                </div>
-                              </div>
-                              <select
-                                value={destination}
-                                onChange={(event) =>
-                                  assignSourceAlert(
-                                    card.source,
-                                    card.alert,
-                                    event.target.value || null
-                                  )
-                                }
-                                className="rounded border border-slate-700 bg-slate-950 px-1 py-0.5 text-[9px]"
-                                aria-label={`Destination for ${card.alert}`}
-                              >
-                                <option value="">default</option>
-                                {local.receivers.map((receiver) => (
-                                  <option key={receiver.name} value={receiver.name}>
-                                    {receiver.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

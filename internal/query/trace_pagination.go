@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/segment"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
 	gcpstore "github.com/radryc/doctor/internal/store/gcp"
 	"github.com/radryc/doctor/internal/tracecontext"
@@ -114,6 +115,21 @@ func copyTraceSummarySlice(summaries []*traceSummary, limit int) []traceSummary 
 	return out
 }
 
+// queryTraceBatch reads one bounded span batch and reports whether storage had
+// more matching spans than the requested limit. Backends that can scope the
+// read to the caller's partitions report truncation relative to that scope;
+// the fallback assumes an unfiltered batch.
+func (s *Service) queryTraceBatch(ctx context.Context, tenant, service string, from, to time.Time, limit int) ([]segment.TraceRecord, bool, time.Time, error) {
+	if page, ok := s.logEngine.(tracePageQuery); ok {
+		return page.QueryTracesPage(ctx, tenant, "", service, from, to, limit)
+	}
+	spans, err := s.logEngine.QueryTraces(ctx, tenant, "", service, from, to, limit)
+	if err != nil {
+		return nil, false, time.Time{}, err
+	}
+	return spans, len(spans) >= limit, oldestTraceStart(spans), nil
+}
+
 // queryLocalTracePage assembles one page from bounded span reads. It walks the
 // window backwards until every returned trace is complete: a trace is eligible
 // only when the scan watermark has moved below its earliest span start.
@@ -136,19 +152,41 @@ func (s *Service) queryLocalTracePage(
 		// would rescan every newer page before reaching this page's rows.
 		scanTo = cursor.MinTime
 	}
+	// watermark tracks the oldest *visible* span seen and gates trace
+	// completeness. scanWatermark tracks the oldest *raw* span seen and is
+	// used to advance the window; with an unfiltered backend the two are the
+	// same, but a policy-filtered batch can hide a large invisible region.
 	watermark := time.Time{}
+	scanWatermark := time.Time{}
 	truncated := false
 
 	for batch := 0; batch < tracePageMaxBatches; batch++ {
-		spans, err := s.logEngine.QueryTraces(ctx, tenant, "", service, from, scanTo, tracePageSpanBatch)
+		spans, batchTruncated, rawWatermark, err := s.queryTraceBatch(ctx, tenant, service, from, scanTo, tracePageSpanBatch)
 		if err != nil {
 			return nil, nil, false, err
 		}
-		if len(spans) == 0 {
-			truncated = false
-			break
+		// Truncation is reported by the backend *before* access-policy
+		// filtering. Using len(spans) here made a tightly scoped user's scan
+		// stop after one batch even though storage had many more rows.
+		truncated = batchTruncated
+		if !rawWatermark.IsZero() && (scanWatermark.IsZero() || rawWatermark.Before(scanWatermark)) {
+			scanWatermark = rawWatermark
 		}
-		truncated = len(spans) >= tracePageSpanBatch
+		if len(spans) == 0 {
+			if !batchTruncated || scanWatermark.IsZero() {
+				truncated = false
+				break
+			}
+			// The raw batch was full but every span was filtered out. Skip
+			// the invisible region instead of treating the page as complete.
+			nextScanTo := scanWatermark.Add(-time.Nanosecond)
+			if nextScanTo.Before(from) || !nextScanTo.Before(scanTo) {
+				truncated = false
+				break
+			}
+			scanTo = nextScanTo
+			continue
+		}
 
 		batchWatermark := spans[len(spans)-1].StartTime
 		for _, span := range spans {
@@ -158,6 +196,9 @@ func (s *Service) queryLocalTracePage(
 		}
 		if watermark.IsZero() || batchWatermark.Before(watermark) {
 			watermark = batchWatermark
+		}
+		if scanWatermark.IsZero() || batchWatermark.Before(scanWatermark) {
+			scanWatermark = batchWatermark
 		}
 
 		for _, span := range spans {
@@ -218,6 +259,12 @@ func (s *Service) queryLocalTracePage(
 		}
 
 		nextScanTo := watermark.Add(-time.Nanosecond)
+		if !scanWatermark.IsZero() && scanWatermark.Before(watermark) {
+			// The raw batch extended past the oldest visible span. Resume
+			// below the raw watermark instead of re-scanning that invisible
+			// region on the next batch.
+			nextScanTo = scanWatermark.Add(-time.Nanosecond)
+		}
 		if nextScanTo.Before(from) || !nextScanTo.Before(scanTo) {
 			// Reached the window start (or made no progress): there is no
 			// older batch left to fetch for this page.
@@ -242,8 +289,13 @@ func (s *Service) queryLocalTracePage(
 		next = &tracePageCursor{MinTime: out[len(out)-1].MinTime, TraceID: out[len(out)-1].TraceID}
 	} else if len(out) == 0 && hasMore && !watermark.IsZero() {
 		// The page was empty only because the batch cap was reached. Let the
-		// next request continue strictly below the scanned watermark.
-		next = &tracePageCursor{MinTime: watermark, TraceID: "\uffff"}
+		// next request continue strictly below the scanned watermark (the raw
+		// one when it is older, so an invisible region is not re-scanned).
+		resume := watermark
+		if !scanWatermark.IsZero() && scanWatermark.Before(resume) {
+			resume = scanWatermark
+		}
+		next = &tracePageCursor{MinTime: resume, TraceID: "\uffff"}
 	}
 	return out, next, hasMore, nil
 }

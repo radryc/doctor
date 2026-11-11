@@ -1,4 +1,5 @@
 import type { TraceRecord } from "../../types/api";
+import { traceRoute } from "../../lib/traceRoute";
 
 interface TraceWaterfallProps {
   spans: TraceRecord[];
@@ -41,12 +42,16 @@ export default function TraceWaterfall({ spans }: TraceWaterfallProps) {
   const rows = parsed.slice(0, MAX_ROWS);
   const cW = W - pL - pR;
   const H = pT + rows.length * H_PER_ROW + pB;
+  const route = traceRoute(spans);
 
   const px = (t: number) => pL + ((t - traceStart) / dur) * cW;
 
   return (
     <section className="result-block">
-      <h3>{`Trace waterfall — total ${fmtDur(dur)}`}</h3>
+      <h3>
+        {`Trace waterfall — total ${fmtDur(dur)}`}
+        {route ? ` · ${route.label}` : ""}
+      </h3>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         style={{ width: "100%", maxWidth: W, display: "block" }}

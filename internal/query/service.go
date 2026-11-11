@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/federation"
 	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/segment"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/monofs/pkg/authz"
@@ -58,6 +60,11 @@ type Service struct {
 	rulesToken       string
 	policyGate       *access.PolicyGate
 	dashboardStore   DashboardStore
+	quotaEngine      *quota.Engine
+	quotaProvider    *quota.Provider
+	ingestURL        string
+	ingestToken      string
+	ingestClient     *http.Client
 
 	traceDiscoveryMu       sync.Mutex
 	traceDiscoveryCacheTTL time.Duration
@@ -316,6 +323,25 @@ func (s *Service) SetDefaultPartition(p string) { s.defaultPartition = p }
 // SetDashboardStore installs the shared dashboard persistence store.
 func (s *Service) SetDashboardStore(store DashboardStore) {
 	s.dashboardStore = store
+}
+
+// SetQuota installs the partition quota provider and enforcement engine.
+func (s *Service) SetQuota(provider *quota.Provider, engine *quota.Engine) {
+	s.quotaProvider = provider
+	s.quotaEngine = engine
+}
+
+// SetIngestUsage configures the optional doctor-ingest usage proxy used by the
+// quota dashboard.
+func (s *Service) SetIngestUsage(url, token string) {
+	s.ingestURL = strings.TrimRight(strings.TrimSpace(url), "/")
+	s.ingestToken = strings.TrimSpace(token)
+	if s.ingestURL == "" {
+		return
+	}
+	if s.ingestClient == nil {
+		s.ingestClient = &http.Client{Timeout: 5 * time.Second}
+	}
 }
 
 // SetRulesURL configures the doctor-rules API base URL used by the UI proxy.
@@ -789,6 +815,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/guardian/probes", s.handleGuardianProbes)
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
+	mux.HandleFunc("/v1/quota", s.handleQuota)
 	mux.HandleFunc("/", s.handleUI)
 	return withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLogging(withWarningHeaders(s.guardianTokenMiddleware(mux)))))))
 }
@@ -830,9 +857,9 @@ func (s *Service) guardianTokenMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleRulesProxy exposes the doctor-rules list/detail and manual-evaluate
-// endpoints through the query UI origin. Mutations stay on the rules service
-// API; the UI is read-only except for manual evaluation.
+// handleRulesProxy exposes the doctor-rules list/detail, manual-evaluate, and
+// partition-scoped mutation endpoints through the query UI origin. Mutations
+// require maintainer/admin access to the target partition.
 func (s *Service) handleRulesProxy(w http.ResponseWriter, r *http.Request) {
 	if s.rulesProxy == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "recording rules service is not configured"})
@@ -845,11 +872,40 @@ func (s *Service) handleRulesProxy(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
+	case http.MethodPut, http.MethodDelete:
+		partition, ok := rulesProxyPartition(r.URL.Path)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /v1/rules/{partition}/{group}"})
+			return
+		}
+		if s.policyGate != nil {
+			identity, _ := authz.IdentityFromContext(r.Context())
+			if !s.policyGate.CanModifyPartition(identity, partition) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized to modify rules for this partition"})
+				return
+			}
+		}
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 	s.rulesProxy.ServeHTTP(w, r)
+}
+
+func rulesProxyPartition(path string) (string, bool) {
+	rest := strings.TrimPrefix(path, "/v1/rules/")
+	if rest == path {
+		return "", false
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", false
+	}
+	switch parts[0] {
+	case "evaluate", "status":
+		return "", false
+	}
+	return parts[0], true
 }
 
 // handleSentinelProxy forwards alert reads and operator actions to
@@ -886,10 +942,12 @@ func (s *Service) handleSentinelProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			cloned.Header.Set("X-Doctor-Partition-Access", partition)
 		} else if s.policyGate != nil {
-			// Tenant-wide alert summaries (used by Fleet) should include every
-			// partition the caller can see, not just the ones named in the URL.
-			visible, _ := s.policyGate.VisiblePartitions(identity, policy.SignalMetrics)
-			if len(visible) > 0 {
+			// Tenant-wide alert summaries (used by Fleet and Subspace) should
+			// include every partition the caller can see, not just the ones
+			// named in the URL. Use the partition scope rather than a telemetry
+			// signal: SignalMetrics is always unrestricted and would leave the
+			// header unset.
+			if visible, restricted := s.policyGate.AccessiblePartitions(identity); restricted && len(visible) > 0 {
 				cloned.Header.Set("X-Doctor-Partition-Access", strings.Join(visible, ","))
 			}
 		}
@@ -917,16 +975,34 @@ func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Service) handleUIConfig(w http.ResponseWriter, _ *http.Request) {
+func (s *Service) handleUIConfig(w http.ResponseWriter, r *http.Request) {
 	defaultTenant := strings.TrimSpace(s.defaultTenant)
 	if defaultTenant == "" {
 		defaultTenant = "default"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	payload := map[string]any{
 		"default_tenant":    defaultTenant,
 		"guardian_url":      s.guardianURL,
 		"default_partition": s.defaultPartition,
-	})
+	}
+	// A configured default partition (for example the platform "doctor"
+	// partition) may not be visible to a restricted identity. Return the list
+	// the caller may actually read and pre-select one of those instead, so
+	// partition-scoped pages never start against a partition the API rejects.
+	if s.policyGate != nil {
+		if identity, ok := authz.IdentityFromContext(r.Context()); ok && !identity.IsAnonymous() {
+			if partitions, restricted := s.policyGate.AccessiblePartitions(identity); restricted {
+				payload["accessible_partitions"] = partitions
+				switch {
+				case len(partitions) == 0:
+					payload["default_partition"] = ""
+				case !slices.Contains(partitions, s.defaultPartition):
+					payload["default_partition"] = partitions[0]
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // handleUIUser reports the signed-in caller for the header.
@@ -1858,7 +1934,11 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
 	partition := partitionFromRequest(r)
 	include := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include")))
-	scope := s.discoveryScopeKey(r.Context(), policy.SignalLogs)
+	signals := []policy.Signal{policy.SignalLogs}
+	if strings.Contains(include, "traces") {
+		signals = append(signals, policy.SignalTraces)
+	}
+	scope := s.discoveryScopeKey(r.Context(), signals...)
 	if strings.Contains(include, "aws") && s.aws != nil {
 		// AWS visibility can depend on account/region bindings that are not
 		// captured by partition names alone; keep those responses per-principal.

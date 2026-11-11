@@ -184,7 +184,9 @@ func prometheusResultEmpty(data map[string]any) bool {
 func (s *Service) execPrometheusInstant(ctx context.Context, tenant, partition, queryString string, at time.Time) (map[string]any, error, bool) {
 	// Presence aggregations (count by (__name__)) are answered from the chunk
 	// series index instead of scanning samples.
-	if expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString); parseErr == nil {
+	expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString)
+	synthesizeHistograms := parseErr == nil && queryNeedsNativeHistograms(expr)
+	if parseErr == nil {
 		if plan, ok := countByNamePlanFor(expr); ok {
 			data, fastErr := s.execCountByNameInstant(ctx, tenant, partition, plan, at)
 			if fastErr != nil {
@@ -199,7 +201,7 @@ func (s *Service) execPrometheusInstant(ctx context.Context, tenant, partition, 
 
 	query, err := engine.NewInstantQuery(
 		ctx,
-		doctorPromQueryable{backend: s.logEngine, tenant: tenant, partition: partition},
+		doctorPromQueryable{backend: s.logEngine, tenant: tenant, partition: partition, synthesizeHistograms: synthesizeHistograms},
 		promql.NewPrometheusQueryOpts(false, doctorPrometheusLookback),
 		queryString,
 		at,
@@ -225,6 +227,7 @@ func (s *Service) execPrometheusRange(ctx context.Context, tenant, partition, qu
 	// Presence aggregations (count by (__name__)) are answered from the chunk
 	// series index instead of scanning samples.
 	expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString)
+	synthesizeHistograms := parseErr == nil && queryNeedsNativeHistograms(expr)
 	if parseErr == nil {
 		if plan, ok := countByNamePlanFor(expr); ok {
 			data, fastErr := s.execCountByNameRange(ctx, tenant, partition, plan, start, end, step)
@@ -243,7 +246,7 @@ func (s *Service) execPrometheusRange(ctx context.Context, tenant, partition, qu
 
 	query, err := engine.NewRangeQuery(
 		ctx,
-		doctorPromQueryable{backend: s.logEngine, tenant: tenant, partition: partition},
+		doctorPromQueryable{backend: s.logEngine, tenant: tenant, partition: partition, synthesizeHistograms: synthesizeHistograms},
 		promql.NewPrometheusQueryOpts(false, doctorPrometheusLookback),
 		queryString,
 		start,

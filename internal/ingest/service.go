@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/radryc/doctor/internal/buildinfo"
 	"github.com/radryc/doctor/internal/otlp"
 	"github.com/radryc/doctor/internal/privacy"
+	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/segment"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -45,6 +47,7 @@ type Service struct {
 	logBuffer      *LogBuffer
 	metricBuffer   *MetricBuffer
 	privacy        *privacy.Engine
+	quota          *quota.Engine
 }
 
 func NewService(tenantHeader, defaultTenant string, writer Flusher, privacyEngine *privacy.Engine) *Service {
@@ -100,6 +103,15 @@ func (s *Service) tenantAllowed(tenant string) bool {
 	return ok
 }
 
+// SetQuotaEngine installs partition quota enforcement. A nil engine disables
+// quota checks (the pre-quota behavior).
+func (s *Service) SetQuotaEngine(engine *quota.Engine) {
+	if s == nil {
+		return
+	}
+	s.quota = engine
+}
+
 func (s *Service) RegisterGRPC(server *grpc.Server) {
 	coltracepb.RegisterTraceServiceServer(server, &traceServer{svc: s})
 	collogspb.RegisterLogsServiceServer(server, &logsServer{svc: s})
@@ -115,7 +127,17 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/logs", s.handleHTTPLogs)
 	mux.HandleFunc("/v1/metrics", s.handleHTTPMetrics)
 	mux.HandleFunc("/v1/guardian/events", s.handleGuardianEvents)
+	mux.HandleFunc("/v1/quota/usage", s.handleQuotaUsage)
 	return mux
+}
+
+func (s *Service) handleQuotaUsage(w http.ResponseWriter, _ *http.Request) {
+	payload := map[string]any{"enabled": s.quota != nil}
+	if s.quota != nil {
+		payload["usage"] = s.quota.Snapshot("")
+		payload["policy_ready"] = s.quota.Provider().Ready()
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Service) ingestTraces(ctx context.Context, tenant string, req *coltracepb.ExportTraceServiceRequest) error {
@@ -123,6 +145,9 @@ func (s *Service) ingestTraces(ctx context.Context, tenant string, req *coltrace
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenTraces(req, tenant, s.privacy)
+	if err := s.checkIngestQuota(ctx, "traces", tracePartitionCounts(records), nil); err != nil {
+		return err
+	}
 	if s.pipeline != nil {
 		if err := s.pipeline.SubmitTraces(ctx, records); err != nil {
 			return err
@@ -149,6 +174,9 @@ func (s *Service) ingestLogs(ctx context.Context, tenant string, req *collogspb.
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenLogs(req, tenant, s.privacy)
+	if err := s.checkIngestQuota(ctx, "logs", logPartitionCounts(records), nil); err != nil {
+		return err
+	}
 	if s.pipeline != nil {
 		if err := s.pipeline.SubmitLogs(ctx, records); err != nil {
 			return err
@@ -175,6 +203,9 @@ func (s *Service) ingestMetrics(ctx context.Context, tenant string, req *colmetr
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenMetrics(req, tenant, s.privacy)
+	if err := s.checkIngestQuota(ctx, "metrics", metricPartitionCounts(records), records); err != nil {
+		return err
+	}
 	if s.pipeline != nil {
 		if err := s.pipeline.SubmitMetrics(ctx, records); err != nil {
 			return err
@@ -257,8 +288,8 @@ func (s *Service) handleHTTPTraces(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.ingestTraces(r.Context(), s.tenantFromHeader(r), &req); err != nil {
-		http.Error(w, err.Error(), httpIngestStatus(err))
+	if err := s.ingestTraces(quota.WithRequestBytes(r.Context(), int64(len(raw))), s.tenantFromHeader(r), &req); err != nil {
+		writeIngestError(w, err)
 		return
 	}
 	writeOTLPResponse(w, http.StatusAccepted, jsonBody, &coltracepb.ExportTraceServiceResponse{})
@@ -280,8 +311,8 @@ func (s *Service) handleHTTPLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.ingestLogs(r.Context(), s.tenantFromHeader(r), &req); err != nil {
-		http.Error(w, err.Error(), httpIngestStatus(err))
+	if err := s.ingestLogs(quota.WithRequestBytes(r.Context(), int64(len(raw))), s.tenantFromHeader(r), &req); err != nil {
+		writeIngestError(w, err)
 		return
 	}
 	writeOTLPResponse(w, http.StatusAccepted, jsonBody, &collogspb.ExportLogsServiceResponse{})
@@ -303,8 +334,8 @@ func (s *Service) handleHTTPMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.ingestMetrics(r.Context(), s.tenantFromHeader(r), &req); err != nil {
-		http.Error(w, err.Error(), httpIngestStatus(err))
+	if err := s.ingestMetrics(quota.WithRequestBytes(r.Context(), int64(len(raw))), s.tenantFromHeader(r), &req); err != nil {
+		writeIngestError(w, err)
 		return
 	}
 	writeOTLPResponse(w, http.StatusAccepted, jsonBody, &colmetricspb.ExportMetricsServiceResponse{})
@@ -463,6 +494,7 @@ type traceServer struct {
 }
 
 func (s *traceServer) Export(ctx context.Context, req *coltracepb.ExportTraceServiceRequest) (*coltracepb.ExportTraceServiceResponse, error) {
+	ctx = quota.WithRequestBytes(ctx, int64(proto.Size(req)))
 	if err := s.svc.ingestTraces(ctx, s.svc.tenantFromContext(ctx), req); err != nil {
 		return nil, grpcIngestError(err)
 	}
@@ -475,6 +507,7 @@ type logsServer struct {
 }
 
 func (s *logsServer) Export(ctx context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
+	ctx = quota.WithRequestBytes(ctx, int64(proto.Size(req)))
 	if err := s.svc.ingestLogs(ctx, s.svc.tenantFromContext(ctx), req); err != nil {
 		return nil, grpcIngestError(err)
 	}
@@ -487,17 +520,84 @@ type metricsServer struct {
 }
 
 func (s *metricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
+	ctx = quota.WithRequestBytes(ctx, int64(proto.Size(req)))
 	if err := s.svc.ingestMetrics(ctx, s.svc.tenantFromContext(ctx), req); err != nil {
 		return nil, grpcIngestError(err)
 	}
 	return &colmetricspb.ExportMetricsServiceResponse{}, nil
 }
 
+// checkIngestQuota enforces the partition envelope for a flattened batch.
+func (s *Service) checkIngestQuota(ctx context.Context, signal string, records map[string]int64, metrics []segment.MetricPointRecord) error {
+	if s == nil || s.quota == nil {
+		return nil
+	}
+	return s.quota.CheckIngest(ctx, quota.IngestBatch{
+		Signal:  signal,
+		Bytes:   quota.RequestBytes(ctx),
+		Records: records,
+		Metrics: metrics,
+	})
+}
+
+func partitionKey(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return quota.UnknownPartition
+	}
+	return strings.TrimSpace(value)
+}
+
+func tracePartitionCounts(records []segment.TraceRecord) map[string]int64 {
+	out := make(map[string]int64, len(records))
+	for _, rec := range records {
+		out[partitionKey(rec.Partition)]++
+	}
+	return out
+}
+
+func logPartitionCounts(records []segment.LogRecord) map[string]int64 {
+	out := make(map[string]int64, len(records))
+	for _, rec := range records {
+		out[partitionKey(rec.Partition)]++
+	}
+	return out
+}
+
+func metricPartitionCounts(records []segment.MetricPointRecord) map[string]int64 {
+	out := make(map[string]int64, len(records))
+	for _, rec := range records {
+		out[partitionKey(rec.Partition)]++
+	}
+	return out
+}
+
+func writeIngestError(w http.ResponseWriter, err error) {
+	var limitErr *quota.LimitError
+	if errors.As(err, &limitErr) {
+		retry := int(limitErr.RetryAfter.Seconds())
+		if retry < 1 {
+			retry = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		w.Header().Set("X-RateLimit-Limit", strconv.FormatFloat(limitErr.Limit, 'f', -1, 64))
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-Doctor-Quota-Bucket", limitErr.Key)
+	}
+	status := httpIngestStatus(err)
+	if status == http.StatusTooManyRequests && w.Header().Get("Retry-After") == "" {
+		w.Header().Set("Retry-After", "1")
+	}
+	http.Error(w, err.Error(), status)
+}
+
 // grpcIngestError maps ingest errors to appropriate gRPC status codes so OTLP
 // clients apply the correct retry/backoff policy.
 func grpcIngestError(err error) error {
-	if errors.Is(err, ErrBufferFull) {
+	if errors.Is(err, ErrBufferFull) || errors.Is(err, quota.ErrQuotaExceeded) {
 		return status.Error(codes.ResourceExhausted, err.Error())
+	}
+	if errors.Is(err, quota.ErrUnknownPartition) {
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	if errors.Is(err, ErrTenantDenied) {
 		return status.Error(codes.PermissionDenied, err.Error())
@@ -507,8 +607,11 @@ func grpcIngestError(err error) error {
 
 // httpIngestStatus maps ingest errors to the appropriate HTTP status code.
 func httpIngestStatus(err error) int {
-	if errors.Is(err, ErrBufferFull) {
+	if errors.Is(err, ErrBufferFull) || errors.Is(err, quota.ErrQuotaExceeded) {
 		return http.StatusTooManyRequests
+	}
+	if errors.Is(err, quota.ErrUnknownPartition) {
+		return http.StatusBadRequest
 	}
 	if errors.Is(err, ErrTenantDenied) {
 		return http.StatusForbidden

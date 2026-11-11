@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Activity, AlertTriangle, Clock3, Copy, RefreshCw } from "lucide-react";
+import { Activity, AlertTriangle, Clock3, Copy, ExternalLink, RefreshCw } from "lucide-react";
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
+import { guardianPartitionUrl } from "../lib/links";
 import { copyText } from "../lib/clipboard";
 import type {
   GuardianEventRecord,
@@ -171,6 +172,18 @@ export default function PartitionViewPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {config.guardian_url && partitionName && (
+              <a
+                href={guardianPartitionUrl(config.guardian_url, partitionName)}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-500 text-sm text-gray-200 transition-colors"
+                title={`Open partition ${partitionName} in Guardian`}
+              >
+                <ExternalLink size={14} />
+                Guardian partition
+              </a>
+            )}
             <button
               onClick={copyDiagnostics}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-500 text-sm text-gray-200 transition-colors"

@@ -3,8 +3,8 @@ import { guardianPartitionUrl } from "../links";
 
 describe("guardianPartitionUrl", () => {
   it("adds the partition query parameter to an absolute URL", () => {
-    expect(guardianPartitionUrl("http://127.0.0.1:8090", "diva-shared")).toBe(
-      "http://127.0.0.1:8090/?partition=diva-shared"
+    expect(guardianPartitionUrl("http://localhost:8090", "diva-shared")).toBe(
+      "http://localhost:8090/?partition=diva-shared"
     );
   });
 

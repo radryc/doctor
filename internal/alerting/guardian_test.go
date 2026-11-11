@@ -197,6 +197,201 @@ func TestGuardianSourceFallsBackToM2MPartitions(t *testing.T) {
 	}
 }
 
+func TestGuardianSourceIgnoresLockedPartition(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	service := &Service{Store: store, DefaultTenant: "default"}
+	server := guardianPartitionServer(t, []GuardianPartitionSummary{
+		{Name: "monofs", Status: "Attention", DisplayStatus: "Locked", Health: "locked"},
+	})
+	defer server.Close()
+
+	source := &GuardianSource{BaseURL: server.URL, Tenant: "default", Service: service, Store: store}
+	summary, err := source.PollOnce(ctx)
+	if err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if summary.Included != 0 || summary.Healthy != 1 || summary.Imported != 0 {
+		t.Fatalf("summary = %+v, want locked partition ignored", summary)
+	}
+	alerts, err := store.ListAlerts(ctx, "default", "monofs")
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("locked partition alerts = %+v err=%v, want none", alerts, err)
+	}
+}
+
+func TestGuardianSourceResolvesAttentionForLockedPartition(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	now := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	service := &Service{Store: store, DefaultTenant: "default", Now: nowFn}
+	source := &GuardianSource{BaseURL: "http://guardian.invalid", Tenant: "default", Service: service, Store: store, Now: nowFn}
+
+	seeded := source.normalizePartitionAlert(
+		GuardianPartitionSummary{Name: "monofs", Status: "Attention", DisplayStatus: "Attention"},
+		GuardianPartitionAttentionAlert,
+		"warning",
+		now,
+	)
+	if err := store.SaveAlert(ctx, seeded, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	server := guardianPartitionServer(t, []GuardianPartitionSummary{
+		{Name: "monofs", Status: "Attention", DisplayStatus: "Locked", Health: "locked"},
+	})
+	defer server.Close()
+	source.BaseURL = server.URL
+
+	summary, err := source.PollOnce(ctx)
+	if err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if summary.Resolved != 1 {
+		t.Fatalf("summary = %+v, want the attention alert resolved", summary)
+	}
+	alerts, err := store.ListAlerts(ctx, "default", "monofs")
+	if err != nil || len(alerts) != 1 || alerts[0].Status != StatusResolved {
+		t.Fatalf("alerts after locked poll = %+v err=%v", alerts, err)
+	}
+}
+
+func TestGuardianSourceLockedPartitionStillReportsErrors(t *testing.T) {
+	partition := GuardianPartitionSummary{
+		Name:          "monofs",
+		Status:        "Attention",
+		DisplayStatus: "Locked",
+		Health:        "locked",
+		Errors:        []string{"invalid manifest"},
+	}
+	if got := guardianPartitionAlertName(partition); got != GuardianPartitionErrorAlert {
+		t.Fatalf("alert name = %q, want %q for a locked partition with errors", got, GuardianPartitionErrorAlert)
+	}
+
+	partition.Errors = nil
+	partition.FailingAssets = 1
+	if got := guardianPartitionAlertName(partition); got != GuardianPartitionErrorAlert {
+		t.Fatalf("alert name = %q, want %q for a locked partition with failing assets", got, GuardianPartitionErrorAlert)
+	}
+}
+
+func TestGuardianAttentionForCreatesPendingThenFires(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	now := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	service := &Service{Store: store, DefaultTenant: "default", Now: nowFn}
+	if err := store.PutGuardianPolicy(ctx, "default", "billing", GuardianPolicy{
+		Alerts: map[string]GuardianAlertPolicy{
+			GuardianPartitionAttentionAlert: {For: Duration(10 * time.Minute)},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := guardianPartitionServer(t, []GuardianPartitionSummary{
+		{Name: "billing", Status: "Attention", DisplayStatus: "Attention"},
+	})
+	defer server.Close()
+	source := &GuardianSource{BaseURL: server.URL, Tenant: "default", Service: service, Store: store, Now: nowFn}
+
+	if _, err := source.PollOnce(ctx); err != nil {
+		t.Fatalf("first PollOnce: %v", err)
+	}
+	alerts, err := store.ListAlerts(ctx, "default", "billing")
+	if err != nil || len(alerts) != 1 {
+		t.Fatalf("alerts after first poll = %+v err=%v", alerts, err)
+	}
+	if alerts[0].Status != StatusPending || !alerts[0].StartsAt.Equal(now) {
+		t.Fatalf("alert after first poll = %+v, want pending at %s", alerts[0], now)
+	}
+
+	now = now.Add(5 * time.Minute)
+	if _, err := source.PollOnce(ctx); err != nil {
+		t.Fatalf("second PollOnce: %v", err)
+	}
+	alerts, _ = store.ListAlerts(ctx, "default", "billing")
+	if alerts[0].Status != StatusPending {
+		t.Fatalf("alert after 5m = %+v, want still pending", alerts[0])
+	}
+
+	now = now.Add(6 * time.Minute)
+	if _, err := source.PollOnce(ctx); err != nil {
+		t.Fatalf("third PollOnce: %v", err)
+	}
+	alerts, _ = store.ListAlerts(ctx, "default", "billing")
+	if len(alerts) != 1 || alerts[0].Status != StatusFiring {
+		t.Fatalf("alert after 11m = %+v, want firing", alerts)
+	}
+	if !alerts[0].StartsAt.Equal(time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("firing alert startsAt = %s, want the first observation", alerts[0].StartsAt)
+	}
+}
+
+func TestGuardianAttentionForPendingResolvesWithoutFiring(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	now := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	service := &Service{Store: store, DefaultTenant: "default", Now: nowFn}
+	if err := store.PutGuardianPolicy(ctx, "default", "billing", GuardianPolicy{
+		Alerts: map[string]GuardianAlertPolicy{
+			GuardianPartitionAttentionAlert: {For: Duration(10 * time.Minute)},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	partitions := []GuardianPartitionSummary{{Name: "billing", Status: "Attention", DisplayStatus: "Attention"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(partitions)
+	}))
+	defer server.Close()
+	source := &GuardianSource{BaseURL: server.URL, Tenant: "default", Service: service, Store: store, Now: nowFn}
+
+	if _, err := source.PollOnce(ctx); err != nil {
+		t.Fatalf("first PollOnce: %v", err)
+	}
+	partitions = []GuardianPartitionSummary{{Name: "billing", Status: "Healthy", DisplayStatus: "Stable"}}
+	now = now.Add(time.Minute)
+	summary, err := source.PollOnce(ctx)
+	if err != nil {
+		t.Fatalf("second PollOnce: %v", err)
+	}
+	if summary.Resolved != 1 {
+		t.Fatalf("summary = %+v, want pending attention resolved", summary)
+	}
+	alerts, _ := store.ListAlerts(ctx, "default", "billing")
+	if len(alerts) != 1 || alerts[0].Status != StatusResolved {
+		t.Fatalf("alerts after recovery = %+v", alerts)
+	}
+	if alerts[0].LastNotifiedAt != nil {
+		t.Fatalf("pending alert was notified: %+v", alerts[0])
+	}
+}
+
+func TestGuardianPolicyAlertOnLocked(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	service := &Service{Store: store, DefaultTenant: "default"}
+	if err := store.PutGuardianPolicy(ctx, "default", "monofs", GuardianPolicy{AlertOnLocked: true}); err != nil {
+		t.Fatal(err)
+	}
+	server := guardianPartitionServer(t, []GuardianPartitionSummary{
+		{Name: "monofs", Status: "Attention", DisplayStatus: "Locked", Health: "locked"},
+	})
+	defer server.Close()
+	source := &GuardianSource{BaseURL: server.URL, Tenant: "default", Service: service, Store: store}
+
+	if _, err := source.PollOnce(ctx); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	alerts, err := store.ListAlerts(ctx, "default", "monofs")
+	if err != nil || len(alerts) != 1 || alerts[0].Labels["alertname"] != GuardianPartitionAttentionAlert {
+		t.Fatalf("alerts = %+v err=%v, want the opt-in attention alert", alerts, err)
+	}
+}
+
 func guardianPartitionServer(t *testing.T, partitions []GuardianPartitionSummary) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

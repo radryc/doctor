@@ -12,7 +12,7 @@ const validGroupYAML = `
 version: 1
 groups:
   - name: shard-health
-    tenant: default
+    partition: default
     interval: 30s
     evaluation_delay: 10s
     rules:
@@ -98,7 +98,7 @@ func sample(labels map[string]string, value string) map[string]any {
 }
 
 func testGroup(rule Rule) Group {
-	return Group{Name: "g", Tenant: "default", Rules: []Rule{rule}}
+	return Group{Name: "g", Partition: "default", Rules: []Rule{rule}}
 }
 
 func TestEvaluatorMergesPerShardSums(t *testing.T) {

@@ -416,7 +416,11 @@ func (s *Service) handleTempoSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeProxyWarnings(w, warnings)
-	writeJSON(w, http.StatusOK, tempoSearchResponse(summaries, spanSets))
+	response := tempoSearchResponse(summaries, spanSets)
+	if !s.enforceSeriesLimit(w, r, summaries) {
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // searchSpanSets resolves matched spans for the search. The TraceQL filters are

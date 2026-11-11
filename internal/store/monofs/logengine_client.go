@@ -201,13 +201,28 @@ func (c *LogEngineClient) IngestTraces(ctx context.Context, chunkID string, reco
 // QueryLogs executes a LogQL query and returns matching log records.
 // The tenant parameter is ignored by monofs (it uses internal partitioning).
 func (c *LogEngineClient) QueryLogs(ctx context.Context, tenant, query, service string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	resp, err := c.router.QueryLogs(ctx, &pb.QueryLogsRequest{
-		Query:        buildLogQL(service, query),
+	return c.queryLogs(ctx, buildLogQL(service, query), service, from, to, limit, nil, false)
+}
+
+// QueryLogsScoped applies the caller's visible partitions before the storage
+// limit so a per-partition user's page is not consumed by other partitions.
+func (c *LogEngineClient) QueryLogsScoped(ctx context.Context, tenant, query, service string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.LogRecord, error) {
+	return c.queryLogs(ctx, buildLogQL(service, query), service, from, to, limit, visiblePartitions, restricted)
+}
+
+func (c *LogEngineClient) queryLogs(ctx context.Context, query, service string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.LogRecord, error) {
+	req := &pb.QueryLogsRequest{
+		Query:        query,
 		Service:      service,
 		FromUnixNano: timeToNano(from),
 		ToUnixNano:   timeToNano(to),
 		Limit:        int32(limit),
-	})
+	}
+	if restricted {
+		req.VisiblePartitions = append([]string(nil), visiblePartitions...)
+		req.VisiblePartitionsSet = true
+	}
+	resp, err := c.router.QueryLogs(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -220,12 +235,22 @@ func (c *LogEngineClient) QueryLogs(ctx context.Context, tenant, query, service 
 
 // QueryLogsRaw executes a full LogQL expression and returns matching log records.
 func (c *LogEngineClient) QueryLogsRaw(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	resp, err := c.router.QueryLogs(ctx, &pb.QueryLogsRequest{
+	return c.QueryLogsRawScoped(ctx, tenant, query, from, to, limit, nil, false)
+}
+
+// QueryLogsRawScoped is QueryLogsRaw with the caller's partition scope.
+func (c *LogEngineClient) QueryLogsRawScoped(ctx context.Context, tenant, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.LogRecord, error) {
+	req := &pb.QueryLogsRequest{
 		Query:        normalizeRawLogQL(query),
 		FromUnixNano: timeToNano(from),
 		ToUnixNano:   timeToNano(to),
 		Limit:        int32(limit),
-	})
+	}
+	if restricted {
+		req.VisiblePartitions = append([]string(nil), visiblePartitions...)
+		req.VisiblePartitionsSet = true
+	}
+	resp, err := c.router.QueryLogs(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -475,14 +500,26 @@ func (c *LogEngineClient) QueryTraceDiscovery(ctx context.Context, tenant, disco
 // QueryTraces returns trace spans matching traceID and/or service in the time range.
 // The tenant parameter is ignored by monofs (it uses internal partitioning).
 func (c *LogEngineClient) QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error) {
-	stream, err := c.router.StreamQueryTraces(ctx, &pb.QueryTracesRequest{
+	return c.QueryTracesScoped(ctx, tenant, traceID, service, from, to, limit, nil, false)
+}
+
+// QueryTracesScoped applies the caller's visible partitions before the storage
+// limit so a per-partition user's trace page is not consumed by other
+// partitions.
+func (c *LogEngineClient) QueryTracesScoped(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.TraceRecord, error) {
+	req := &pb.QueryTracesRequest{
 		TraceId:      traceID,
 		Service:      service,
 		FromUnixNano: timeToNano(from),
 		ToUnixNano:   timeToNano(to),
 		Limit:        int32(limit),
 		BatchSize:    queryResultBatchSize,
-	})
+	}
+	if restricted {
+		req.VisiblePartitions = append([]string(nil), visiblePartitions...)
+		req.VisiblePartitionsSet = true
+	}
+	stream, err := c.router.StreamQueryTraces(ctx, req)
 	if err != nil {
 		return nil, err
 	}

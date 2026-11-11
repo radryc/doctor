@@ -99,6 +99,18 @@ export interface GCPPolicy {
   exclude?: GCPPolicyRule[];
 }
 
+export interface GuardianAlertPolicy {
+  for?: string;
+}
+
+export interface GuardianPolicy {
+  version?: number;
+  tenant?: string;
+  partition?: string;
+  alertOnLocked?: boolean;
+  alerts?: Record<string, GuardianAlertPolicy>;
+}
+
 export interface SourceStatus {
   name: string;
   mode: string;

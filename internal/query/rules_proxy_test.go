@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestRulesProxyReadAndEvaluateOnly(t *testing.T) {
+func TestRulesProxyAllowsPartitionMutations(t *testing.T) {
 	var seen []string
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method+" "+r.URL.RequestURI())
@@ -28,8 +28,9 @@ func TestRulesProxyReadAndEvaluateOnly(t *testing.T) {
 		{http.MethodGet, "/v1/rules", http.StatusOK},
 		{http.MethodGet, "/v1/rules/default/shard-health", http.StatusOK},
 		{http.MethodPost, "/v1/rules/evaluate?tenant=default&group=shard-health", http.StatusOK},
-		{http.MethodPut, "/v1/rules/default/shard-health", http.StatusMethodNotAllowed},
-		{http.MethodDelete, "/v1/rules/default/shard-health", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/v1/rules/default/shard-health", http.StatusOK},
+		{http.MethodDelete, "/v1/rules/default/shard-health", http.StatusOK},
+		{http.MethodPut, "/v1/rules/evaluate/group", http.StatusBadRequest},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("version: 1"))
 		rec := httptest.NewRecorder()
@@ -38,8 +39,8 @@ func TestRulesProxyReadAndEvaluateOnly(t *testing.T) {
 			t.Fatalf("%s %s status = %d, want %d (body %s)", tc.method, tc.path, rec.Code, tc.want, rec.Body.String())
 		}
 	}
-	if len(seen) != 3 {
-		t.Fatalf("forwarded requests = %v, want 3", seen)
+	if len(seen) != 5 {
+		t.Fatalf("forwarded requests = %v, want 5", seen)
 	}
 }
 

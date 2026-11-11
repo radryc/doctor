@@ -5,11 +5,8 @@ import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import { useInspector } from "../context/InspectorContext";
 import { useTimeRange } from "../context/TimeRangeContext";
+import { serviceLabel, serviceProbeQueries } from "../lib/serviceRed";
 import type { DiscoveredService, LogRecord } from "../types/api";
-
-function serviceLabel(name: string): string {
-  return name.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-}
 
 // ── APM Service Catalog (/services) ──────────────────────────────────────────
 
@@ -83,7 +80,7 @@ function ServiceCatalog() {
     <div className="tab-panel">
       <div className="panel-header">
         <div className="panel-header__left">
-          <h2>APM Component Catalog</h2>
+          <h2>Application Performance Monitoring Component Catalog</h2>
           <p>{loading ? "Loading…" : `${filtered.length} component${filtered.length !== 1 ? "s" : ""}`}</p>
         </div>
         <div className="xp-toolbar">
@@ -213,6 +210,7 @@ function ServiceDetail({ name }: { name: string }) {
   const navigate = useNavigate();
   const { config } = useConfig();
   const svc = serviceLabel(name);
+  const probeQueries = serviceProbeQueries(name);
 
   return (
     <div className="tab-panel">
@@ -254,6 +252,7 @@ function ServiceDetail({ name }: { name: string }) {
           <REDCard
             label="Request Rate"
             expr={`sum(rate(http_server_request_duration_count{service="${svc}"}[$__rate_interval])) or sum(rate(http_requests_total{service="${svc}"}[$__rate_interval]))`}
+            probeExpr={probeQueries.requestRate}
             traceqlExpr={`{resource.service.name="${svc}"} | rate()`}
             traceqlAgg="sum"
             unit="reqps"
@@ -262,6 +261,7 @@ function ServiceDetail({ name }: { name: string }) {
           <REDCard
             label="Error Rate"
             expr={`(sum(rate(http_server_request_duration_count{service="${svc}",http_response_status_code=~"5.."}[$__rate_interval])) or sum(rate(http_requests_total{service="${svc}",status_code=~"5.."}[$__rate_interval]))) / (sum(rate(http_server_request_duration_count{service="${svc}"}[$__rate_interval])) or sum(rate(http_requests_total{service="${svc}"}[$__rate_interval]))) * 100`}
+            probeExpr={probeQueries.errorRate}
             traceqlExpr={`{resource.service.name="${svc}" && status = error} | rate()`}
             traceqlDenominator={`{resource.service.name="${svc}"} | rate()`}
             traceqlAgg="ratio"
@@ -271,6 +271,7 @@ function ServiceDetail({ name }: { name: string }) {
           <REDCard
             label="P95 Latency"
             expr={`histogram_quantile(0.95, sum(rate(http_server_request_duration_bucket{service="${svc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service="${svc}"}[$__rate_interval])) by (le)) * 1000`}
+            probeExpr={probeQueries.p95Latency}
             traceqlExpr={`{resource.service.name="${svc}"} | quantile_over_time(duration, 0.95)`}
             traceqlAgg="max"
             traceqlScale={1e-6}
@@ -280,6 +281,7 @@ function ServiceDetail({ name }: { name: string }) {
           <REDCard
             label="P99 Latency"
             expr={`histogram_quantile(0.99, sum(rate(http_server_request_duration_bucket{service="${svc}"}[$__rate_interval])) by (le)) * 1000 or histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service="${svc}"}[$__rate_interval])) by (le)) * 1000`}
+            probeExpr={probeQueries.p99Latency}
             traceqlExpr={`{resource.service.name="${svc}"} | quantile_over_time(duration, 0.99)`}
             traceqlAgg="max"
             traceqlScale={1e-6}
@@ -287,7 +289,7 @@ function ServiceDetail({ name }: { name: string }) {
             tenant={config.default_tenant}
           />
         </div>
-        <ProbeCards service={name} />
+        <ProbeCards service={name} tenant={config.default_tenant} />
         <div className="service-detail__recent">
           <div>
             <h3 style={{ fontSize: "0.85rem", opacity: 0.7, marginBottom: "0.5rem" }}>Recent Traces</h3>
@@ -306,6 +308,7 @@ function ServiceDetail({ name }: { name: string }) {
 interface REDCardProps {
   label: string;
   expr: string;
+  probeExpr?: string;
   traceqlExpr?: string;
   traceqlDenominator?: string;
   traceqlAgg?: "sum" | "max" | "ratio";
@@ -317,6 +320,7 @@ interface REDCardProps {
 function REDCard({
   label,
   expr,
+  probeExpr,
   traceqlExpr,
   traceqlDenominator,
   traceqlAgg = "sum",
@@ -331,11 +335,6 @@ function REDCard({
   useEffect(() => {
     let active = true;
     const step = tr.stepInterval();
-    const resolvedExpr = expr.replace(/\[\$__rate_interval\]/g, `[${step}]`);
-    const params = new URLSearchParams({
-      query: resolvedExpr,
-      time: (to.getTime() / 1000).toFixed(0),
-    });
 
     const set = (v: number | null) => {
       if (!active) return;
@@ -345,6 +344,26 @@ function REDCard({
       }
       const digits = unit === "ms" && Math.abs(v) < 1 ? 2 : unit === "ms" ? 1 : 2;
       setValue(`${v.toFixed(digits)}${unit === "reqps" ? "/s" : unit}`);
+    };
+
+    const vectorValue = async (query: string): Promise<number | null> => {
+      const r = await api.queryPrometheus(
+        new URLSearchParams({
+          query,
+          time: (to.getTime() / 1000).toFixed(0),
+          tenant,
+        }),
+      );
+      if (r.data.resultType !== "vector" || r.data.result.length === 0) return null;
+      const sampleValue = r.data.result[0].value?.[1];
+      if (sampleValue === undefined) return null;
+      const parsed = parseFloat(sampleValue);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const probeValue = async (): Promise<number | null> => {
+      if (!probeExpr) return null;
+      return vectorValue(probeExpr.replace(/\[\$__rate_interval\]/g, `[${step}]`));
     };
 
     const traceMetrics = (q: string): Promise<number | null> => {
@@ -380,39 +399,43 @@ function REDCard({
       return ((num ?? 0) / den) * 100;
     };
 
-    const fallback = () => {
+    const traceResult = (): Promise<number | null> => {
       if (traceqlAgg === "ratio" && traceqlDenominator) {
-        traceRatio(traceqlExpr, traceqlDenominator)
-          .then((value) => {
-            if (active) set(value);
-          })
-          .catch(() => set(null));
-        return;
+        return traceRatio(traceqlExpr, traceqlDenominator);
       }
-      traceValue(traceqlExpr)
-        .then((v) => {
-          if (active) set(v);
-        })
-        .catch(() => set(null));
+      return traceValue(traceqlExpr);
     };
 
-    api
-      .queryPrometheus(params)
-      .then((r) => {
+    const isFiniteNumber = (v: number | null): v is number => v != null && Number.isFinite(v);
+
+    // Prefer application metrics, then real trace traffic, then synthetic probe
+    // counters/histograms for services covered only by probes.
+    vectorValue(expr.replace(/\[\$__rate_interval\]/g, `[${step}]`))
+      .catch(() => null)
+      .then((httpValue) => {
         if (!active) return;
-        if (r.data.resultType === "vector" && r.data.result.length > 0) {
-          const parsed = parseFloat(r.data.result[0].value[1]);
-          if (Number.isFinite(parsed)) {
-            set(parsed);
-            return;
-          }
+        if (isFiniteNumber(httpValue)) {
+          set(httpValue);
+          return;
         }
-        fallback();
-      })
-      .catch(fallback);
+        return traceResult()
+          .catch(() => null)
+          .then((traceResultValue) => {
+            if (!active) return;
+            if (isFiniteNumber(traceResultValue)) {
+              set(traceResultValue);
+              return;
+            }
+            return probeValue()
+              .catch(() => null)
+              .then((probeResult) => {
+                if (active) set(probeResult);
+              });
+          });
+      });
 
     return () => { active = false; };
-  }, [expr, traceqlExpr, traceqlDenominator, traceqlAgg, traceqlScale, unit, tenant, tr.refreshTick, from, to, tr]);
+  }, [expr, probeExpr, traceqlExpr, traceqlDenominator, traceqlAgg, traceqlScale, unit, tenant, tr.refreshTick, from, to, tr]);
 
   return (
     <div className="red-card">
@@ -429,7 +452,7 @@ function formatProbeAge(seconds: number): string {
   return `${Math.round(seconds / 3600)}h ago`;
 }
 
-function ProbeCards({ service }: { service: string }) {
+function ProbeCards({ service, tenant }: { service: string; tenant: string }) {
   const tr = useTimeRange();
   const [values, setValues] = useState<{
     up: boolean | null;
@@ -445,12 +468,15 @@ function ProbeCards({ service }: { service: string }) {
       const params = new URLSearchParams({
         query: expr,
         time: (Date.now() / 1000).toFixed(0),
+        tenant,
       });
       return api
         .queryPrometheus(params)
         .then((r) => {
           if (r.data.resultType !== "vector" || r.data.result.length === 0) return null;
-          const value = Number(r.data.result[0].value[1]);
+          const sampleValue = r.data.result[0].value?.[1];
+          if (sampleValue === undefined) return null;
+          const value = Number(sampleValue);
           return Number.isFinite(value) ? value : null;
         })
         .catch(() => null);
@@ -478,7 +504,7 @@ function ProbeCards({ service }: { service: string }) {
     return () => {
       active = false;
     };
-  }, [service, tr.refreshTick]);
+  }, [service, tenant, tr.refreshTick]);
 
   if (!values) return null;
 

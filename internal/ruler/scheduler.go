@@ -8,6 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/radryc/monofs/pkg/authz/policy"
+	"golang.org/x/time/rate"
 )
 
 // GroupEvaluator evaluates one group and returns per-rule results.
@@ -15,18 +18,31 @@ type GroupEvaluator interface {
 	EvaluateGroup(ctx context.Context, group Group) []EvalResult
 }
 
+// RuleCostLimits exposes the partition rule evaluation budget.
+type RuleCostLimits interface {
+	RulesQuota(partition string) policy.RulesQuota
+}
+
 // Scheduler reloads rule groups and evaluates them on their intervals using a
 // bounded worker pool.
 type Scheduler struct {
 	Evaluator    GroupEvaluator
 	Load         func(ctx context.Context) ([]GroupRef, error)
+	Limits       RuleCostLimits
 	Workers      int
 	PollInterval time.Duration
 	Logger       *log.Logger
 	Now          func() time.Time
 
-	mu    sync.Mutex
-	stats SchedulerStats
+	mu       sync.Mutex
+	stats    SchedulerStats
+	budgetMu sync.Mutex
+	budgets  map[string]*ruleBudget
+}
+
+type ruleBudget struct {
+	limiter *rate.Limiter
+	limit   int64
 }
 
 // SchedulerStats reports scheduler state for health endpoints.
@@ -34,6 +50,7 @@ type SchedulerStats struct {
 	Groups    int       `json:"groups"`
 	Due       int64     `json:"due"`
 	Evaluated int64     `json:"evaluated"`
+	Skipped   int64     `json:"skipped"`
 	LastLoad  time.Time `json:"lastLoad"`
 	LastError string    `json:"lastError,omitempty"`
 }
@@ -90,6 +107,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	groups := make(map[string]*scheduledGroup)
 	pending := &groupHeap{}
 	heap.Init(pending)
+	if s.budgets == nil {
+		s.budgets = map[string]*ruleBudget{}
+	}
 
 	reload := func() {
 		refs, err := s.Load(ctx)
@@ -100,7 +120,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 		seen := make(map[string]struct{}, len(refs))
 		now := s.Now()
 		for _, ref := range refs {
-			key := ref.Tenant + "/" + ref.Group
+			key := ref.Partition + "/" + ref.Group
 			seen[key] = struct{}{}
 			if existing, ok := groups[key]; ok {
 				existing.ref = ref
@@ -160,6 +180,16 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if group.running.Load() {
 				// The previous evaluation is still in flight. Reschedule instead
 				// of starting an overlapping copy of the same rule group.
+				heap.Push(pending, group)
+				continue
+			}
+			if !s.allowBudget(group.ref) {
+				s.mu.Lock()
+				s.stats.Skipped++
+				s.mu.Unlock()
+				if s.Logger != nil {
+					s.Logger.Printf("rules: partition=%s group=%s skipped: evaluation budget exhausted", group.ref.Partition, group.ref.Group)
+				}
 				heap.Push(pending, group)
 				continue
 			}
@@ -230,13 +260,53 @@ func groupInterval(ref GroupRef) time.Duration {
 	return ref.File.Groups[0].IntervalOrDefault()
 }
 
+func (s *Scheduler) allowBudget(ref GroupRef) bool {
+	if s == nil || s.Limits == nil {
+		return true
+	}
+	q := s.Limits.RulesQuota(ref.Partition)
+	if q.MaxEvaluationCostPerSecond <= 0 {
+		return true
+	}
+	cost := 1
+	if ref.File != nil {
+		cost = 0
+		for _, group := range ref.File.Groups {
+			cost += len(group.Rules)
+		}
+		if cost == 0 {
+			cost = 1
+		}
+	}
+	limit := q.MaxEvaluationCostPerSecond
+	burst := int(limit)
+	if burst < cost {
+		burst = cost
+	}
+	s.budgetMu.Lock()
+	budget := s.budgets[ref.Partition]
+	if budget == nil {
+		budget = &ruleBudget{limiter: rate.NewLimiter(rate.Limit(limit), burst), limit: limit}
+		s.budgets[ref.Partition] = budget
+	}
+	if budget.limit != limit {
+		budget.limiter.SetLimit(rate.Limit(limit))
+		budget.limit = limit
+	}
+	if budget.limiter.Burst() < cost {
+		budget.limiter.SetBurst(cost)
+	}
+	s.budgetMu.Unlock()
+	return budget.limiter.AllowN(time.Now(), cost)
+}
+
 func groupForRef(ref GroupRef) Group {
 	if ref.File == nil || len(ref.File.Groups) == 0 {
-		return Group{Tenant: ref.Tenant, Name: ref.Group}
+		return Group{Partition: ref.Partition, Name: ref.Group}
 	}
 	group := ref.File.Groups[0]
-	if group.Tenant == "" {
-		group.Tenant = ref.Tenant
+	if group.Partition == "" {
+		group.Partition = ref.Partition
 	}
 	return group
 }

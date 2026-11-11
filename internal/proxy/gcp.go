@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,6 +98,27 @@ func ApplyGCPLabels(attrs map[string]string, region, project string) {
 			attrs[AWSPartitionLabel] = partition
 		}
 	}
+}
+
+// normalizeGCPSpanID converts a Cloud Trace span ID to the 16-character
+// lowercase hexadecimal form used by OTLP and X-Ray.
+//
+// The Cloud Trace REST API returns 64-bit span IDs as decimal strings, while
+// k8s/AWS telemetry arrives with hexadecimal span IDs. Without this conversion
+// a parent_span_id from Cloud Run can never match the hexadecimal span_id of
+// the k8s or AWS span that called it, so federated traces appear as detached
+// subtrees in the trace flow view.
+func normalizeGCPSpanID(raw string) string {
+	id := strings.TrimSpace(raw)
+	if id == "" {
+		return ""
+	}
+	if value, err := strconv.ParseUint(id, 10, 64); err == nil {
+		return fmt.Sprintf("%016x", value)
+	}
+	// Already hexadecimal (or an unknown format); normalise the casing so
+	// string comparisons against OTLP span IDs are stable.
+	return strings.ToLower(id)
 }
 
 // GCPUpstream adapts a GCPClient to the upstream interfaces.
@@ -195,8 +217,11 @@ func (u *GCPUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 		if record.LogStream != "" {
 			attrs["log_stream"] = record.LogStream
 		}
-		ApplyGCPLabels(attrs, record.Region, record.Project)
+		// Resolve the Guardian partition from application-provided labels before
+		// ApplyGCPLabels installs the region/project fallback. Otherwise the
+		// fallback wins and the record is attributed to a region.
 		partition := gcpIdentityPartition(attrs, record.Region, record.Project)
+		ApplyGCPLabels(attrs, record.Region, record.Project)
 		if partition != "" {
 			attrs[telemetrylabels.GuardianPartition] = partition
 		}
@@ -443,8 +468,13 @@ func (u *GCPUpstream) GetTraceRaw(ctx context.Context, tenant, traceID string) (
 			attrs[key] = value
 		}
 		attrs[LabelSource] = SourceGCP
-		ApplyGCPLabels(attrs, span.Region, span.Project)
+		// Resolve the Guardian partition before ApplyGCPLabels installs the
+		// region/project fallback. Cloud Run infrastructure spans (which have no
+		// application labels) must still be attributed to the partition that
+		// owns the service, or partition-scoped users lose them and the trace
+		// detail loses the parent that links the app span to its caller.
 		partition := gcpIdentityPartition(attrs, span.Region, span.Project)
+		ApplyGCPLabels(attrs, span.Region, span.Project)
 		if partition != "" {
 			attrs[telemetrylabels.GuardianPartition] = partition
 		}
@@ -455,8 +485,8 @@ func (u *GCPUpstream) GetTraceRaw(ctx context.Context, tenant, traceID string) (
 		out = append(out, segment.TraceRecord{
 			Tenant:             tenant,
 			TraceID:            span.TraceID,
-			SpanID:             span.SpanID,
-			ParentSpanID:       span.ParentSpanID,
+			SpanID:             normalizeGCPSpanID(span.SpanID),
+			ParentSpanID:       normalizeGCPSpanID(span.ParentSpanID),
 			Name:               span.Name,
 			Kind:               "SPAN_KIND_UNSPECIFIED",
 			Service:            firstNonEmpty(span.Service, span.Name, SourceGCP),

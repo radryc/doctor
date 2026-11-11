@@ -6,6 +6,7 @@ import { useConfig } from "../context/ConfigContext";
 import { useTimeRange } from "../context/TimeRangeContext";
 import { copyText } from "../lib/clipboard";
 import { splitServiceIdentity } from "../lib/logs";
+import { traceRoute } from "../lib/traceRoute";
 import TraceDetails, { fmtTime } from "../components/charts/TraceDetails";
 import type { LogIdentityInfo, LogRecord, TraceSummary, TraceRecord } from "../types/api";
 
@@ -140,12 +141,21 @@ function SingleTraceView({ traceId, tenant, onBack }: { traceId: string; tenant:
       .catch((err: unknown) => setLogsError(err instanceof Error ? err.message : "Log load failed"));
   }, [traceId, tenant]);
 
+  const route = spans ? traceRoute(spans) : null;
+
   return (
     <div className="tab-panel">
       <div className="panel-header">
         <div className="panel-header__left">
           <h2>Trace</h2>
           <p className="trace-direct-id">{traceId}</p>
+          {route && (
+            <p>
+              <span className="facet-chip" title={`Route: ${route.direction}`}>
+                {route.label}
+              </span>
+            </p>
+          )}
         </div>
         <div className="xp-toolbar">
           <button

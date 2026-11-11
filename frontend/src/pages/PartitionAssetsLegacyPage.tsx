@@ -1387,10 +1387,13 @@ export default function PartitionAssetsLegacyPage() {
               response.data.resultType === "vector" &&
               response.data.result.length > 0
             ) {
-              const parsed = Number(response.data.result[0].value[1]);
-              if (Number.isFinite(parsed)) {
-                value = parsed;
-                break;
+              const sampleValue = response.data.result[0].value?.[1];
+              if (sampleValue !== undefined) {
+                const parsed = Number(sampleValue);
+                if (Number.isFinite(parsed)) {
+                  value = parsed;
+                  break;
+                }
               }
             }
           } catch {

@@ -29,8 +29,8 @@ func TestStorePutGetListDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if loaded.Groups[0].Tenant != "default" {
-		t.Fatalf("tenant = %q", loaded.Groups[0].Tenant)
+	if loaded.Groups[0].Partition != "default" {
+		t.Fatalf("partition = %q", loaded.Groups[0].Partition)
 	}
 
 	refs, err := ruleStore.List(ctx)
@@ -92,7 +92,7 @@ func TestAPIListPutGetDelete(t *testing.T) {
 	resp.Body.Close()
 
 	// Evaluate.
-	req, _ = http.NewRequest(http.MethodPost, server.URL+"/v1/rules/evaluate?tenant=default&group=shard-health", nil)
+	req, _ = http.NewRequest(http.MethodPost, server.URL+"/v1/rules/evaluate?partition=default&group=shard-health", nil)
 	resp, err = server.Client().Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("evaluate status = %v, err = %v", resp.StatusCode, err)

@@ -453,6 +453,35 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px var(--ui-overlay);
 }
 
+/* Checkboxes and radios opt out of the full-width text-input styling above. */
+input[type="checkbox"],
+input[type="radio"] {
+  width: 14px;
+  height: 14px;
+  min-height: 0;
+  padding: 0;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--ui-accent);
+  cursor: pointer;
+}
+
+input[type="checkbox"]:focus,
+input[type="radio"]:focus {
+  box-shadow: 0 0 0 3px var(--ui-overlay);
+}
+
+/* A label that wraps a checkbox/radio is a control row, not a stacked field. */
+label:has(> input[type="checkbox"]),
+label:has(> input[type="radio"]) {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
 .run-btn {
   min-height: 40px;
   padding: 0.65rem 1rem;

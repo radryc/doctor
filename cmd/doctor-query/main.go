@@ -21,6 +21,7 @@ import (
 	"github.com/radryc/doctor/internal/netguard"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/query"
+	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/ruler"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
 	gcpstore "github.com/radryc/doctor/internal/store/gcp"
@@ -279,8 +280,37 @@ func main() {
 	}
 
 	handler := svc.Handler()
-	// Request-level policy gate runs inside auth so identity is available;
-	// record-level filtering lives in the backend decorator.
+	var quotaEngine *quota.Engine
+	if cfg.Quota.Enabled {
+		opts := quota.ProviderOptions{
+			PolicyURL:   cfg.Quota.PolicyURL,
+			PolicyToken: cfg.Quota.PolicyToken,
+			Interval:    cfg.Quota.Interval,
+			Defaults:    cfg.Quota.Defaults,
+			Enforce:     cfg.Quota.Enforce,
+			Logger:      log.Default(),
+		}
+		if policyGate != nil {
+			// Share the access-policy loader so quotas and ACLs always agree on
+			// one bundle version.
+			opts.PolicyFunc = policyGate.CurrentPolicy
+			opts.PolicyURL = ""
+		}
+		provider := quota.NewProvider(opts)
+		go provider.Run(ctx)
+		quotaEngine = quota.NewEngine(provider, cfg.Quota.Replicas, log.Default())
+		svc.SetQuota(provider, quotaEngine)
+		svc.SetIngestUsage(cfg.IngestURL, cfg.IngestToken)
+		log.Printf("query quota enabled (policy=%q replicas=%d enforce=%v observe-first=%v ingest=%q)",
+			cfg.Quota.PolicyURL, cfg.Quota.Replicas, cfg.Quota.Enforce, !cfg.Quota.Enforce, cfg.IngestURL)
+	}
+	// Request-level quota and policy gates run inside auth so identity is
+	// available; record-level policy filtering lives in the backend decorator.
+	// Quota is wrapped first so a policy denial is evaluated before admitting
+	// the request to a quota bucket.
+	if quotaEngine != nil {
+		handler = quotaEngine.Middleware(handler)
+	}
 	if policyGate != nil {
 		handler = policyGate.Middleware(handler)
 	}

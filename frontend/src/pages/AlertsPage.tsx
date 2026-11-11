@@ -11,10 +11,12 @@ import {
   XCircle,
 } from "lucide-react";
 import { api } from "../api/client";
+import AlertMetadata from "../components/alerts/AlertMetadata";
 import AlertRulesTab from "../components/alerts/AlertRulesTab";
 import RoutingBoard from "../components/alerts/RoutingBoard";
 import Tabs from "../components/ui/Tabs";
 import { useConfig } from "../context/ConfigContext";
+import { isPartitionDenied, pickDefaultPartition } from "../lib/partitionAccess";
 import type {
   Alert,
   AlertListResponse,
@@ -26,6 +28,7 @@ import type {
   SourceStatus,
   AWSPolicy,
   GCPPolicy,
+  GuardianPolicy,
   SubspaceRequest,
 } from "../types/alerts";
 
@@ -87,7 +90,7 @@ function can(caps: Capabilities | null, capability: string): boolean {
 }
 
 export default function AlertsPage() {
-  const { config } = useConfig();
+  const { config, loaded: configLoaded } = useConfig();
   const location = useLocation();
   const navigate = useNavigate();
   const tab = initialTab(location.pathname);
@@ -115,6 +118,10 @@ export default function AlertsPage() {
   const [policyText, setPolicyText] = useState("");
   const [gcpPolicy, setGCPPolicy] = useState<GCPPolicy | null>(null);
   const [gcpPolicyText, setGCPPolicyText] = useState("");
+  const [guardianPolicy, setGuardianPolicy] = useState<GuardianPolicy | null>(null);
+  const [guardianErrorFor, setGuardianErrorFor] = useState("0s");
+  const [guardianAttentionFor, setGuardianAttentionFor] = useState("0s");
+  const [guardianAlertOnLocked, setGuardianAlertOnLocked] = useState(false);
   const [receivers, setReceivers] = useState<ReceiverConfig | null>(null);
   const [routingAlerts, setRoutingAlerts] = useState<Alert[]>([]);
   const [delivery, setDelivery] = useState<DeliveryRecord[]>([]);
@@ -140,12 +147,21 @@ export default function AlertsPage() {
   const [broadcastMinutes, setBroadcastMinutes] = useState("60");
 
   useEffect(() => {
-    if (!partition && config.default_partition) {
-      setPartition(config.default_partition);
-    }
-    // Fill the default once config arrives; a user-cleared field stays empty.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.default_partition]);
+    if (!configLoaded || partition) return;
+    // The backend rewrites default_partition when the configured default is
+    // not readable; pickDefaultPartition is a defensive fallback for older
+    // responses that still carry an inaccessible value.
+    const next = pickDefaultPartition(
+      config.default_partition,
+      config.accessible_partitions
+    );
+    if (next) setPartition(next);
+  }, [configLoaded, partition, config.default_partition, config.accessible_partitions]);
+
+  const partitionDenied = isPartitionDenied(
+    partition,
+    config.accessible_partitions
+  );
 
   // Only follow partition changes that came from outside this component (for
   // example a link into ?partition=...). Reacting to every `partition` change
@@ -183,11 +199,12 @@ export default function AlertsPage() {
     };
   }, [config.default_tenant]);
 
-  const partitionOptions = useMemo(
-    () =>
-      [...new Set([...partitions, partition, config.default_partition].filter(Boolean))].sort(),
-    [partitions, partition, config.default_partition]
-  );
+  const partitionOptions = useMemo(() => {
+    if (config.accessible_partitions) {
+      return [...config.accessible_partitions].sort();
+    }
+    return [...new Set([...partitions, partition, config.default_partition].filter(Boolean))].sort();
+  }, [partitions, partition, config.default_partition, config.accessible_partitions]);
 
   // Reflect the selected partition in the URL so the view is shareable and
   // behaves like Logs, Metrics, and Traces.
@@ -246,14 +263,22 @@ export default function AlertsPage() {
   }, [linkedAlert, params, partition, severityFilter, sourceFilter, statusFilter, tenant]);
 
   const loadTab = useCallback(async () => {
+    if (!configLoaded) return;
     setLoading(true);
     setError("");
+    // Partition-scoped tabs must not query a partition the identity cannot
+    // read: doctor-query intentionally answers 404 for it. Subspace is
+    // tenant-wide, so it stays available and simply omits the denied filter.
+    if (partitionDenied && tab !== "subspace") {
+      setLoading(false);
+      return;
+    }
     try {
       await loadCaps();
       if (tab === "inbox") await loadInbox();
       if (tab === "subspace") {
         const p = new URLSearchParams({ tenant, scope: "subspace" });
-        if (partition) p.set("partition", partition);
+        if (partition && !partitionDenied) p.set("partition", partition);
         const data = await api.getAlerts(p);
         setSubspaceAlerts(data.alerts ?? []);
       }
@@ -277,16 +302,21 @@ export default function AlertsPage() {
         setSilences(data.silences ?? []);
       }
       if (tab === "sources") {
-        const [sourceData, policyData, gcpPolicyData] = await Promise.all([
+        const [sourceData, policyData, gcpPolicyData, guardianPolicyData] = await Promise.all([
           api.getSources(params),
           api.getAWSPolicy(params),
           api.getGCPPolicy(params),
+          partition ? api.getGuardianPolicy(params) : Promise.resolve(null),
         ]);
         setSources(sourceData.sources ?? []);
         setPolicy(policyData);
         setPolicyText(JSON.stringify(policyData, null, 2));
         setGCPPolicy(gcpPolicyData);
         setGCPPolicyText(JSON.stringify(gcpPolicyData, null, 2));
+        setGuardianPolicy(guardianPolicyData);
+        setGuardianErrorFor(guardianPolicyData?.alerts?.GuardianPartitionError?.for || "0s");
+        setGuardianAttentionFor(guardianPolicyData?.alerts?.GuardianPartitionAttention?.for || "0s");
+        setGuardianAlertOnLocked(Boolean(guardianPolicyData?.alertOnLocked));
       }
       if (tab === "receivers") {
         const [data, groupsData, alertsData] = await Promise.all([
@@ -313,13 +343,14 @@ export default function AlertsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadCaps, loadInbox, params, tab, tenant]);
+  }, [configLoaded, loadCaps, loadInbox, params, partition, partitionDenied, tab, tenant]);
 
   useEffect(() => {
+    if (!configLoaded) return;
     void loadTab();
     const timer = window.setInterval(() => void loadTab(), 20_000);
     return () => window.clearInterval(timer);
-  }, [loadTab]);
+  }, [configLoaded, loadTab]);
 
   const switchTab = (key: TabKey) => {
     setSelected(null);
@@ -419,6 +450,35 @@ export default function AlertsPage() {
     }
   };
 
+  const saveGuardianPolicy = async () => {
+    if (!partition) {
+      setError("Select a partition before saving a Guardian policy");
+      return;
+    }
+    try {
+      const next: GuardianPolicy = {
+        ...(guardianPolicy ?? {}),
+        alertOnLocked: guardianAlertOnLocked,
+        alerts: {
+          ...(guardianPolicy?.alerts ?? {}),
+          GuardianPartitionError: {
+            ...(guardianPolicy?.alerts?.GuardianPartitionError ?? {}),
+            for: guardianErrorFor.trim() || "0s",
+          },
+          GuardianPartitionAttention: {
+            ...(guardianPolicy?.alerts?.GuardianPartitionAttention ?? {}),
+            for: guardianAttentionFor.trim() || "0s",
+          },
+        },
+      };
+      const result = await api.putGuardianPolicy(params, next);
+      setGuardianPolicy(result.policy);
+      setNotice("Guardian alert policy saved");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not save Guardian policy");
+    }
+  };
+
   const broadcast = async () => {
     setSaving(true);
     setError("");
@@ -495,6 +555,11 @@ export default function AlertsPage() {
                   value={partition}
                   onChange={(event) => setPartition(event.target.value)}
                 >
+                  {partitionDenied && (
+                    <option value={partition} disabled>
+                      {partition} (no access)
+                    </option>
+                  )}
                   {partitionOptions.map((name) => (
                     <option key={name} value={name}>
                       {name}
@@ -529,11 +594,44 @@ export default function AlertsPage() {
         <div className="min-h-0 flex-1 overflow-auto p-5">
           {!partition && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
-              Enter a partition to load Sentinel alerts. Partition is the access boundary.
+              {config.accessible_partitions?.length === 0
+                ? "No partitions are available to your identity."
+                : "Enter a partition to load Sentinel alerts. Partition is the access boundary."}
             </div>
           )}
 
-          {tab === "inbox" && partition && (
+          {partitionDenied && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
+              <p>
+                You don't have access to the <span className="font-mono">{partition}</span> partition.
+              </p>
+              {(config.accessible_partitions?.length ?? 0) > 0 ? (
+                <>
+                  <p className="mt-1 text-xs text-amber-200/80">
+                    Choose a partition you can access:
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {config.accessible_partitions?.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        className="btn text-xs"
+                        onClick={() => setPartition(name)}
+                      >
+                        {name}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <p className="mt-1 text-xs text-amber-200/80">
+                  No partitions are available to your identity.
+                </p>
+              )}
+            </div>
+          )}
+
+          {!partitionDenied && tab === "inbox" && partition && (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
               <section className="rounded-lg border border-slate-800 bg-slate-900/50">
                 <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
@@ -648,10 +746,9 @@ export default function AlertsPage() {
                         {selected.acked && <div><CheckCircle2 size={12} className="inline text-emerald-400" /> Acked {selected.ackedBy}</div>}
                         {selected.endsAt && <div><CheckCircle2 size={12} className="inline text-emerald-400" /> Resolved {new Date(selected.endsAt).toLocaleString()}</div>}
                       </div>
-                      <h3 className="mb-2 mt-5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Labels</h3>
-                      <pre className="max-h-48 overflow-auto rounded border border-slate-800 bg-slate-950 p-2 text-[10px] text-slate-300">{JSON.stringify(selected.labels, null, 2)}</pre>
-                      <h3 className="mb-2 mt-5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Annotations</h3>
-                      <pre className="max-h-48 overflow-auto rounded border border-slate-800 bg-slate-950 p-2 text-[10px] text-slate-300">{JSON.stringify(selected.annotations || {}, null, 2)}</pre>
+                      <div className="mt-5">
+                        <AlertMetadata labels={selected.labels} annotations={selected.annotations} />
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -713,7 +810,7 @@ export default function AlertsPage() {
             </section>
           )}
 
-          {tab === "rules" && partition && (
+          {!partitionDenied && tab === "rules" && partition && (
             <AlertRulesTab
               tenant={tenant}
               partition={partition}
@@ -727,7 +824,7 @@ export default function AlertsPage() {
             />
           )}
 
-          {tab === "silences" && partition && (
+          {!partitionDenied && tab === "silences" && partition && (
             <section className="rounded-lg border border-slate-800 bg-slate-900/50">
               <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
                 <div>
@@ -762,7 +859,7 @@ export default function AlertsPage() {
             </section>
           )}
 
-          {tab === "sources" && (
+          {!partitionDenied && tab === "sources" && (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
                 <h2 className="text-sm font-semibold">Sources</h2>
@@ -807,10 +904,79 @@ export default function AlertsPage() {
                 />
                 {gcpPolicy && <p className="mt-2 text-[11px] text-slate-500">Default: {gcpPolicy.default}</p>}
               </section>
+              <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-sm font-semibold">Guardian alert policy</h2>
+                    <p className="text-[11px] text-slate-500">
+                      {partition ? (
+                        <>
+                          Saved per partition — editing{" "}
+                          <span className="font-mono text-slate-400">
+                            {tenant || "default"}/{partition}
+                          </span>
+                          .
+                        </>
+                      ) : (
+                        "Per-partition trigger delays for Guardian source alerts."
+                      )}
+                    </p>
+                  </div>
+                  {partition && (
+                    <button
+                      type="button"
+                      onClick={() => void saveGuardianPolicy()}
+                      disabled={!can(caps, "alerts.sources.write")}
+                      className="btn text-xs"
+                    >
+                      Save
+                    </button>
+                  )}
+                </div>
+                {partition ? (
+                  <>
+                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <label className="text-[11px] text-slate-400">
+                        Attention delay
+                        <input
+                          value={guardianAttentionFor}
+                          onChange={(event) => setGuardianAttentionFor(event.target.value)}
+                          placeholder="0s"
+                          className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
+                        />
+                      </label>
+                      <label className="text-[11px] text-slate-400">
+                        Error delay
+                        <input
+                          value={guardianErrorFor}
+                          onChange={(event) => setGuardianErrorFor(event.target.value)}
+                          placeholder="0s"
+                          className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
+                        />
+                      </label>
+                    </div>
+                    <label className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
+                      <input
+                        type="checkbox"
+                        checked={guardianAlertOnLocked}
+                        onChange={(event) => setGuardianAlertOnLocked(event.target.checked)}
+                      />
+                      Alert on locked drift (off by default)
+                    </label>
+                    <p className="mt-2 text-[10px] text-slate-500">
+                      Use Go durations such as <span className="font-mono">30m</span> or{" "}
+                      <span className="font-mono">2h</span>. <span className="font-mono">0s</span> fires on the first
+                      observation.
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-3 text-[11px] text-slate-500">Select a partition to edit its Guardian policy.</p>
+                )}
+              </section>
             </div>
           )}
 
-          {tab === "receivers" && partition && (
+          {!partitionDenied && tab === "receivers" && partition && (
             <RoutingBoard
               tenant={tenant}
               partition={partition}
@@ -833,7 +999,7 @@ export default function AlertsPage() {
             />
           )}
 
-          {tab === "delivery" && partition && (
+          {!partitionDenied && tab === "delivery" && partition && (
             <section className="rounded-lg border border-slate-800 bg-slate-900/50">
               <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
                 <div>
