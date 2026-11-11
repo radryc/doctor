@@ -19,22 +19,20 @@ func (r *Router) ListServices(ctx context.Context, tenant string) ([]string, []W
 	if err != nil {
 		return nil, accessWarnings, err
 	}
+	results := make([][]string, len(targets))
+	warnings, err := r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
+		services, queryErr := target.upstreams.Traces.ListServices(ctx, tenant)
+		if queryErr != nil {
+			return queryErr
+		}
+		results[target.index] = services
+		return nil
+	})
+	if err != nil {
+		return nil, warnings, err
+	}
 	names := make(map[string]struct{})
-	warnings := append([]Warning(nil), accessWarnings...)
-	for _, target := range targets {
-		upstream := target.upstreams.Traces
-		if upstream == nil {
-			continue
-		}
-		callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
-		services, err := upstream.ListServices(callCtx, tenant)
-		cancel()
-		if err != nil {
-			r.noteBackendFailure(target.backend, err)
-			warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: err.Error()})
-			continue
-		}
-		r.recordSuccess(target.backend.Name)
+	for _, services := range results {
 		for _, service := range services {
 			if service != "" {
 				names[service] = struct{}{}
@@ -55,6 +53,9 @@ func (r *Router) SearchTraces(ctx context.Context, tenant string, search TraceSe
 	targets, accessWarnings, err := r.traceTargetsWithCriteria(ctx, criteria)
 	if err != nil {
 		return nil, accessWarnings, err
+	}
+	if kind := TraceSearchProviderKind(search); kind != "" {
+		targets = filterTraceTargetsByKind(targets, kind)
 	}
 	if search.TraceQL != "" {
 		capable := false
@@ -246,20 +247,24 @@ func (r *Router) TraceTags(ctx context.Context, tenant string) ([]string, []Warn
 	if err != nil {
 		return nil, accessWarnings, err
 	}
-	tags := make(map[string]struct{})
-	warnings := append([]Warning(nil), accessWarnings...)
-	for _, target := range targets {
+	results := make([][]string, len(targets))
+	warnings, err := r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
 		source, ok := target.upstreams.Traces.(TraceTagSource)
 		if !ok {
-			continue
+			return nil
 		}
-		callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
-		names, err := source.TraceTags(callCtx, tenant)
-		cancel()
-		if err != nil {
-			warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: err.Error()})
-			continue
+		names, queryErr := source.TraceTags(ctx, tenant)
+		if queryErr != nil {
+			return queryErr
 		}
+		results[target.index] = names
+		return nil
+	})
+	if err != nil {
+		return nil, warnings, err
+	}
+	tags := make(map[string]struct{})
+	for _, names := range results {
 		for _, name := range names {
 			if name != "" {
 				tags[name] = struct{}{}
@@ -281,20 +286,24 @@ func (r *Router) TraceTagValues(ctx context.Context, tenant, tag string) ([]stri
 	if err != nil {
 		return nil, accessWarnings, err
 	}
-	values := make(map[string]struct{})
-	warnings := append([]Warning(nil), accessWarnings...)
-	for _, target := range targets {
+	results := make([][]string, len(targets))
+	warnings, err := r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
 		source, ok := target.upstreams.Traces.(TraceTagSource)
 		if !ok {
-			continue
+			return nil
 		}
-		callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
-		found, err := source.TraceTagValues(callCtx, tenant, tag)
-		cancel()
-		if err != nil {
-			warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: err.Error()})
-			continue
+		found, queryErr := source.TraceTagValues(ctx, tenant, tag)
+		if queryErr != nil {
+			return queryErr
 		}
+		results[target.index] = found
+		return nil
+	})
+	if err != nil {
+		return nil, warnings, err
+	}
+	values := make(map[string]struct{})
+	for _, found := range results {
 		for _, value := range found {
 			if value != "" {
 				values[value] = struct{}{}
@@ -373,39 +382,43 @@ func (r *Router) TraceTagScopes(ctx context.Context, tenant string) ([]tempo.Tag
 	if err != nil {
 		return nil, accessWarnings, err
 	}
+	scoped := make([][]tempo.TagScope, len(targets))
+	plain := make([][]string, len(targets))
+	warnings, err := r.forEachTraceTarget(ctx, targets, accessWarnings, func(ctx context.Context, target traceTarget) error {
+		if scopeSource, ok := target.upstreams.Traces.(TraceTagScopeSource); ok {
+			scopes, queryErr := scopeSource.TraceTagScopes(ctx, tenant)
+			if queryErr != nil {
+				return queryErr
+			}
+			scoped[target.index] = scopes
+			return nil
+		}
+		if tagSource, ok := target.upstreams.Traces.(TraceTagSource); ok {
+			names, queryErr := tagSource.TraceTags(ctx, tenant)
+			if queryErr != nil {
+				return queryErr
+			}
+			plain[target.index] = names
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, warnings, err
+	}
 	scopeTags := map[string]map[string]struct{}{
 		"intrinsic": {},
 		"resource":  {},
 		"span":      {},
 	}
-	warnings := append([]Warning(nil), accessWarnings...)
-	for _, target := range targets {
-		callCtx, cancel := context.WithTimeout(ctx, r.backendCallTimeout(ctx, target.backend))
-		if scopeSource, ok := target.upstreams.Traces.(TraceTagScopeSource); ok {
-			scopes, scopeErr := scopeSource.TraceTagScopes(callCtx, tenant)
-			cancel()
-			if scopeErr != nil {
-				warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: scopeErr.Error()})
-				continue
-			}
-			for _, scope := range scopes {
-				collectTagScope(scopeTags, scope.Name, scope.Tags)
-			}
-			continue
+	for _, scopes := range scoped {
+		for _, scope := range scopes {
+			collectTagScope(scopeTags, scope.Name, scope.Tags)
 		}
-		if tagSource, ok := target.upstreams.Traces.(TraceTagSource); ok {
-			names, tagErr := tagSource.TraceTags(callCtx, tenant)
-			cancel()
-			if tagErr != nil {
-				warnings = append(warnings, Warning{Backend: target.backend.Name, Signal: SignalTraces, Message: tagErr.Error()})
-				continue
-			}
-			for _, name := range names {
-				collectTagScope(scopeTags, classifyTagScope(name), []string{name})
-			}
-			continue
+	}
+	for _, names := range plain {
+		for _, name := range names {
+			collectTagScope(scopeTags, classifyTagScope(name), []string{name})
 		}
-		cancel()
 	}
 	scopes := make([]tempo.TagScope, 0, len(scopeTags))
 	for _, name := range []string{"intrinsic", "resource", "span"} {

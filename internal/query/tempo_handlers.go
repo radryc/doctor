@@ -416,7 +416,11 @@ func (s *Service) handleTempoSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeProxyWarnings(w, warnings)
-	writeJSON(w, http.StatusOK, tempoSearchResponse(summaries, spanSets))
+	response := tempoSearchResponse(summaries, spanSets)
+	if !s.enforceSeriesLimit(w, r, summaries) {
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // searchSpanSets resolves matched spans for the search. The TraceQL filters are
@@ -784,9 +788,15 @@ func tempoSearchResponse(summaries []proxy.TraceSummary, spanSets map[string]tem
 }
 
 func writeTempoError(w http.ResponseWriter, statusCode int, message string) {
+	cause := ""
 	if statusCode >= http.StatusInternalServerError {
 		log.Printf("tempo error: %s", message)
+		cause = internalCause(message)
 		message = internalErrorMessage
 	}
-	writeJSON(w, statusCode, map[string]any{"status": "error", "error": message})
+	payload := map[string]any{"status": "error", "error": message}
+	if cause != "" {
+		payload["cause"] = cause
+	}
+	writeJSON(w, statusCode, payload)
 }

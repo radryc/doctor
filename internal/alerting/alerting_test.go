@@ -166,9 +166,11 @@ func TestGoAlertDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
 	var forms []url.Values
+	var urls []*url.URL
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		forms = append(forms, r.PostForm)
+		urls = append(urls, r.URL)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -193,7 +195,10 @@ func TestGoAlertDelivery(t *testing.T) {
 	if len(forms) != 1 {
 		t.Fatalf("forms = %d", len(forms))
 	}
-	if forms[0].Get("token") != "key-123" || forms[0].Get("dedup") != alert.Fingerprint {
+	if len(urls) != 1 || urls[0].Query().Get("token") != "key-123" {
+		t.Fatalf("goalert firing token url = %#v", urls)
+	}
+	if forms[0].Get("dedup") != alert.Fingerprint {
 		t.Fatalf("goalert firing form = %#v", forms[0])
 	}
 	if forms[0].Get("action") != "" {

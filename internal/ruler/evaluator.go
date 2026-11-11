@@ -35,13 +35,13 @@ type Evaluator struct {
 
 // EvalResult summarizes one rule evaluation.
 type EvalResult struct {
-	Tenant  string `json:"tenant"`
-	Group   string `json:"group"`
-	Rule    string `json:"rule"`
-	Samples int    `json:"samples"`
-	Skipped bool   `json:"skipped,omitempty"`
-	Partial bool   `json:"partial,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Partition string `json:"partition"`
+	Group     string `json:"group"`
+	Rule      string `json:"rule"`
+	Samples   int    `json:"samples"`
+	Skipped   bool   `json:"skipped,omitempty"`
+	Partial   bool   `json:"partial,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // EvaluateGroup evaluates every rule in a group.
@@ -55,7 +55,7 @@ func (e *Evaluator) EvaluateGroup(ctx context.Context, group Group) []EvalResult
 
 // EvaluateRule evaluates one recording rule.
 func (e *Evaluator) EvaluateRule(ctx context.Context, group Group, rule Rule) EvalResult {
-	result := EvalResult{Tenant: group.Tenant, Group: group.Name, Rule: rule.Record}
+	result := EvalResult{Partition: group.Partition, Group: group.Name, Rule: rule.Record}
 	now := e.now()
 	at := now.Add(-group.EvaluationDelayOrDefault())
 
@@ -188,10 +188,11 @@ func (e *Evaluator) recordFor(group Group, rule Rule, sample mergedSample, at ti
 	attributes["rule_group"] = group.Name
 	attributes["rule"] = rule.Record
 	return segment.MetricPointRecord{
-		Tenant:     group.Tenant,
+		Partition:  group.Partition,
 		Service:    service,
 		MetricName: rule.Record,
 		Type:       "gauge",
+		MetricType: "gauge",
 		Timestamp:  at,
 		HasValue:   true,
 		Value:      sample.value,

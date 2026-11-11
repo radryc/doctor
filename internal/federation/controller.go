@@ -158,10 +158,17 @@ func (c *Controller) Run(ctx context.Context, once bool) error {
 			// replica take over within the lease TTL instead of waiting for a
 			// full rebuild interval.
 			leaseCtx, cancelLease := context.WithCancel(ctx)
-			go c.renewLease(leaseCtx)
-			if err := c.Sync(ctx); err != nil {
+			syncCtx, cancelSync := context.WithCancel(ctx)
+			lost := make(chan struct{})
+			go c.renewLease(leaseCtx, func() {
+				close(lost)
+				// Abort an in-flight publish as soon as leadership is lost.
+				cancelSync()
+			})
+			if err := c.Sync(syncCtx); err != nil {
 				c.Config.Logger.Printf("federation controller: sync failed: %v", err)
 			}
+			cancelSync()
 			wait := c.Config.Interval
 			if jitterRange := wait / 10; jitterRange > 0 {
 				wait += time.Duration(rand.Int63n(int64(jitterRange)))
@@ -171,6 +178,8 @@ func (c *Controller) Run(ctx context.Context, once bool) error {
 				cancelLease()
 				_ = c.Lease.Release(context.Background())
 				return nil
+			case <-lost:
+				c.Config.Logger.Printf("federation controller: stopped publishing after losing the leader lease")
 			case <-time.After(wait):
 			}
 			cancelLease()
@@ -185,7 +194,7 @@ func (c *Controller) Run(ctx context.Context, once bool) error {
 	}
 }
 
-func (c *Controller) renewLease(ctx context.Context) {
+func (c *Controller) renewLease(ctx context.Context, onLost func()) {
 	interval := c.Config.LeaseTTL / 3
 	if interval < 10*time.Second {
 		interval = 10 * time.Second
@@ -199,10 +208,14 @@ func (c *Controller) renewLease(ctx context.Context) {
 		case <-ticker.C:
 			ok, err := c.Lease.Renew(ctx)
 			if err != nil {
+				// A transient store error is not proof that another replica
+				// took the lease; keep trying instead of prematurely stopping.
 				c.Config.Logger.Printf("federation controller: leader lease renew failed: %v", err)
+				continue
 			}
 			if !ok {
 				c.Config.Logger.Printf("federation controller: leader lease lost")
+				onLost()
 				return
 			}
 		}

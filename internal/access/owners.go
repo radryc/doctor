@@ -26,8 +26,9 @@ type Owners struct {
 	Root     string
 	CacheTTL time.Duration
 
-	mu    sync.Mutex
-	cache map[string]*ownersEntry
+	mu       sync.Mutex
+	cache    map[string]*ownersEntry
+	inflight map[string]chan struct{}
 }
 
 type ownersEntry struct {
@@ -48,6 +49,7 @@ func NewOwners(source OwnersSource, mapping authz.TeamMapping, root string, cach
 		Root:     root,
 		CacheTTL: TTLDuration(cacheTTL),
 		cache:    make(map[string]*ownersEntry),
+		inflight: make(map[string]chan struct{}),
 	}
 }
 
@@ -101,20 +103,49 @@ func (o *Owners) grantsFor(ctx context.Context, dir, partition string) ([]authz.
 		o.mu.Unlock()
 		return grants, nil
 	}
+	// Deduplicate concurrent loads for the same directory: a cache expiry
+	// under request load would otherwise issue one MonoFS read per caller.
+	if ch, ok := o.inflight[dir]; ok {
+		o.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return o.grantsFor(ctx, dir, partition)
+	}
+	if o.inflight == nil {
+		o.inflight = make(map[string]chan struct{})
+	}
+	ch := make(chan struct{})
+	o.inflight[dir] = ch
 	o.mu.Unlock()
+
+	var (
+		grants   []authz.Grant
+		loadErr  error
+		finished bool
+	)
+	defer func() {
+		o.mu.Lock()
+		if finished && loadErr == nil {
+			o.cache[dir] = &ownersEntry{version: version, grants: grants, loadedAt: now}
+		}
+		delete(o.inflight, dir)
+		close(ch)
+		o.mu.Unlock()
+	}()
 
 	owners, err := o.Source.LoadOwners(ctx, dir)
 	if err != nil {
+		loadErr = err
+		finished = true
 		return nil, err
 	}
-	var grants []authz.Grant
 	if owners != nil {
 		grants, _ = authz.CompileGrants(partition, owners, o.Mapping)
 	}
-
-	o.mu.Lock()
-	o.cache[dir] = &ownersEntry{version: version, grants: grants, loadedAt: now}
-	o.mu.Unlock()
+	finished = true
 	return grants, nil
 }
 

@@ -21,8 +21,10 @@ import (
 	"github.com/radryc/doctor/internal/netguard"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/query"
+	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/ruler"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
+	gcpstore "github.com/radryc/doctor/internal/store/gcp"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/doctor/internal/telemetry"
 	"github.com/radryc/monofs/pkg/authz"
@@ -69,11 +71,18 @@ func main() {
 		log.Fatal("DOCTOR_MONOFS_LOGENGINE_ADDR is required (logengine is the only supported storage backend)")
 	}
 
-	leClient, err := monofsstore.NewLogEngineClient(ctx, cfg.MonoFSLogEngineAddr)
+	leClient, err := monofsstore.NewLogEngineClientWithToken(ctx, cfg.MonoFSLogEngineAddr, cfg.MonoFSToken)
 	if err != nil {
 		log.Fatalf("connect to monofs logengine at %s: %v", cfg.MonoFSLogEngineAddr, err)
 	}
 	defer leClient.Close()
+	telemetryEngine := ""
+	if engine, err := leClient.TelemetryEngine(ctx); err != nil {
+		log.Printf("could not detect MonoFS telemetry engine: %v", err)
+	} else {
+		telemetryEngine = engine
+		log.Printf("MonoFS telemetry engine: %s", engine)
+	}
 	log.Printf("using monofs logengine backend at %s", cfg.MonoFSLogEngineAddr)
 
 	svc := query.NewServiceLogEngine(leClient, cfg.DefaultTenant)
@@ -146,22 +155,29 @@ func main() {
 		log.Printf("federation token resolver enabled: %s", tokenSource)
 	}
 
-	var awsClient proxy.AWSClient
+	var (
+		awsClient         proxy.AWSClient
+		gcpClient         proxy.GCPClient
+		awsBackendEnabled bool
+		awsFederated      bool
+		gcpFederated      bool
+	)
 	switch {
 	case cfg.FederationEnabled:
 		catalog, source, catalogStore, catalogErr := loadFederationCatalog(ctx, cfg, sharedFS)
 		if catalogErr != nil {
 			if errors.Is(catalogErr, federation.ErrSnapshotNotFound) && cfg.AWSEnabled && cfg.AWSBackendURL != "" {
-				log.Printf("aws federation catalog not found (%v); falling back to legacy single backend %s", catalogErr, cfg.AWSBackendURL)
+				log.Printf("federation catalog not found (%v); falling back to legacy single AWS backend %s", catalogErr, cfg.AWSBackendURL)
 				legacy := awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
 				awsClient = legacy
+				awsBackendEnabled = true
 				svc.SetAWSBackend(legacy)
 			} else {
-				log.Fatalf("load aws federation catalog: %v", catalogErr)
+				log.Fatalf("load federation catalog: %v", catalogErr)
 			}
 			break
 		}
-		manager := federation.NewManager(catalog, federation.Options{
+		opts := federation.Options{
 			MaxFanout:            cfg.FederationMaxFanout,
 			MaxInflight:          cfg.FederationMaxInflight,
 			MaxConcurrentTargets: cfg.FederationMaxConcurrentTargets,
@@ -175,35 +191,75 @@ func main() {
 			StaleAfter:           cfg.FederationStaleAfter,
 			Source:               source,
 			TokenResolver:        federationTokens,
-		})
-		awsClient = manager
-		svc.SetAWSBackend(manager)
-		catalogMetrics, metricsErr := federation.RegisterCatalogMetrics(manager)
+		}
+		managers := make([]*federation.Manager, 0, 2)
+		var awsManager, gcpManager *federation.Manager
+		if awsCatalog := catalog.FilterProvider("aws"); awsCatalog != nil {
+			awsManager = federation.NewManager(awsCatalog, opts)
+			managers = append(managers, awsManager)
+			awsBackendEnabled = true
+			awsFederated = true
+		}
+		if gcpCatalog := catalog.FilterProvider("gcp"); gcpCatalog != nil {
+			gcpManager = federation.NewManager(gcpCatalog, opts)
+			managers = append(managers, gcpManager)
+			gcpClient = federation.NewGCPClientAdapter(gcpManager)
+			svc.SetGCPBackend(gcpClient)
+			gcpFederated = true
+		}
+		if len(managers) == 0 {
+			log.Fatalf("federation catalog has no aws or gcp targets")
+		}
+		awsClient = federation.NewMulti(awsManager, managers...)
+		svc.SetAWSBackend(awsClient)
+
+		catalogMetrics, metricsErr := federation.RegisterCatalogMetrics(managers[0])
 		if metricsErr != nil {
 			log.Printf("federation catalog metrics disabled: %v", metricsErr)
 		} else {
-			manager.SetMetrics(catalogMetrics)
+			managers[0].SetMetrics(catalogMetrics)
 			defer func() { _ = catalogMetrics.Unregister() }()
 		}
 		if catalogStore != nil && cfg.FederationReloadInterval > 0 {
-			reloader := federation.NewCatalogReloader(
-				catalogStore,
-				manager,
-				federationReloadSource(cfg, source),
-				cfg.FederationReloadInterval,
-				log.Default(),
-			)
-			reloader.Metrics = catalogMetrics
-			go reloader.Run(ctx)
+			for idx, manager := range managers {
+				provider := "gcp"
+				if idx == 0 && awsManager != nil {
+					provider = "aws"
+				}
+				reloader := federation.NewCatalogReloader(
+					catalogStore,
+					manager,
+					federationReloadSource(cfg, source),
+					cfg.FederationReloadInterval,
+					log.Default(),
+				)
+				reloader.Filter = func(c *federation.Catalog) *federation.Catalog {
+					return c.FilterProvider(provider)
+				}
+				if idx == 0 {
+					reloader.Metrics = catalogMetrics
+				}
+				go reloader.Run(ctx)
+			}
 			log.Printf("federation catalog reload enabled every %s", cfg.FederationReloadInterval)
 		}
-		go manager.Run(ctx)
-		log.Printf("multi-account aws federation enabled with %d target(s) from %s", catalog.Len(), source)
+		for _, manager := range managers {
+			go manager.Run(ctx)
+		}
+		log.Printf("federation enabled with %d provider manager(s), %d target(s) from %s", len(managers), catalog.Len(), source)
 	case cfg.AWSEnabled && cfg.AWSBackendURL != "":
 		legacy := awsstore.NewClient(cfg.AWSBackendURL, cfg.AWSBackendToken)
 		awsClient = legacy
+		awsBackendEnabled = true
 		svc.SetAWSBackend(legacy)
 		log.Printf("aws federation enabled via %s (legacy single backend)", cfg.AWSBackendURL)
+	}
+
+	if cfg.GCPEnabled && cfg.GCPBackendURL != "" && gcpClient == nil {
+		legacy := gcpstore.NewClient(cfg.GCPBackendURL, cfg.GCPBackendToken)
+		gcpClient = legacy
+		svc.SetGCPBackend(legacy)
+		log.Printf("gcp federation enabled via %s (legacy single backend)", cfg.GCPBackendURL)
 	}
 
 	gate, authMiddleware, webAuth, cleanup, err := setupSecurity(ctx, cfg)
@@ -214,15 +270,47 @@ func main() {
 		defer cleanup()
 	}
 	if cfg.ProxyEnabled {
-		setupProxyRouter(ctx, cfg, svc, awsClient, gate)
-		if awsClient != nil {
+		setupProxyRouter(ctx, cfg, svc, awsClient, awsBackendEnabled, awsFederated, gcpClient, gcpFederated, gate, telemetryEngine)
+		if awsBackendEnabled {
 			svc.SetAWSViaRouter(true)
+		}
+		if gcpClient != nil {
+			svc.SetGCPViaRouter(true)
 		}
 	}
 
 	handler := svc.Handler()
-	// Request-level policy gate runs inside auth so identity is available;
-	// record-level filtering lives in the backend decorator.
+	var quotaEngine *quota.Engine
+	if cfg.Quota.Enabled {
+		opts := quota.ProviderOptions{
+			PolicyURL:   cfg.Quota.PolicyURL,
+			PolicyToken: cfg.Quota.PolicyToken,
+			Interval:    cfg.Quota.Interval,
+			Defaults:    cfg.Quota.Defaults,
+			Enforce:     cfg.Quota.Enforce,
+			Logger:      log.Default(),
+		}
+		if policyGate != nil {
+			// Share the access-policy loader so quotas and ACLs always agree on
+			// one bundle version.
+			opts.PolicyFunc = policyGate.CurrentPolicy
+			opts.PolicyURL = ""
+		}
+		provider := quota.NewProvider(opts)
+		go provider.Run(ctx)
+		quotaEngine = quota.NewEngine(provider, cfg.Quota.Replicas, log.Default())
+		svc.SetQuota(provider, quotaEngine)
+		svc.SetIngestUsage(cfg.IngestURL, cfg.IngestToken)
+		log.Printf("query quota enabled (policy=%q replicas=%d enforce=%v observe-first=%v ingest=%q)",
+			cfg.Quota.PolicyURL, cfg.Quota.Replicas, cfg.Quota.Enforce, !cfg.Quota.Enforce, cfg.IngestURL)
+	}
+	// Request-level quota and policy gates run inside auth so identity is
+	// available; record-level policy filtering lives in the backend decorator.
+	// Quota is wrapped first so a policy denial is evaluated before admitting
+	// the request to a quota bucket.
+	if quotaEngine != nil {
+		handler = quotaEngine.Middleware(handler)
+	}
 	if policyGate != nil {
 		handler = policyGate.Middleware(handler)
 	}
@@ -300,10 +388,16 @@ func setupSecurity(ctx context.Context, cfg config.QueryConfig) (*access.Gate, *
 
 	webAuth, err := auth.NewWebAuthenticator(ctx, authCfg, verifier)
 	if err != nil {
+		if cfg.OIDCRequireLogin {
+			return nil, nil, nil, nil, fmt.Errorf("browser login is required but OIDC discovery failed: %w", err)
+		}
 		log.Printf("browser login disabled: %v", err)
 		webAuth = nil
 	} else if webAuth != nil {
 		log.Printf("browser login enabled (client=%q)", cfg.OIDCClientID)
+	}
+	if webAuth == nil && cfg.OIDCRequireLogin {
+		return nil, nil, nil, nil, errors.New("DOCTOR_OIDC_REQUIRE_LOGIN is set but browser login is not configured (issuer, client id, client secret, and redirect URL are required)")
 	}
 
 	resolver, cleanup, err := buildAccessResolver(ctx, cfg)
@@ -395,10 +489,10 @@ func loadTeamMapping(raw string) (authz.TeamMapping, error) {
 }
 
 // setupProxyRouter wires the multi-backend registry and router: local MonoFS
-// storage is always the "doctor" backend, AWS is registered with the legacy
+// storage is always the "monofs" backend, AWS is registered with the legacy
 // fallback policy, and additional backends come from the static file and
 // Guardian discovery.
-func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient proxy.AWSClient, gate *access.Gate) {
+func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Service, awsClient proxy.AWSClient, awsBackendEnabled, awsFederated bool, gcpClient proxy.GCPClient, gcpFederated bool, gate *access.Gate, telemetryEngine string) {
 	urlPolicy := netguard.Policy{
 		RequireHTTPS:  cfg.BackendRequireHTTPS,
 		AllowLoopback: cfg.BackendAllowLoopback,
@@ -445,8 +539,9 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 	}, proxy.NewCompositeRegistry(registries...))
 
 	localBackend := proxy.Backend{
-		Name:    "doctor",
+		Name:    "monofs",
 		Kind:    proxy.KindMonoFS,
+		Engine:  telemetryEngine,
 		Signals: []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs, proxy.SignalTraces},
 		Policy:  proxy.PolicyAlways,
 		Origin:  "local",
@@ -458,11 +553,10 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 	}); err != nil {
 		log.Fatalf("register local proxy backend: %v", err)
 	}
-	if awsClient != nil {
-		federated := false
+	if awsClient != nil && awsBackendEnabled {
+		federated := awsFederated
 		origin := "config"
-		if _, ok := awsClient.(*federation.Manager); ok {
-			federated = true
+		if federated {
 			origin = "aws-federated"
 		}
 		awsBackend := proxy.Backend{
@@ -481,6 +575,29 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 			Traces:  awsUpstream,
 		}); err != nil {
 			log.Fatalf("register aws proxy backend: %v", err)
+		}
+	}
+	if gcpClient != nil {
+		origin := "config"
+		if gcpFederated {
+			origin = "gcp-federated"
+		}
+		gcpBackend := proxy.Backend{
+			Name:       "gcp",
+			Kind:       proxy.KindGCP,
+			Signals:    []proxy.Signal{proxy.SignalMetrics, proxy.SignalLogs, proxy.SignalTraces},
+			Policy:     proxy.PolicyFallback,
+			OwnersPath: "/doctor/v1/endpoints/gcp",
+			Origin:     origin,
+			Federated:  gcpFederated,
+		}
+		gcpUpstream := svc.GCPUpstream()
+		if err := router.Register(gcpBackend, proxy.Upstreams{
+			Metrics: gcpUpstream,
+			Logs:    gcpUpstream,
+			Traces:  gcpUpstream,
+		}); err != nil {
+			log.Fatalf("register gcp proxy backend: %v", err)
 		}
 	}
 	svc.SetProxyRouter(router)

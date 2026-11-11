@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	promparser "github.com/prometheus/prometheus/promql/parser"
 	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/telemetrylabels"
 )
 
 // This file federates CloudWatch metrics into the Prometheus API using
@@ -62,28 +63,25 @@ func filterPrometheusDataByPartitionWith(data map[string]any, partition string, 
 			continue
 		}
 		labels, source := prometheusSeriesLabels(entry)
-		value := firstNonEmpty(
-			labels["guardian_partition"],
-			labels["@aws.tag.guardian.io/partition"],
-			labels["@aws.tag.strata.io/partition"],
-			labels["partition"],
-		)
-		if value == partition {
+		value := telemetrylabels.PartitionValue(labels)
+		if telemetrylabels.MatchesPartition(labels, partition) {
 			filtered = append(filtered, item)
 			continue
 		}
 		// Dimension-only AWS series may not carry a partition tag. Keep them
 		// only when the policy binding proves they belong to the selected
 		// partition; otherwise a partition filter would leak other accounts.
-		if value == "" && source == proxy.SourceAWS {
+		if source == proxy.SourceAWS {
 			if canonicalize == nil {
-				filtered = append(filtered, item)
+				if value == "" {
+					filtered = append(filtered, item)
+				}
 				continue
 			}
-			account := firstNonEmpty(labels["@aws.account"], labels["aws_account"], labels["account"])
-			region := firstNonEmpty(labels["@aws.region"], labels["aws_region"], labels["region"])
+			account := firstNonEmpty(labels[telemetrylabels.AWSAccount], labels["aws_account"], labels["account"])
+			region := firstNonEmpty(labels[telemetrylabels.AWSRegion], labels["aws_region"], labels["region"])
 			if account != "" || region != "" {
-				if canonicalize(account, region, "") == partition {
+				if canonicalize(account, region, value) == partition {
 					filtered = append(filtered, item)
 				}
 			}
@@ -120,11 +118,6 @@ func filterPrometheusDataByLabel(data map[string]any, value string, keys ...stri
 	return data
 }
 
-var (
-	prometheusIntentLabels = []string{"guardian_intent", "@aws.tag.guardian.io/intent", "@aws.tag.strata.io/intent", "intent"}
-	prometheusAssetLabels  = []string{"guardian_asset", "@aws.tag.guardian.io/asset", "@aws.tag.strata.io/asset", "asset"}
-)
-
 // filterPrometheusDataByIdentity applies the UI's partition/intent/asset
 // filters to a merged Prometheus result. It runs for local, federated, and
 // router-backed queries so every signal uses the same identity fields. The
@@ -145,8 +138,8 @@ func (s *Service) filterPrometheusDataForRequest(r *http.Request, data map[strin
 func filterPrometheusDataByIdentityWith(r *http.Request, data map[string]any, canonicalize func(account, region, current string) string) map[string]any {
 	identity := identityFromRequest(r)
 	data = filterPrometheusDataByPartitionWith(data, identity.Partition, canonicalize)
-	data = filterPrometheusDataByLabel(data, identity.Intent, prometheusIntentLabels...)
-	data = filterPrometheusDataByLabel(data, identity.Asset, prometheusAssetLabels...)
+	data = filterPrometheusDataByLabel(data, identity.Intent, telemetrylabels.IntentKeys...)
+	data = filterPrometheusDataByLabel(data, identity.Asset, telemetrylabels.AssetKeys...)
 	return data
 }
 
@@ -191,7 +184,9 @@ func prometheusResultEmpty(data map[string]any) bool {
 func (s *Service) execPrometheusInstant(ctx context.Context, tenant, partition, queryString string, at time.Time) (map[string]any, error, bool) {
 	// Presence aggregations (count by (__name__)) are answered from the chunk
 	// series index instead of scanning samples.
-	if expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString); parseErr == nil {
+	expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString)
+	synthesizeHistograms := parseErr == nil && queryNeedsNativeHistograms(expr)
+	if parseErr == nil {
 		if plan, ok := countByNamePlanFor(expr); ok {
 			data, fastErr := s.execCountByNameInstant(ctx, tenant, partition, plan, at)
 			if fastErr != nil {
@@ -206,7 +201,7 @@ func (s *Service) execPrometheusInstant(ctx context.Context, tenant, partition, 
 
 	query, err := engine.NewInstantQuery(
 		ctx,
-		doctorPromQueryable{backend: s.logEngine, tenant: tenant, partition: partition},
+		doctorPromQueryable{backend: s.logEngine, tenant: tenant, partition: partition, synthesizeHistograms: synthesizeHistograms},
 		promql.NewPrometheusQueryOpts(false, doctorPrometheusLookback),
 		queryString,
 		at,
@@ -232,6 +227,7 @@ func (s *Service) execPrometheusRange(ctx context.Context, tenant, partition, qu
 	// Presence aggregations (count by (__name__)) are answered from the chunk
 	// series index instead of scanning samples.
 	expr, parseErr := promparser.NewParser(promparser.Options{}).ParseExpr(queryString)
+	synthesizeHistograms := parseErr == nil && queryNeedsNativeHistograms(expr)
 	if parseErr == nil {
 		if plan, ok := countByNamePlanFor(expr); ok {
 			data, fastErr := s.execCountByNameRange(ctx, tenant, partition, plan, start, end, step)
@@ -250,7 +246,7 @@ func (s *Service) execPrometheusRange(ctx context.Context, tenant, partition, qu
 
 	query, err := engine.NewRangeQuery(
 		ctx,
-		doctorPromQueryable{backend: s.logEngine, tenant: tenant, partition: partition},
+		doctorPromQueryable{backend: s.logEngine, tenant: tenant, partition: partition, synthesizeHistograms: synthesizeHistograms},
 		promql.NewPrometheusQueryOpts(false, doctorPrometheusLookback),
 		queryString,
 		start,

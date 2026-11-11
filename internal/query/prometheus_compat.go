@@ -19,13 +19,17 @@ import (
 	"time"
 
 	promclient "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/prometheus/model/histogram"
 	promlabels "github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql"
 	promparser "github.com/prometheus/prometheus/promql/parser"
 	promstorage "github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/annotations"
 	"github.com/radryc/doctor/internal/buildinfo"
+	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -122,27 +126,30 @@ func doctorDiscoveryQuery(mode string, matchers []*promlabels.Matcher) segment.M
 }
 
 type doctorPromQueryable struct {
-	backend   LogEngineBackend
-	tenant    string
-	partition string
+	backend              LogEngineBackend
+	tenant               string
+	partition            string
+	synthesizeHistograms bool
 }
 
 func (q doctorPromQueryable) Querier(mint, maxt int64) (promstorage.Querier, error) {
 	return &doctorPromQuerier{
-		backend:   q.backend,
-		tenant:    q.tenant,
-		partition: strings.TrimSpace(q.partition),
-		mint:      mint,
-		maxt:      maxt,
+		backend:              q.backend,
+		tenant:               q.tenant,
+		partition:            strings.TrimSpace(q.partition),
+		synthesizeHistograms: q.synthesizeHistograms,
+		mint:                 mint,
+		maxt:                 maxt,
 	}, nil
 }
 
 type doctorPromQuerier struct {
-	backend   LogEngineBackend
-	tenant    string
-	partition string
-	mint      int64
-	maxt      int64
+	backend              LogEngineBackend
+	tenant               string
+	partition            string
+	synthesizeHistograms bool
+	mint                 int64
+	maxt                 int64
 
 	// loadedSamples counts the samples this querier holds against the global
 	// budget; released on Close.
@@ -389,40 +396,36 @@ func (q *doctorPromQuerier) seriesLabelMaps(ctx context.Context, matchers []*pro
 
 func (q *doctorPromQuerier) discoverMetricNames(ctx context.Context) ([]string, annotations.Annotations, error) {
 	values := make(map[string]struct{})
+	query := doctorDiscoveryQuery(doctorMetricDiscoveryModeNames, nil)
 	if q.partition != "" {
-		err := q.forEachSeriesLabels(ctx, nil, func(labelSet promlabels.Labels) {
-			if name := labelSet.Get(promlabels.MetricName); name != "" {
-				values[name] = struct{}{}
-			}
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		out := make([]string, 0, len(values))
-		for value := range values {
-			out = append(out, value)
-		}
-		sort.Strings(out)
-		return out, nil, nil
-	}
-
-	points, err := q.backend.QueryMetrics(ctx, q.tenant, segment.MetricQuery{
-		LabelMatchers: []segment.MetricLabelMatcher{{
-			Name:  doctorMetricDiscoveryMatcherName,
-			Value: doctorMetricDiscoveryModeNames,
+		// Manifest discovery prunes chunks by the stored (dotted) partition
+		// label. MonoFS then produces the exact partition-scoped name set from
+		// the per-chunk series index without retaining full label maps.
+		query.LabelMatchers = append(query.LabelMatchers, segment.MetricLabelMatcher{
+			Name:  attrGuardianPartition,
+			Value: q.partition,
 			Type:  segment.MetricMatchEqual,
-		}},
-	}, timeFromPromMillis(q.mint), timeFromPromMillis(q.maxt))
-	if err != nil {
-		return nil, nil, err
+		})
 	}
 
-	for _, point := range points {
-		name := normalizePrometheusMetricName(point.MetricName)
+	scanned := 0
+	err := q.backend.StreamMetrics(ctx, q.tenant, query, timeFromPromMillis(q.mint), timeFromPromMillis(q.maxt), func(record segment.MetricPointRecord) error {
+		if scanned >= maxDiscoveryScannedRecords {
+			return errDiscoveryScanLimit
+		}
+		scanned++
+		name := normalizePrometheusMetricName(record.MetricName)
 		if name == "" {
-			continue
+			return nil
 		}
 		values[name] = struct{}{}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errDiscoveryScanLimit) {
+		if status.Code(err) == codes.ResourceExhausted {
+			return nil, nil, errMetricQueryTooBroad
+		}
+		return nil, nil, err
 	}
 
 	out := make([]string, 0, len(values))
@@ -532,6 +535,53 @@ func (q *doctorPromQuerier) load(ctx context.Context, matchers []*promlabels.Mat
 	return index, nil
 }
 
+// nativeHistogramFunctions are the PromQL functions that can consume native
+// histograms. Doctor stores classic _bucket/_count/_sum series, so buildIndex
+// can synthesize a native histogram family on demand for these functions
+// without changing the storage schema. histogram_quantile and
+// histogram_fraction also accept classic bucket vectors; their base-name form
+// needs the synthesized family, while explicit `_bucket` selectors keep using
+// the classic path untouched.
+var nativeHistogramFunctions = map[string]struct{}{
+	"histogram_avg":      {},
+	"histogram_count":    {},
+	"histogram_fraction": {},
+	"histogram_quantile": {},
+	"histogram_stddev":   {},
+	"histogram_stdvar":   {},
+	"histogram_sum":      {},
+}
+
+// queryNeedsNativeHistograms reports whether expr contains a function that
+// cannot be evaluated from float samples alone.
+func queryNeedsNativeHistograms(expr promparser.Expr) bool {
+	needed := false
+	promparser.Inspect(expr, func(node promparser.Node, _ []promparser.Node) error {
+		call, ok := node.(*promparser.Call)
+		if !ok || call.Func == nil {
+			return nil
+		}
+		if _, ok := nativeHistogramFunctions[call.Func.Name]; ok {
+			needed = true
+		}
+		return nil
+	})
+	return needed
+}
+
+func (q *doctorPromQuerier) accountSample(samples *int) error {
+	*samples++
+	if int64(*samples) > maxQueryLoadedSamples {
+		return errMetricQueryTooBroad
+	}
+	if globalLoadedSamples.Add(1) > maxGlobalLoadedSamples {
+		globalLoadedSamples.Add(-1)
+		return errMetricQueryTooBroad
+	}
+	q.loadedSamples.Add(1)
+	return nil
+}
+
 // buildIndex streams matching metric points straight into the PromQL series
 // index. It never buffers raw records (unlike a QueryMetrics call), and it stops
 // with errMetricQueryTooBroad once the sample or series budget is exhausted so a
@@ -552,6 +602,13 @@ func (q *doctorPromQuerier) buildIndex(ctx context.Context, matchers []*promlabe
 		return nil, err
 	}
 	if names != nil && len(names) == 0 {
+		if q.synthesizeHistograms {
+			if index, ok, synthErr := q.buildHistogramFamilyIndex(ctx, matchers, from, to); synthErr != nil {
+				return nil, synthErr
+			} else if ok {
+				return index, nil
+			}
+		}
 		// The selector named metrics that the store does not have; do not scan.
 		return emptyDoctorPromIndex(), nil
 	}
@@ -565,15 +622,9 @@ func (q *doctorPromQuerier) buildIndex(ctx context.Context, matchers []*promlabe
 		if !point.HasValue || point.MetricName == "" || point.Timestamp.IsZero() {
 			return nil
 		}
-		samples++
-		if int64(samples) > maxQueryLoadedSamples {
-			return errMetricQueryTooBroad
+		if err := q.accountSample(&samples); err != nil {
+			return err
 		}
-		if globalLoadedSamples.Add(1) > maxGlobalLoadedSamples {
-			globalLoadedSamples.Add(-1)
-			return errMetricQueryTooBroad
-		}
-		q.loadedSamples.Add(1)
 		labelSet := metricPointLabels(point)
 		key := string(labelSet.Bytes(nil))
 		series := builders[key]
@@ -629,6 +680,285 @@ func (q *doctorPromQuerier) buildIndex(ctx context.Context, matchers []*promlabe
 		}
 	}
 	return finalizeDoctorPromIndex(builders, labelsByKey), nil
+}
+
+// histogramSeries accumulates classic histogram bucket/count/sum points for one
+// label set before they are converted into native histogram samples.
+type histogramSeries struct {
+	labels  promlabels.Labels
+	buckets map[int64]map[float64]float64
+	counts  map[int64]float64
+	sums    map[int64]float64
+}
+
+func newHistogramSeries(labels promlabels.Labels) *histogramSeries {
+	return &histogramSeries{
+		labels:  labels,
+		buckets: make(map[int64]map[float64]float64),
+		counts:  make(map[int64]float64),
+		sums:    make(map[int64]float64),
+	}
+}
+
+// buildHistogramFamilyIndex synthesizes a native histogram series from the
+// classic _bucket/_count/_sum siblings of an exact base metric name. It is used
+// only for PromQL functions that ignore float samples.
+func (q *doctorPromQuerier) buildHistogramFamilyIndex(ctx context.Context, matchers []*promlabels.Matcher, from, to time.Time) (*doctorPromIndex, bool, error) {
+	baseName := exactPromMetricNameMatcher(matchers)
+	if baseName == "" {
+		return nil, false, nil
+	}
+
+	rawNames, err := q.discoverRawMetricNames(ctx, from, to)
+	if err != nil {
+		return nil, false, translateMetricLoadError(err)
+	}
+	byNormalized := make(map[string]string, len(rawNames))
+	for _, rawName := range rawNames {
+		byNormalized[normalizePrometheusMetricName(rawName)] = rawName
+	}
+	bucketName := byNormalized[normalizePrometheusMetricName(baseName+"_bucket")]
+	if bucketName == "" {
+		return nil, false, nil
+	}
+
+	base := segment.MetricQuery{Service: exactServiceMatcher(matchers)}
+	seriesByKey := make(map[string]*histogramSeries)
+	order := make([]string, 0)
+	samples := 0
+
+	seriesFor := func(point segment.MetricPointRecord) *histogramSeries {
+		labelSet := metricPointLabels(histogramBasePoint(point, baseName))
+		key := string(labelSet.Bytes(nil))
+		series := seriesByKey[key]
+		if series != nil {
+			return series
+		}
+		if len(seriesByKey) >= maxQueryLoadedSeries {
+			return nil
+		}
+		series = newHistogramSeries(labelSet)
+		seriesByKey[key] = series
+		order = append(order, key)
+		return series
+	}
+
+	emitBucket := func(point segment.MetricPointRecord) error {
+		if !point.HasValue || point.Timestamp.IsZero() {
+			return nil
+		}
+		bound, ok := histogramBucketBound(point)
+		if !ok {
+			return nil
+		}
+		if err := q.accountSample(&samples); err != nil {
+			return err
+		}
+		series := seriesFor(point)
+		if series == nil {
+			return errMetricQueryTooBroad
+		}
+		timestamp := point.Timestamp.UTC().UnixMilli()
+		if series.buckets[timestamp] == nil {
+			series.buckets[timestamp] = make(map[float64]float64)
+		}
+		series.buckets[timestamp][bound] = point.Value
+		return nil
+	}
+
+	emitValue := func(point segment.MetricPointRecord, pick func(*histogramSeries) map[int64]float64) error {
+		if !point.HasValue || point.Timestamp.IsZero() {
+			return nil
+		}
+		if err := q.accountSample(&samples); err != nil {
+			return err
+		}
+		series := seriesFor(point)
+		if series == nil {
+			return errMetricQueryTooBroad
+		}
+		pick(series)[point.Timestamp.UTC().UnixMilli()] = point.Value
+		return nil
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type metricStream struct {
+		name string
+		emit func(segment.MetricPointRecord) error
+	}
+	streams := []metricStream{{name: bucketName, emit: emitBucket}}
+	if countName := byNormalized[normalizePrometheusMetricName(baseName+"_count")]; countName != "" {
+		streams = append(streams, metricStream{
+			name: countName,
+			emit: func(point segment.MetricPointRecord) error {
+				return emitValue(point, func(series *histogramSeries) map[int64]float64 { return series.counts })
+			},
+		})
+	}
+	if sumName := byNormalized[normalizePrometheusMetricName(baseName+"_sum")]; sumName != "" {
+		streams = append(streams, metricStream{
+			name: sumName,
+			emit: func(point segment.MetricPointRecord) error {
+				return emitValue(point, func(series *histogramSeries) map[int64]float64 { return series.sums })
+			},
+		})
+	}
+
+	for _, stream := range streams {
+		query := base
+		query.MetricName = stream.name
+		if err := q.backend.StreamMetrics(streamCtx, q.tenant, query, from, to, stream.emit); err != nil {
+			return nil, false, translateMetricLoadError(err)
+		}
+	}
+
+	builders := make(map[string]*promql.Series)
+	labelsByKey := make(map[string]promlabels.Labels)
+	for _, key := range order {
+		series := seriesByKey[key]
+		built := &promql.Series{Metric: series.labels.Copy()}
+		countTimes, countValues := sortedSampleMap(series.counts)
+		sumTimes, sumValues := sortedSampleMap(series.sums)
+		for timestamp, bucketValues := range series.buckets {
+			h, ok := nativeHistogramFromBuckets(bucketValues, timestamp, countTimes, countValues, sumTimes, sumValues)
+			if !ok {
+				continue
+			}
+			built.Histograms = append(built.Histograms, promql.HPoint{T: timestamp, H: h})
+		}
+		if len(built.Histograms) == 0 {
+			continue
+		}
+		builders[key] = built
+		labelsByKey[key] = series.labels.Copy()
+	}
+	if len(builders) == 0 {
+		return emptyDoctorPromIndex(), true, nil
+	}
+	return finalizeDoctorPromIndex(builders, labelsByKey), true, nil
+}
+
+func histogramBasePoint(point segment.MetricPointRecord, baseName string) segment.MetricPointRecord {
+	point.MetricName = baseName
+	point.Attributes = stripHistogramLabel(point.Attributes, "le")
+	point.ResourceAttributes = stripHistogramLabel(point.ResourceAttributes, "le")
+	return point
+}
+
+func stripHistogramLabel(attributes map[string]string, name string) map[string]string {
+	if attributes == nil {
+		return nil
+	}
+	out := make(map[string]string, len(attributes))
+	for key, value := range attributes {
+		if key == name {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func histogramBucketBound(point segment.MetricPointRecord) (float64, bool) {
+	raw, ok := point.Attributes["le"]
+	if !ok {
+		raw, ok = point.ResourceAttributes["le"]
+	}
+	if !ok {
+		return 0, false
+	}
+	bound, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(bound) {
+		return 0, false
+	}
+	return bound, true
+}
+
+func nativeHistogramFromBuckets(buckets map[float64]float64, timestamp int64, countTimes []int64, countValues []float64, sumTimes []int64, sumValues []float64) (*histogram.FloatHistogram, bool) {
+	if len(buckets) == 0 {
+		return nil, false
+	}
+	bounds := make([]float64, 0, len(buckets))
+	for bound := range buckets {
+		bounds = append(bounds, bound)
+	}
+	sort.Float64s(bounds)
+	if !math.IsInf(bounds[len(bounds)-1], 1) {
+		return nil, false
+	}
+
+	perBucket := make([]float64, 0, len(bounds))
+	previous := 0.0
+	for _, bound := range bounds {
+		cumulative := buckets[bound]
+		if cumulative < previous {
+			return nil, false
+		}
+		perBucket = append(perBucket, cumulative-previous)
+		previous = cumulative
+	}
+
+	count := previous
+	if value, ok := latestHistogramSample(countTimes, countValues, timestamp); ok {
+		count = value
+	}
+	sum, _ := latestHistogramSample(sumTimes, sumValues, timestamp)
+
+	// Prometheus custom-bucket histograms put the lowest finite boundary in
+	// CustomValues; the first implicit bucket starts at -Inf. The upstream
+	// histogram_stddev/stdvar implementation uses the arithmetic midpoint of
+	// each bucket, so an implicit -Inf lower bound would make the result +Inf.
+	// Most classic histograms (latency, size, duration) only hold non-negative
+	// observations, so insert an empty (-Inf, 0] bucket and start the real
+	// buckets at 0. This keeps the standard functions finite and does not
+	// affect count/sum/avg/quantile.
+	if bounds[0] > 0 {
+		bounds = append([]float64{0}, bounds...)
+		perBucket = append([]float64{0}, perBucket...)
+	}
+
+	return &histogram.FloatHistogram{
+		Schema:           histogram.CustomBucketsSchema,
+		CustomValues:     append([]float64(nil), bounds[:len(bounds)-1]...),
+		PositiveSpans:    []histogram.Span{{Offset: 0, Length: uint32(len(bounds))}},
+		PositiveBuckets:  perBucket,
+		Count:            count,
+		Sum:              sum,
+		CounterResetHint: histogram.UnknownCounterReset,
+	}, true
+}
+
+func sortedSampleMap(values map[int64]float64) ([]int64, []float64) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	times := make([]int64, 0, len(values))
+	for timestamp := range values {
+		times = append(times, timestamp)
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
+	sorted := make([]float64, len(times))
+	for index, timestamp := range times {
+		sorted[index] = values[timestamp]
+	}
+	return times, sorted
+}
+
+func latestHistogramSample(times []int64, values []float64, timestamp int64) (float64, bool) {
+	if len(times) == 0 {
+		return 0, false
+	}
+	index := sort.Search(len(times), func(i int) bool { return times[i] > timestamp })
+	if index == 0 {
+		return 0, false
+	}
+	sampleTime := times[index-1]
+	if timestamp-sampleTime > doctorPrometheusLookback.Milliseconds() {
+		return 0, false
+	}
+	return values[index-1], true
 }
 
 // singleScanMetricNameThreshold is the expansion size above which a selector is
@@ -780,13 +1110,17 @@ func (q *doctorPromQuerier) resolveRawMetricNames(ctx context.Context, requested
 func finalizeDoctorPromIndex(builders map[string]*promql.Series, labelsByKey map[string]promlabels.Labels) *doctorPromIndex {
 	seriesList := make([]doctorPromSeries, 0, len(builders))
 	for key, built := range builders {
-		if len(built.Floats) == 0 {
+		if len(built.Floats) == 0 && len(built.Histograms) == 0 {
 			continue
 		}
 		sort.Slice(built.Floats, func(i, j int) bool {
 			return built.Floats[i].T < built.Floats[j].T
 		})
 		built.Floats = dedupePromFloatPoints(built.Floats)
+		sort.Slice(built.Histograms, func(i, j int) bool {
+			return built.Histograms[i].T < built.Histograms[j].T
+		})
+		built.Histograms = dedupePromHistogramPoints(built.Histograms)
 		seriesList = append(seriesList, doctorPromSeries{
 			labels: labelsByKey[key],
 			series: promql.NewStorageSeries(*built),
@@ -838,6 +1172,22 @@ func exactPromMetricNameMatcher(matchers []*promlabels.Matcher) string {
 }
 
 func dedupePromFloatPoints(points []promql.FPoint) []promql.FPoint {
+	if len(points) < 2 {
+		return points
+	}
+
+	out := points[:0]
+	for _, point := range points {
+		if len(out) > 0 && out[len(out)-1].T == point.T {
+			out[len(out)-1] = point
+			continue
+		}
+		out = append(out, point)
+	}
+	return out
+}
+
+func dedupePromHistogramPoints(points []promql.HPoint) []promql.HPoint {
 	if len(points) < 2 {
 		return points
 	}
@@ -1037,7 +1387,11 @@ func (s *Service) handlePrometheusQuery(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	writePrometheusSuccess(w, s.filterPrometheusDataForRequest(r, mergePrometheusQueryData(localData, awsData, "vector")))
+	data := s.filterPrometheusDataForRequest(r, mergePrometheusQueryData(localData, awsData, "vector"))
+	if !s.enforceSeriesLimit(w, r, data) {
+		return
+	}
+	writePrometheusSuccess(w, data)
 }
 
 func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Request) {
@@ -1114,7 +1468,11 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	writePrometheusSuccess(w, s.filterPrometheusDataForRequest(r, mergePrometheusQueryData(localData, awsData, "matrix")))
+	data := s.filterPrometheusDataForRequest(r, mergePrometheusQueryData(localData, awsData, "matrix"))
+	if !s.enforceSeriesLimit(w, r, data) {
+		return
+	}
+	writePrometheusSuccess(w, data)
 }
 
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {
@@ -1194,27 +1552,54 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	sources, err := parseMetricCatalogSource(r.URL.Query().Get("source"))
+	if err != nil {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
+	search := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := parseMetricCatalogLimit(r.URL.Query().Get("limit"))
+
 	partition := partitionFromRequest(r)
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
-	awsEnabled := s.awsDiscoveryReady(r.Context()) && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
+	awsEnabled := sources.aws && s.awsDiscoveryReady(r.Context()) && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
+	gcpEnabled := sources.gcp && s.gcpDiscoveryReady()
 
 	selectorSets, selErr := parsePrometheusSelectorSets(matchValues)
-	if selErr != nil && !hasAWS && !awsEnabled {
+	if selErr != nil && !hasAWS && !awsEnabled && !gcpEnabled {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", selErr.Error())
 		return
 	}
 
-	values := make(map[string]struct{})
-	if labelName == labelSource {
-		values[sourceDoctor] = struct{}{}
-		if awsEnabled {
-			values[awsSourceLabel] = struct{}{}
+	// Track the originating provider so the catalog can present a balanced
+	// Doctor/AWS/GCP mix instead of letting one provider's alphabetical head
+	// crowd out the others.
+	values := make(map[string]int)
+	addValues := func(priority int, list ...string) {
+		for _, value := range list {
+			if value == "" {
+				continue
+			}
+			if current, ok := values[value]; !ok || priority < current {
+				values[value] = priority
+			}
 		}
 	}
-	if selErr == nil {
+	if labelName == labelSource {
+		if sources.doctor {
+			addValues(metricCatalogDoctorPriority, sourceDoctor)
+		}
+		if awsEnabled {
+			addValues(metricCatalogAWSPriority, awsSourceLabel)
+		}
+		if gcpEnabled {
+			addValues(metricCatalogGCPPriority, proxy.SourceGCP)
+		}
+	}
+	if selErr == nil && sources.doctor {
 		querier, err := s.discoveryPrometheusQuerier(r)
-		if err != nil && !hasAWS && !awsEnabled {
+		if err != nil && !hasAWS && !awsEnabled && !gcpEnabled {
 			writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
 			return
 		}
@@ -1226,9 +1611,7 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 					writePrometheusDiscoveryError(w, labelErr)
 					return
 				}
-				for _, value := range results {
-					values[value] = struct{}{}
-				}
+				addValues(metricCatalogDoctorPriority, results...)
 			} else {
 				for _, selectorSet := range selectorSets {
 					results, _, labelErr := querier.LabelValues(r.Context(), labelName, nil, selectorSet...)
@@ -1236,9 +1619,7 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 						writePrometheusDiscoveryError(w, labelErr)
 						return
 					}
-					for _, value := range results {
-						values[value] = struct{}{}
-					}
+					addValues(metricCatalogDoctorPriority, results...)
 				}
 			}
 		}
@@ -1249,17 +1630,13 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 		awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if resp, awsErr := s.aws.PrometheusLabelValues(awsCtx, labelName, forwardedMatches, start, end); awsErr == nil {
-			for _, value := range extractPrometheusStringList(resp) {
-				values[value] = struct{}{}
-			}
+			addValues(metricCatalogAWSPriority, extractPrometheusStringList(resp)...)
 		}
 		if labelName == promlabels.MetricName {
 			// CloudWatch's PromQL API has no label-values route, so fall back to
 			// ListMetrics to populate the Grafana metric-name browser.
 			if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
-				for _, name := range s.awsMetricNames(awsCtx) {
-					values[name] = struct{}{}
-				}
+				addValues(metricCatalogAWSPriority, s.awsMetricNames(awsCtx)...)
 			}
 		} else if len(forwardedMatches) > 0 {
 			// Derive label values from series when a metric selector is
@@ -1267,14 +1644,184 @@ func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Req
 			if resp, seriesErr := s.aws.PrometheusSeries(awsCtx, forwardedMatches, start, end); seriesErr == nil {
 				for _, labels := range extractPrometheusSeries(resp) {
 					if value := labels[labelName]; value != "" {
-						values[value] = struct{}{}
+						addValues(metricCatalogAWSPriority, value)
 					}
 				}
 			}
 		}
 	}
 
-	writePrometheusSuccess(w, sortedStrings(values))
+	if gcpEnabled {
+		if labelName == promlabels.MetricName {
+			// Cloud Monitoring exposes tens of thousands of metric names. The
+			// provider list is cached and then filtered/limited below so the
+			// browser never receives the entire catalog.
+			addValues(metricCatalogGCPPriority, s.gcpMetricNames(r.Context())...)
+		} else {
+			start, end := prometheusDiscoveryRange(r)
+			gcpCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+			defer cancel()
+			if resp, gcpErr := s.gcp.PrometheusLabelValues(gcpCtx, labelName, forwardedMatches, start, end); gcpErr == nil {
+				addValues(metricCatalogGCPPriority, extractPrometheusStringList(resp)...)
+			}
+		}
+	}
+
+	if labelName != promlabels.MetricName {
+		returned := sortedPriorityValues(values)
+		if limit > 0 && len(returned) > limit {
+			returned = returned[:limit]
+		}
+		writePrometheusSuccess(w, returned)
+		return
+	}
+
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	names = filterMetricCatalog(names, search)
+	w.Header().Set("X-Doctor-Metric-Total", strconv.Itoa(len(names)))
+	out := arrangeMetricCatalog(names, values, limit)
+	if limit > 0 && len(names) > limit {
+		w.Header().Set("X-Doctor-Metric-Truncated", "true")
+	}
+	writePrometheusSuccess(w, out)
+}
+
+const (
+	metricCatalogDoctorPriority = 0
+	metricCatalogAWSPriority    = 1
+	metricCatalogGCPPriority    = 2
+)
+
+// sortedPriorityValues returns values ordered by provider priority and then
+// alphabetically. Used for non-metric label values where provider mixing does
+// not matter.
+func sortedPriorityValues(values map[string]int) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if values[out[i]] != values[out[j]] {
+			return values[out[i]] < values[out[j]]
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+// arrangeMetricCatalog round-robins providers (Doctor, AWS, GCP) so a limit
+// yields a representative sample of every enabled source. With no limit the
+// filtered, alphabetically ordered list is returned unchanged.
+func arrangeMetricCatalog(names []string, priorities map[string]int, limit int) []string {
+	if limit <= 0 || len(names) <= limit {
+		return names
+	}
+	groups := make([][]string, 3)
+	for _, name := range names {
+		priority := priorities[name]
+		if priority < 0 || priority > 2 {
+			priority = metricCatalogGCPPriority
+		}
+		groups[priority] = append(groups[priority], name)
+	}
+	out := make([]string, 0, limit)
+	for index := 0; len(out) < limit; index++ {
+		progressed := false
+		for _, group := range groups {
+			if index >= len(group) {
+				continue
+			}
+			out = append(out, group[index])
+			progressed = true
+			if len(out) == limit {
+				break
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	return out
+}
+
+// metricCatalogSource selects which discovery providers contribute label
+// values. An empty source keeps the historical Prometheus behaviour (local
+// plus the legacy AWS federation) for clients such as Grafana; the Doctor UI
+// asks for source=all explicitly.
+type metricCatalogSource struct {
+	doctor bool
+	aws    bool
+	gcp    bool
+}
+
+func parseMetricCatalogSource(raw string) (metricCatalogSource, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return metricCatalogSource{doctor: true, aws: true}, nil
+	}
+	var out metricCatalogSource
+	for _, part := range strings.Split(raw, ",") {
+		switch strings.TrimSpace(part) {
+		case "", "all":
+			out.doctor, out.aws, out.gcp = true, true, true
+		case sourceDoctor:
+			out.doctor = true
+		case proxy.SourceAWS:
+			out.aws = true
+		case proxy.SourceGCP:
+			out.gcp = true
+		default:
+			return metricCatalogSource{}, fmt.Errorf("unknown metric source %q", strings.TrimSpace(part))
+		}
+	}
+	return out, nil
+}
+
+// metricCatalogLimit caps how many discovery values one request can return.
+const metricCatalogLimit = 2000
+
+func parseMetricCatalogLimit(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	if parsed > metricCatalogLimit {
+		return metricCatalogLimit
+	}
+	return parsed
+}
+
+// filterMetricCatalog applies a case-insensitive substring search and ranks
+// prefix matches first so typing "run." surfaces run.googleapis.com metrics
+// before unrelated names that merely contain the same characters.
+func filterMetricCatalog(names []string, search string) []string {
+	search = strings.ToLower(strings.TrimSpace(search))
+	if search == "" {
+		sort.Strings(names)
+		return names
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if strings.Contains(strings.ToLower(name), search) {
+			out = append(out, name)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left, right := strings.ToLower(out[i]), strings.ToLower(out[j])
+		leftPrefix, rightPrefix := strings.HasPrefix(left, search), strings.HasPrefix(right, search)
+		if leftPrefix != rightPrefix {
+			return leftPrefix
+		}
+		return out[i] < out[j]
+	})
+	return out
 }
 
 func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request) {
@@ -1356,6 +1903,35 @@ func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	metadata := make(map[string][]map[string]string, len(metricNames))
+	if s.logEngine != nil {
+		start, end := prometheusDiscoveryRange(r)
+		tenant := s.tenantFromRequest(r)
+		_ = s.logEngine.StreamMetricSeries(r.Context(), tenant, segment.MetricQuery{}, start, end, func(meta segment.MetricSeriesMeta) error {
+			if meta.MetricName == "" {
+				return nil
+			}
+			family, promType := prometheusMetricFamily(meta.MetricName, meta.MetricType)
+			metricNames[family] = struct{}{}
+			entry := metadata[family]
+			if len(entry) == 0 {
+				entry = []map[string]string{{"type": promType, "help": meta.Description, "unit": meta.Unit}}
+			} else {
+				if entry[0]["type"] == "" || entry[0]["type"] == "untyped" {
+					entry[0]["type"] = promType
+				}
+				if entry[0]["help"] == "" {
+					entry[0]["help"] = meta.Description
+				}
+				if entry[0]["unit"] == "" {
+					entry[0]["unit"] = meta.Unit
+				}
+			}
+			metadata[family] = entry
+			return nil
+		})
+	}
+
 	if s.awsDiscoveryReady(r.Context()) {
 		if partition := partitionFromRequest(r); partition == "" || s.awsPartitionVisible(r.Context(), partition) {
 			awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -1366,8 +1942,13 @@ func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	metadata := make(map[string][]map[string]string, len(metricNames))
 	for metricName := range metricNames {
+		if _, ok := metadata[metricName]; ok {
+			continue
+		}
+		if coveredByMetricFamily(metricName, metadata) {
+			continue
+		}
 		metadata[metricName] = []map[string]string{{
 			"type": "untyped",
 			"help": "",
@@ -1376,6 +1957,44 @@ func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Reques
 	}
 
 	writePrometheusSuccess(w, metadata)
+}
+
+// coveredByMetricFamily reports whether metricName is a _bucket/_count/_sum
+// series whose base family already has histogram or summary metadata.
+func coveredByMetricFamily(metricName string, metadata map[string][]map[string]string) bool {
+	for _, suffix := range []string{"_bucket", "_count", "_sum"} {
+		if !strings.HasSuffix(metricName, suffix) {
+			continue
+		}
+		base := strings.TrimSuffix(metricName, suffix)
+		entries := metadata[base]
+		if len(entries) == 0 {
+			return false
+		}
+		switch entries[0]["type"] {
+		case "histogram", "summary":
+			return true
+		}
+	}
+	return false
+}
+
+// prometheusMetricFamily maps a stored OTLP metric type to the Prometheus
+// metadata type Grafana understands and collapses histogram/summary series
+// suffixes onto the base family name.
+func prometheusMetricFamily(metricName, metricType string) (string, string) {
+	switch metricType {
+	case "counter":
+		return metricName, "counter"
+	case "gauge", "up_down_counter":
+		return metricName, "gauge"
+	case "histogram", "exponential_histogram":
+		return strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(metricName, "_bucket"), "_count"), "_sum"), "histogram"
+	case "summary":
+		return strings.TrimSuffix(strings.TrimSuffix(metricName, "_count"), "_sum"), "summary"
+	default:
+		return metricName, "untyped"
+	}
 }
 
 func (s *Service) handlePrometheusBuildInfo(w http.ResponseWriter, _ *http.Request) {
@@ -1472,12 +2091,16 @@ func marshalPrometheusValue(value promparser.Value) (map[string]any, error) {
 	case promql.Vector:
 		result := make([]any, 0, len(typed))
 		for _, sample := range typed {
-			entry := map[string]any{
-				"metric": promLabelsToMap(sample.Metric),
-				"value":  []any{prometheusJSONTime(sample.T), formatPrometheusSampleValue(sample.F)},
+			entry := map[string]any{"metric": promLabelsToMap(sample.Metric)}
+			if sample.H != nil {
+				entry["histogram"] = []any{prometheusJSONTime(sample.T), marshalPrometheusHistogram(sample.H)}
+			} else {
+				entry["value"] = []any{prometheusJSONTime(sample.T), formatPrometheusSampleValue(sample.F)}
 			}
-			if exemplars := sampleExemplars(sample); len(exemplars) > 0 {
-				entry["exemplars"] = exemplars
+			if sample.H == nil {
+				if exemplars := sampleExemplars(sample); len(exemplars) > 0 {
+					entry["exemplars"] = exemplars
+				}
 			}
 			result = append(result, entry)
 		}
@@ -1485,14 +2108,22 @@ func marshalPrometheusValue(value promparser.Value) (map[string]any, error) {
 	case promql.Matrix:
 		result := make([]any, 0, len(typed))
 		for _, series := range typed {
-			values := make([][]any, 0, len(series.Floats))
-			for _, point := range series.Floats {
-				values = append(values, []any{prometheusJSONTime(point.T), formatPrometheusSampleValue(point.F)})
+			entry := map[string]any{"metric": promLabelsToMap(series.Metric)}
+			if len(series.Floats) > 0 {
+				values := make([][]any, 0, len(series.Floats))
+				for _, point := range series.Floats {
+					values = append(values, []any{prometheusJSONTime(point.T), formatPrometheusSampleValue(point.F)})
+				}
+				entry["values"] = values
 			}
-			result = append(result, map[string]any{
-				"metric": promLabelsToMap(series.Metric),
-				"values": values,
-			})
+			if len(series.Histograms) > 0 {
+				histograms := make([][]any, 0, len(series.Histograms))
+				for _, point := range series.Histograms {
+					histograms = append(histograms, []any{prometheusJSONTime(point.T), marshalPrometheusHistogram(point.H)})
+				}
+				entry["histograms"] = histograms
+			}
+			result = append(result, entry)
 		}
 		return map[string]any{"resultType": "matrix", "result": result}, nil
 	case promql.Scalar:
@@ -1555,6 +2186,44 @@ func metricLabelMapString(values map[string]string) string {
 
 func formatPrometheusSampleValue(value float64) string {
 	return strconv.FormatFloat(value, 'g', -1, 64)
+}
+
+// marshalPrometheusHistogram matches the Prometheus HTTP API native histogram
+// shape: count/sum plus [boundaryType, lower, upper, count] buckets.
+func marshalPrometheusHistogram(h *histogram.FloatHistogram) map[string]any {
+	if h == nil {
+		return map[string]any{}
+	}
+	out := map[string]any{
+		"count": formatPrometheusSampleValue(h.Count),
+		"sum":   formatPrometheusSampleValue(h.Sum),
+	}
+	buckets := make([]any, 0)
+	for iterator := h.AllBucketIterator(); iterator.Next(); {
+		bucket := iterator.At()
+		if bucket.Count == 0 {
+			continue
+		}
+		boundaries := 2
+		switch {
+		case bucket.LowerInclusive && bucket.UpperInclusive:
+			boundaries = 3
+		case bucket.LowerInclusive:
+			boundaries = 1
+		case bucket.UpperInclusive:
+			boundaries = 0
+		}
+		buckets = append(buckets, []any{
+			boundaries,
+			formatPrometheusSampleValue(bucket.Lower),
+			formatPrometheusSampleValue(bucket.Upper),
+			formatPrometheusSampleValue(bucket.Count),
+		})
+	}
+	if len(buckets) > 0 {
+		out["buckets"] = buckets
+	}
+	return out
 }
 
 func prometheusJSONTime(milliseconds int64) float64 {
@@ -1633,15 +2302,21 @@ func writePrometheusSuccess(w http.ResponseWriter, data any) {
 }
 
 func writePrometheusError(w http.ResponseWriter, statusCode int, errorType, message string) {
+	cause := ""
 	if statusCode >= http.StatusInternalServerError {
 		log.Printf("prometheus error: %s", message)
+		cause = internalCause(message)
 		message = internalErrorMessage
 	}
-	writeJSON(w, statusCode, map[string]any{
+	payload := map[string]any{
 		"status":    "error",
 		"errorType": errorType,
 		"error":     message,
-	})
+	}
+	if cause != "" {
+		payload["cause"] = cause
+	}
+	writeJSON(w, statusCode, payload)
 }
 
 func writePrometheusDiscoveryError(w http.ResponseWriter, err error) {

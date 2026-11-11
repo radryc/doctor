@@ -15,6 +15,7 @@ import (
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
+	gcpstore "github.com/radryc/doctor/internal/store/gcp"
 )
 
 // Options configures the federation manager.
@@ -106,6 +107,18 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 	}
 	if opts.ClientFactory == nil {
 		opts.ClientFactory = func(target Target) (proxy.AWSClient, error) {
+			if normalizeProvider(target.Provider) == "gcp" {
+				if target.Token != "" {
+					return newGCPAsAWS(gcpstore.NewClient(target.Endpoint, target.Token)), nil
+				}
+				if opts.TokenResolver == nil {
+					return nil, fmt.Errorf("federation target %q has no token and no token resolver is configured", target.ID)
+				}
+				return newGCPAsAWS(gcpstore.NewClientWithTokenSource(target.Endpoint, gcpTargetTokenSource{
+					resolver: opts.TokenResolver,
+					target:   target,
+				})), nil
+			}
 			if target.Token != "" {
 				return awsstore.NewClient(target.Endpoint, target.Token), nil
 			}
@@ -243,6 +256,10 @@ func (m *Manager) pruneClients(catalog *Catalog) {
 	m.pool.prune(func(target Target) bool {
 		next, ok := catalog.ByID(target.ID)
 		return ok && sameClientTarget(next, target)
+	})
+	m.pruneBreakers(func(id string) bool {
+		_, ok := catalog.ByID(id)
+		return ok
 	})
 }
 

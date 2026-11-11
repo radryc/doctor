@@ -1,0 +1,311 @@
+.quota-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-bottom: 2rem;
+}
+
+/* The shared tab-panel clips overflow; the quota page is intentionally a
+   long, vertically scrollable document so every partition policy is reachable. */
+.tab-panel.quota-page {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.quota-page > * {
+  flex: 0 0 auto;
+}
+
+.quota-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+}
+
+.quota-card {
+  border: 1px solid var(--strata-border);
+  background: var(--strata-panel);
+  border-radius: 0.75rem;
+  padding: 0.85rem 1rem;
+}
+
+.quota-card__label {
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--strata-text-tertiary);
+}
+
+.quota-card__value {
+  margin-top: 0.25rem;
+  font-family: var(--strata-font-display);
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--strata-text);
+}
+
+.quota-card__sub {
+  margin-top: 0.15rem;
+  font-size: 0.72rem;
+  color: var(--strata-text-tertiary);
+}
+
+.quota-section {
+  border: 1px solid var(--strata-border);
+  background: var(--strata-panel);
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.quota-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--strata-border);
+}
+
+.quota-section__header h3 {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--strata-text);
+}
+
+.quota-section__header p {
+  margin: 0.1rem 0 0;
+  font-size: 0.7rem;
+  color: var(--strata-text-tertiary);
+}
+
+.quota-section__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.quota-collapse {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.22rem 0.55rem;
+  border: 1px solid var(--strata-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--strata-text-tertiary);
+  font-size: 0.64rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.quota-collapse:hover {
+  color: var(--strata-text);
+  border-color: var(--strata-border-strong);
+  background: var(--strata-elevated);
+}
+
+.quota-subjects {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.65rem;
+  padding: 0.9rem 1rem;
+}
+
+.quota-subject {
+  border: 1px solid var(--strata-border);
+  border-radius: 0.55rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--strata-elevated);
+}
+
+.quota-subject__key {
+  font-family: var(--strata-font-mono);
+  font-size: 0.72rem;
+  color: var(--strata-accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quota-subject__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.quota-metric__label {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--strata-text-tertiary);
+}
+
+.quota-metric__value {
+  font-family: var(--strata-font-mono);
+  font-size: 0.78rem;
+  color: var(--strata-text);
+}
+
+.quota-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+}
+
+.quota-table th {
+  text-align: left;
+  padding: 0.55rem 0.8rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--strata-text-tertiary);
+  border-bottom: 1px solid var(--strata-border);
+  white-space: nowrap;
+}
+
+.quota-table td {
+  padding: 0.65rem 0.8rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--strata-border) 60%, transparent);
+  vertical-align: top;
+}
+
+.quota-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.quota-table tr:hover td {
+  background: var(--strata-elevated);
+}
+
+.quota-name {
+  font-weight: 700;
+  color: var(--strata-text);
+}
+
+.quota-mono {
+  font-family: var(--strata-font-mono);
+  color: var(--strata-text-secondary);
+}
+
+.quota-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.12rem 0.42rem;
+  border-radius: 999px;
+  border: 1px solid var(--strata-border);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.quota-badge--enforce {
+  color: var(--strata-warning);
+  border-color: color-mix(in oklab, var(--strata-warning) 40%, transparent);
+  background: color-mix(in oklab, var(--strata-warning) 12%, transparent);
+}
+
+.quota-badge--observe {
+  color: var(--strata-accent);
+  border-color: color-mix(in oklab, var(--strata-accent) 40%, transparent);
+  background: color-mix(in oklab, var(--strata-accent) 10%, transparent);
+}
+
+.quota-badge--blocked {
+  color: var(--strata-critical);
+  border-color: color-mix(in oklab, var(--strata-critical) 40%, transparent);
+  background: color-mix(in oklab, var(--strata-critical) 12%, transparent);
+}
+
+.quota-limits {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.25rem 0.6rem;
+}
+
+.quota-limits span {
+  display: block;
+  font-size: 0.65rem;
+  color: var(--strata-text-tertiary);
+}
+
+.quota-limits strong {
+  display: block;
+  font-family: var(--strata-font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--strata-text-secondary);
+}
+
+.quota-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 130px;
+}
+
+.quota-usage__row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.quota-usage__label {
+  flex: 0 0 52px;
+  font-size: 0.62rem;
+  color: var(--strata-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.quota-bar {
+  flex: 1;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--strata-overlay);
+  overflow: hidden;
+}
+
+.quota-bar__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--strata-accent);
+  transition: width 180ms ease;
+}
+
+.quota-bar__fill--warn {
+  background: var(--strata-warning);
+}
+
+.quota-bar__fill--danger {
+  background: var(--strata-critical);
+}
+
+.quota-usage__value {
+  flex: 0 0 auto;
+  font-family: var(--strata-font-mono);
+  font-size: 0.62rem;
+  color: var(--strata-text-tertiary);
+}
+
+.quota-empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--strata-text-tertiary);
+  font-size: 0.8rem;
+}
+
+.quota-error {
+  padding: 0.75rem 1rem;
+  border-radius: 0.6rem;
+  border: 1px solid color-mix(in oklab, var(--strata-critical) 35%, transparent);
+  background: color-mix(in oklab, var(--strata-critical) 10%, transparent);
+  color: var(--strata-critical);
+  font-size: 0.78rem;
+}

@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/radryc/monofs/pkg/authz/policy"
 )
 
 type countingEvaluator struct {
@@ -29,7 +31,7 @@ func TestSchedulerEvaluatesDueGroups(t *testing.T) {
 	scheduler := &Scheduler{
 		Evaluator: evaluator,
 		Load: func(context.Context) ([]GroupRef, error) {
-			return []GroupRef{{Tenant: "default", Group: "shard-health", File: file}}, nil
+			return []GroupRef{{Partition: "default", Group: "shard-health", File: file}}, nil
 		},
 		Workers:      2,
 		PollInterval: time.Minute,
@@ -58,7 +60,7 @@ func TestSchedulerReloadRemovesGroups(t *testing.T) {
 			if !include.Load() {
 				return nil, nil
 			}
-			return []GroupRef{{Tenant: "default", Group: "g", File: file}}, nil
+			return []GroupRef{{Partition: "default", Group: "g", File: file}}, nil
 		},
 		Workers:      1,
 		PollInterval: 20 * time.Millisecond,
@@ -95,7 +97,7 @@ func BenchmarkRuleStoreLoad10k(b *testing.B) {
 		for r := 0; r < 50; r++ {
 			rules = append(rules, fmt.Sprintf("      - record: doctor:metric_%d_%d\n        expr: sum(rate(http_requests_total[5m]))\n", g, r))
 		}
-		doc := "version: 1\ngroups:\n  - name: group-%d\n    tenant: default\n    interval: 30s\n    rules:\n%s"
+		doc := "version: 1\ngroups:\n  - name: group-%d\n    partition: default\n    interval: 30s\n    rules:\n%s"
 		file, err := ParseFile([]byte(fmt.Sprintf(doc, g, joinLines(rules))))
 		if err != nil {
 			b.Fatalf("ParseFile: %v", err)
@@ -141,5 +143,20 @@ func BenchmarkEvaluatorMerge10k(b *testing.B) {
 		if results[0].Samples != 1 {
 			b.Fatalf("samples = %d, want 1", results[0].Samples)
 		}
+	}
+}
+
+type staticRuleLimits struct{ quota policy.RulesQuota }
+
+func (s staticRuleLimits) RulesQuota(string) policy.RulesQuota { return s.quota }
+
+func TestSchedulerEvaluationBudget(t *testing.T) {
+	scheduler := &Scheduler{Limits: staticRuleLimits{quota: policy.RulesQuota{MaxEvaluationCostPerSecond: 1}}, budgets: map[string]*ruleBudget{}}
+	ref := GroupRef{Partition: "checkout", File: &File{Groups: []Group{{Rules: []Rule{{Record: "a"}, {Record: "b"}}}}}}
+	if !scheduler.allowBudget(ref) {
+		t.Fatal("first evaluation should pass")
+	}
+	if scheduler.allowBudget(ref) {
+		t.Fatal("second evaluation should be over budget")
 	}
 }

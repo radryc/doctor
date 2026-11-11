@@ -83,7 +83,17 @@ func logPushdown(plan lokiPlan) proxy.LogPushdown {
 // ListMetrics endpoint because CloudWatch's PromQL API does not implement the
 // Prometheus label-values route used by Grafana's metric browser.
 func (s *Service) awsMetricNames(ctx context.Context) []string {
-	return proxy.AWSMetricNames(ctx, s.aws)
+	load := func(ctx context.Context) (any, error) {
+		return proxy.AWSMetricNames(ctx, s.aws), nil
+	}
+	value, err := s.getMetricsCache().getOrLoad(ctx, "aws-metric-names", load)
+	if err != nil {
+		return nil
+	}
+	names, _ := value.([]string)
+	// The cache stores the slice; callers sort/filter discovery results, so do
+	// not hand out the shared backing array.
+	return append([]string(nil), names...)
 }
 
 // awsPartitionVisible reports whether federated AWS metrics belong to the
@@ -107,14 +117,18 @@ func (s *Service) awsServiceInfos(ctx context.Context) []awsstore.ServiceInfo {
 	if !s.awsDiscoveryReady(ctx) {
 		return nil
 	}
-	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	services, err := s.aws.ListServices(callCtx)
+	load := func(ctx context.Context) (any, error) {
+		callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		return s.aws.ListServices(callCtx)
+	}
+	value, err := s.getMetricsCache().getOrLoad(ctx, "aws-service-infos", load)
 	if err != nil {
 		proxy.AddWarning(ctx, proxy.Warning{Backend: "aws", Signal: proxy.SignalTraces, Message: err.Error()})
 		return nil
 	}
-	return services
+	services, _ := value.([]awsstore.ServiceInfo)
+	return append([]awsstore.ServiceInfo(nil), services...)
 }
 
 // filterTraceServiceValues removes service names that belong only to AWS

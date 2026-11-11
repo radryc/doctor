@@ -15,6 +15,7 @@ import (
 	"github.com/radryc/doctor/internal/buildinfo"
 	"github.com/radryc/doctor/internal/segment"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
 
 func TestHandleGuardianHealthUsesLivePartitionFallbackWithoutRecentEvents(t *testing.T) {
@@ -148,6 +149,15 @@ func (f *fakeLogEngineBackend) QueryMetrics(_ context.Context, _ string, query s
 			if !to.IsZero() && metric.Timestamp.After(to) {
 				continue
 			}
+			if query.MetricName != "" && metric.MetricName != query.MetricName {
+				continue
+			}
+			if query.Service != "" && metric.Service != query.Service {
+				continue
+			}
+			if !fakeMetricLabelsMatch(metric, discoveryMatchers(query.LabelMatchers)) {
+				continue
+			}
 			if _, ok := seen[metric.MetricName]; ok {
 				continue
 			}
@@ -235,12 +245,15 @@ func (f *fakeLogEngineBackend) StreamMetricSeries(_ context.Context, tenant stri
 				labels[name] = value
 			}
 			entry = &segment.MetricSeriesMeta{
-				Tenant:     tenant,
-				Service:    metric.Service,
-				MetricName: metric.MetricName,
-				Labels:     labels,
-				MinTime:    metric.Timestamp.UTC(),
-				MaxTime:    metric.Timestamp.UTC(),
+				Tenant:      tenant,
+				Service:     metric.Service,
+				MetricName:  metric.MetricName,
+				MetricType:  metric.MetricType,
+				Unit:        metric.Unit,
+				Description: metric.Description,
+				Labels:      labels,
+				MinTime:     metric.Timestamp.UTC(),
+				MaxTime:     metric.Timestamp.UTC(),
 			}
 			byKey[key] = entry
 			order = append(order, key)
@@ -270,6 +283,17 @@ func fakeMetricDiscoveryMode(query segment.MetricQuery) string {
 	return ""
 }
 
+func discoveryMatchers(matchers []segment.MetricLabelMatcher) []segment.MetricLabelMatcher {
+	out := make([]segment.MetricLabelMatcher, 0, len(matchers))
+	for _, matcher := range matchers {
+		if matcher.Name == fakeMetricDiscoveryMatcherName {
+			continue
+		}
+		out = append(out, matcher)
+	}
+	return out
+}
+
 func fakeMetricLabelsMatch(metric segment.MetricPointRecord, matchers []segment.MetricLabelMatcher) bool {
 	for _, matcher := range matchers {
 		var value string
@@ -278,6 +302,11 @@ func fakeMetricLabelsMatch(metric segment.MetricPointRecord, matchers []segment.
 			value = metric.MetricName
 		case "service":
 			value = metric.Service
+		case "guardian.partition", "guardian_partition", "partition":
+			value = metric.Partition
+			if value == "" {
+				value = metric.Attributes[matcher.Name]
+			}
 		default:
 			value = metric.Attributes[matcher.Name]
 			if value == "" {
@@ -339,6 +368,10 @@ func (f *fakeLogEngineBackend) QueryTraces(_ context.Context, _, traceID, servic
 		filtered = filtered[:limit]
 	}
 	return filtered, nil
+}
+
+func (f *fakeLogEngineBackend) QueryDuckDBSQL(context.Context, string, string, string, time.Time, time.Time, int, []string, bool) (monofsstore.DuckDBSQLResponse, error) {
+	return monofsstore.DuckDBSQLResponse{}, nil
 }
 
 func TestHandleRecentTracesQueriesBoundedSpanSet(t *testing.T) {
@@ -440,6 +473,18 @@ func TestLogSearchPushdownUsesAWSLogGroup(t *testing.T) {
 	pushdown := logSearchPushdown("", "", "guardian/123/us-east-1/demo-build/web", signalIdentity{})
 	if !strings.Contains(pushdown.Selector, `source="aws"`) || !strings.Contains(pushdown.Selector, `aws_log_group="guardian/123/us-east-1/demo-build/web"`) {
 		t.Fatalf("selector = %q", pushdown.Selector)
+	}
+}
+
+func TestLogSearchPushdownUsesGCPLogName(t *testing.T) {
+	for _, name := range []string{"run.googleapis.com/stdout", "cloudaudit.googleapis.com%2Factivity"} {
+		pushdown := logSearchPushdown("", "", name, signalIdentity{})
+		if !strings.Contains(pushdown.Selector, `source="gcp"`) || !strings.Contains(pushdown.Selector, `gcp_log_name="`+name+`"`) {
+			t.Fatalf("selector = %q, want GCP log name", pushdown.Selector)
+		}
+		if strings.Contains(pushdown.Selector, `aws_log_group`) {
+			t.Fatalf("selector = %q, should not use an AWS log group", pushdown.Selector)
+		}
 	}
 }
 

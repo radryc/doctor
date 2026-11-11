@@ -18,6 +18,8 @@ type CatalogReloader struct {
 	Interval time.Duration
 	Logger   *log.Logger
 	Metrics  *CatalogMetrics
+	// Filter narrows the reloaded snapshot to one provider (optional).
+	Filter func(*Catalog) *Catalog
 }
 
 func NewCatalogReloader(store SnapshotStore, manager *Manager, source string, interval time.Duration, logger *log.Logger) *CatalogReloader {
@@ -109,6 +111,13 @@ func (r *CatalogReloader) Reload(ctx context.Context) (err error) {
 	catalog, err := NewCatalog(snapshot.Targets, snapshot.Version)
 	if err != nil {
 		return fmt.Errorf("build reloaded catalog: %w", err)
+	}
+	if r.Filter != nil {
+		if filtered := r.Filter(catalog); filtered != nil {
+			catalog = filtered
+		} else {
+			catalog, _ = NewCatalog(nil, snapshot.Version)
+		}
 	}
 	return r.Manager.Reload(catalog, fmt.Sprintf("%s:%s", r.Source, snapshot.Version))
 }

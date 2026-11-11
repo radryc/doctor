@@ -172,6 +172,13 @@ Local engine details:
   above 16 names the store is scanned once and filtered client-side.
 - Per-query budgets: 4M samples, 100k series; global 8M samples. Exceeding them returns HTTP 422.
 - `count by (__name__)` / bare `count` are served from the chunk series index, not samples.
+- Native-histogram functions (`histogram_avg`, `histogram_count`, `histogram_sum`,
+  `histogram_stddev`, `histogram_stdvar`, `histogram_quantile`, `histogram_fraction`) synthesize a
+  native histogram series from the classic `_bucket` / `_count` / `_sum` siblings of an exact base
+  metric name. This keeps existing storage and historical data queryable with those functions;
+  stored native histogram samples are not required. Explicit `_bucket` selectors keep using the
+  classic bucket path. The synthesized custom-bucket histogram starts its real buckets at 0 for
+  non-negative observations so `histogram_stddev` / `histogram_stdvar` stay finite.
 - Broad all-series range selectors (`{__name__=~".+"}`) are rejected when the range exceeds 15
   minutes.
 - A `?timeout=` duration is honored up to 5 minutes; otherwise the engine uses 30s or the caller
@@ -333,7 +340,13 @@ separately filter the log-derived lists beyond the already-filtered records.
 ### Metrics
 
 `/v1/metrics/range` streams raw points for one metric name, caps at 200k points, returns
-`{metric, points}`. It is a legacy UI convenience, not a PromQL endpoint.
+`{metric, points}`. Points include the stored `metric_type`, `temporality`, `start_time`, `unit`,
+and `description`. It is a legacy UI convenience, not a PromQL endpoint.
+
+`/api/v1/metadata` serves real Prometheus types to Grafana from the chunk series index:
+`counter`, `gauge` (including `up_down_counter`), `histogram` (including
+`exponential_histogram`), `summary`, or `untyped`. Histogram and summary suffix series are collapsed
+onto the base family name, and stored help/unit are returned.
 
 ### Services
 
@@ -443,7 +456,7 @@ Access enforcement maps to 403; planner scope errors map to 422 in Prometheus/qu
   backends, reporting a warning when the subset is unsupported.
 - The proxy's Prometheus series/labels/label-values paths strip Doctor-only target labels before
   forwarding to AWS.
-- `handlePrometheusMetadata` reports every metric as `untyped` with empty help/unit.
+- `handlePrometheusMetadata` reports stored metric types; AWS-only metrics remain `untyped`.
 - `handlePrometheusRules` always returns no groups, even when doctor-rules has rules.
 - `/ready` checks the log engine and enforced policy state, but not federation freshness or Guardian.
 - The legacy direct and proxy paths can both query AWS unless `SetAWSViaRouter(true)` is used; the

@@ -66,6 +66,44 @@ func TestGuardianTokenResolverCachesAndInvalidates(t *testing.T) {
 	}
 }
 
+func TestGuardianTokenResolverDoesNotResurrectInvalidatedToken(t *testing.T) {
+	var requests atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := requests.Add(1)
+		if n == 1 {
+			close(started)
+			<-release
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"name":"aws-div-1","token":"token-%d"}`, n)
+	}))
+	defer server.Close()
+
+	resolver := NewGuardianTokenResolver(GuardianTokenResolverOptions{BaseURL: server.URL})
+	target := Target{ID: "aws-1", TokenRef: "guardian-pusher://aws-div-1"}
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := resolver.Resolve(context.Background(), target)
+		first <- err
+	}()
+	<-started
+	// A 401 during the in-flight fetch must not let the stale token land in the
+	// cache after the fetch completes.
+	resolver.Invalidate(target)
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("first Resolve() error = %v", err)
+	}
+
+	token, err := resolver.Resolve(context.Background(), target)
+	if err != nil || token != "token-2" {
+		t.Fatalf("Resolve after invalidation = %q, %v; want token-2", token, err)
+	}
+}
+
 func TestGuardianTokenResolverRejectsEnvTarget(t *testing.T) {
 	resolver := NewGuardianTokenResolver(GuardianTokenResolverOptions{})
 	_, err := resolver.Resolve(context.Background(), Target{ID: "aws-1", TokenEnv: "SOME_TOKEN"})

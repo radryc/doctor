@@ -137,8 +137,7 @@ flowchart TB
 
 Important observed behavior: the service checks the pipeline **before** the buffers. With the
 default configuration both are created, so the buffers replay old WAL data at startup and then sit
-idle while all new data goes through the pipeline. See
-[internal/duplicate-functionality.md](../internal/duplicate-functionality.md).
+idle while all new data goes through the pipeline.
 
 ### Query plane
 
@@ -292,6 +291,5 @@ These are expanded in the internal documents:
 - `doctor-rules` and the ingest API now require bearer tokens, but the rules authorizer is still
   all-or-nothing and the dashboard plane still has no per-user authorization.
 
-See [internal/missing-pieces.md](../internal/missing-pieces.md),
-[internal/duplicate-functionality.md](../internal/duplicate-functionality.md), and
-[internal/overcomplexity.md](../internal/overcomplexity.md).
+See [security-architecture.md](../security-architecture.md) for the trust
+boundaries and the risk register, and the logical flows for current behavior.

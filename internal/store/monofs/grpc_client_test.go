@@ -30,6 +30,28 @@ func TestHealthyNodesFallsBackToCachedNodesWhenClusterRefreshFails(t *testing.T)
 	}
 }
 
+func TestHealthyNodesUsesFreshNodeCache(t *testing.T) {
+	t.Parallel()
+
+	router := &fakeRouterClient{}
+	client := &GRPCClient{
+		rpcTimeout:       time.Second,
+		router:           router,
+		nodeClients:      map[string]pb.MonoFSClient{"node-a": nil},
+		nodesRefreshedAt: time.Now(),
+		nodeRefreshTTL:   time.Minute,
+	}
+	for i := 0; i < 3; i++ {
+		nodes, err := client.healthyNodes(context.Background())
+		if err != nil || len(nodes) != 1 || nodes[0].id != "node-a" {
+			t.Fatalf("healthyNodes() = %+v, %v", nodes, err)
+		}
+	}
+	if router.clusterInfoCalls != 0 {
+		t.Fatalf("GetClusterInfo calls = %d, want 0 within the node refresh TTL", router.clusterInfoCalls)
+	}
+}
+
 func TestHealthyNodesPreservesCachedNodesWhenRouterReportsNone(t *testing.T) {
 	t.Parallel()
 
@@ -100,8 +122,9 @@ func TestBuildRegisterRequestIncludesBaseURL(t *testing.T) {
 }
 
 type fakeRouterClient struct {
-	clusterInfoResp *pb.ClusterInfoResponse
-	clusterInfoErr  error
+	clusterInfoResp  *pb.ClusterInfoResponse
+	clusterInfoErr   error
+	clusterInfoCalls int
 }
 
 func (f *fakeRouterClient) UpsertGuardianPaths(context.Context, *pb.UpsertGuardianPathsRequest, ...grpc.CallOption) (*pb.UpsertGuardianPathsResponse, error) {
@@ -129,6 +152,7 @@ func (f *fakeRouterClient) UnregisterClient(context.Context, *pb.UnregisterClien
 }
 
 func (f *fakeRouterClient) GetClusterInfo(context.Context, *pb.ClusterInfoRequest, ...grpc.CallOption) (*pb.ClusterInfoResponse, error) {
+	f.clusterInfoCalls++
 	if f.clusterInfoResp != nil || f.clusterInfoErr != nil {
 		return f.clusterInfoResp, f.clusterInfoErr
 	}

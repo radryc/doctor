@@ -14,7 +14,10 @@ import (
 
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/segment"
+	gcpstore "github.com/radryc/doctor/internal/store/gcp"
+	"github.com/radryc/doctor/internal/telemetrylabels"
 	"github.com/radryc/monofs/pkg/authz"
+	"golang.org/x/sync/singleflight"
 )
 
 // Warning reports a non-fatal backend failure. Partial results are returned
@@ -88,6 +91,8 @@ type Router struct {
 	cachedSnapRefresh time.Time
 	built             map[string]upstreamEntry
 	breakers          map[string]*breaker
+	buildGroup        singleflight.Group
+	lastPrune         time.Time
 }
 
 // NewRouter builds a router over a registry.
@@ -421,6 +426,7 @@ func (r *Router) endpointInfoFor(ctx context.Context, backend Backend, now time.
 	info := EndpointInfo{
 		Name:          backend.Name,
 		Kind:          backend.Kind,
+		Engine:        backend.Engine,
 		Signals:       append([]Signal(nil), backend.Signals...),
 		OwnersPath:    backend.OwnersPath,
 		Origin:        backend.Origin,
@@ -452,6 +458,7 @@ func (r *Router) endpointInfoFor(ctx context.Context, backend Backend, now time.
 type EndpointInfo struct {
 	Name       string   `json:"name"`
 	Kind       string   `json:"kind"`
+	Engine     string   `json:"engine,omitempty"`
 	Signals    []Signal `json:"signals"`
 	OwnersPath string   `json:"ownersPath,omitempty"`
 	Origin     string   `json:"origin,omitempty"`
@@ -487,14 +494,33 @@ func gatedSignal(backend Backend) access.Signal {
 
 // MetricsInstant fans an instant PromQL query out and merges the results.
 func (r *Router) MetricsInstant(ctx context.Context, tenant, query string, at time.Time) (map[string]any, []Warning, error) {
-	return r.metricsQuery(ctx, tenant, query, "vector", func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error) {
+	return r.metricsInstant(ctx, tenant, query, at, "")
+}
+
+// MetricsInstantForPartition is MetricsInstant with a pushed-down partition
+// filter. The matcher is provider-specific (Doctor/AWS/GCP).
+func (r *Router) MetricsInstantForPartition(ctx context.Context, tenant, query string, at time.Time, partition string) (map[string]any, []Warning, error) {
+	return r.metricsInstant(ctx, tenant, query, at, partition)
+}
+
+func (r *Router) metricsInstant(ctx context.Context, tenant, query string, at time.Time, partition string) (map[string]any, []Warning, error) {
+	return r.metricsQuery(ctx, tenant, query, "vector", partition, func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error) {
 		return upstream.PromInstant(ctx, tenant, query, at)
 	})
 }
 
 // MetricsRange fans a range PromQL query out and merges the results.
 func (r *Router) MetricsRange(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration) (map[string]any, []Warning, error) {
-	return r.metricsQuery(ctx, tenant, query, "matrix", func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error) {
+	return r.metricsRange(ctx, tenant, query, start, end, step, "")
+}
+
+// MetricsRangeForPartition is MetricsRange with a pushed-down partition filter.
+func (r *Router) MetricsRangeForPartition(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, partition string) (map[string]any, []Warning, error) {
+	return r.metricsRange(ctx, tenant, query, start, end, step, partition)
+}
+
+func (r *Router) metricsRange(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, partition string) (map[string]any, []Warning, error) {
+	return r.metricsQuery(ctx, tenant, query, "matrix", partition, func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error) {
 		return upstream.PromRange(ctx, tenant, query, start, end, step)
 	})
 }
@@ -505,6 +531,10 @@ func (r *Router) Logs(ctx context.Context, tenant string, pushdown LogPushdown, 
 	targets, accessWarnings, err := r.logTargets(ctx, criteria)
 	if err != nil {
 		return nil, accessWarnings, err
+	}
+	if stripped, providerKind, ok := ProviderSelectorMode(pushdown.Selector); ok {
+		pushdown.Selector = stripped
+		targets = filterLogTargetsByKind(targets, providerKind)
 	}
 	if len(targets) == 0 {
 		return nil, accessWarnings, nil
@@ -656,10 +686,15 @@ type metricsTarget struct {
 
 func (r *Router) metricsQuery(
 	ctx context.Context,
-	tenant, query, defaultType string,
+	tenant, query, defaultType, partition string,
 	exec func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error),
 ) (map[string]any, []Warning, error) {
 	stripped, mode := AWSQueryMode(query)
+	providerKind := KindAWS
+	if gcpStripped, gcpMode := GCPQueryMode(query); gcpMode != AWSQueryNone {
+		stripped, mode = gcpStripped, gcpMode
+		providerKind = KindGCP
+	}
 	criteria := parseSelectorCriteria(query)
 	var (
 		primary  []metricsTarget
@@ -680,21 +715,24 @@ func (r *Router) metricsQuery(
 		target := metricsTarget{backend: backend, upstream: upstream, query: query}
 		switch mode {
 		case AWSQueryOnly:
-			if !isAWSBackend(backend) {
+			if backend.Kind != providerKind {
 				continue
 			}
 			target.query = stripped
-			primary = append(primary, target)
-			continue
 		case AWSQueryMixed:
-			if isAWSBackend(backend) {
+			if backend.Kind == providerKind {
 				target.query = stripped
 			}
 		}
+		// Push the selected partition into federated providers' native labels so
+		// the backend does the filtering instead of returning every series.
+		// Local storage mixes native (guardian_partition) and AWS/GCP-ingested
+		// series, so it stays on the post-filter path below.
 		if isLocalBackend(backend) {
 			local = &target
 			continue
 		}
+		target.query = telemetrylabels.ApplyPartition(target.query, providerForBackend(backend), partition)
 		if backend.QueryPolicy() == PolicyFallback && mode == AWSQueryNone {
 			target.fallback = true
 			fallback = append(fallback, target)
@@ -849,7 +887,9 @@ func (r *Router) snapshot() []Backend {
 		if r.registry == nil {
 			return nil
 		}
-		return r.registry.Snapshot()
+		backends := r.registry.Snapshot()
+		r.pruneBackendState(backends)
+		return backends
 	}
 
 	var regRefresh time.Time
@@ -861,16 +901,25 @@ func (r *Router) snapshot() []Backend {
 	}
 
 	seen := make(map[string]struct{}, explicitCount)
+	federatedKinds := make(map[string]struct{}, explicitCount)
 	out := make([]Backend, 0, explicitCount)
 	r.mu.RLock()
 	for name, entry := range r.explicit {
 		seen[name] = struct{}{}
+		if entry.backend.Federated {
+			// A federated backend owns target selection for its provider.
+			// Discovered pushers of the same kind would duplicate its fan-out.
+			federatedKinds[entry.backend.Kind] = struct{}{}
+		}
 		out = append(out, entry.backend)
 	}
 	r.mu.RUnlock()
 	if r.registry != nil {
 		for _, backend := range r.registry.Snapshot() {
 			if _, exists := seen[backend.Name]; exists {
+				continue
+			}
+			if _, federated := federatedKinds[backend.Kind]; federated {
 				continue
 			}
 			out = append(out, backend)
@@ -887,6 +936,7 @@ func (r *Router) snapshot() []Backend {
 		}
 		r.mu.Unlock()
 	}
+	r.pruneBackendState(out)
 	return out
 }
 
@@ -1076,24 +1126,81 @@ func (r *Router) entryFor(backend Backend) upstreamEntry {
 	}
 	r.mu.RUnlock()
 
-	entry := upstreamEntry{backend: backend, fingerprint: fingerprint}
-	switch backend.Kind {
-	case KindPrometheus:
-		entry.upstreams.Metrics = NewPromHTTPUpstream(backend, nil)
-	case KindLoki:
-		entry.upstreams.Logs = NewLokiHTTPUpstream(backend, nil)
-	case KindTempo:
-		entry.upstreams.Traces = NewTempoHTTPUpstream(backend, nil)
-	case KindElasticsearch:
-		entry.upstreams.Logs = NewElasticsearchUpstream(backend, nil)
-	case KindBigQuery:
-		entry.upstreams.Logs = NewBigQueryUpstream(backend, nil)
-	}
+	// Build once per (name, fingerprint). Without singleflight two concurrent
+	// requests for a newly discovered backend both create an HTTP client and
+	// one transport/pool is immediately discarded.
+	key := backend.Name + "\x00" + fingerprint
+	value, err, _ := r.buildGroup.Do(key, func() (any, error) {
+		r.mu.RLock()
+		if entry, ok := r.explicit[backend.Name]; ok {
+			r.mu.RUnlock()
+			return entry, nil
+		}
+		if entry, ok := r.built[backend.Name]; ok && entry.fingerprint == fingerprint {
+			r.mu.RUnlock()
+			return entry, nil
+		}
+		r.mu.RUnlock()
 
-	r.mu.Lock()
-	r.built[backend.Name] = entry
-	r.mu.Unlock()
+		entry := upstreamEntry{backend: backend, fingerprint: fingerprint}
+		switch backend.Kind {
+		case KindPrometheus:
+			entry.upstreams.Metrics = NewPromHTTPUpstream(backend, nil)
+		case KindLoki:
+			entry.upstreams.Logs = NewLokiHTTPUpstream(backend, nil)
+		case KindTempo:
+			entry.upstreams.Traces = NewTempoHTTPUpstream(backend, nil)
+		case KindElasticsearch:
+			entry.upstreams.Logs = NewElasticsearchUpstream(backend, nil)
+		case KindBigQuery:
+			entry.upstreams.Logs = NewBigQueryUpstream(backend, nil)
+		case KindGCP:
+			client := gcpstore.NewClient(backend.BaseURL, backend.Token)
+			upstream := &GCPUpstream{Client: client}
+			entry.upstreams.Metrics = upstream
+			entry.upstreams.Logs = upstream
+			entry.upstreams.Traces = upstream
+		}
+
+		r.mu.Lock()
+		if _, explicit := r.explicit[backend.Name]; !explicit {
+			r.built[backend.Name] = entry
+		}
+		r.mu.Unlock()
+		return entry, nil
+	})
+	if err != nil {
+		return upstreamEntry{backend: backend, fingerprint: fingerprint}
+	}
+	entry, _ := value.(upstreamEntry)
 	return entry
+}
+
+// pruneBackendState drops upstreams and breakers for backends that disappeared
+// from the registry. It is time-gated because a large fleet churns slowly and
+// this runs from the snapshot hot path.
+func (r *Router) pruneBackendState(backends []Backend) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	if !r.lastPrune.IsZero() && now.Sub(r.lastPrune) < time.Minute {
+		return
+	}
+	r.lastPrune = now
+	live := make(map[string]struct{}, len(backends))
+	for _, backend := range backends {
+		live[backend.Name] = struct{}{}
+	}
+	for name := range r.built {
+		if _, ok := live[name]; !ok {
+			delete(r.built, name)
+		}
+	}
+	for name := range r.breakers {
+		if _, ok := live[name]; !ok {
+			delete(r.breakers, name)
+		}
+	}
 }
 
 func (r *Router) breakerAllow(name string, now time.Time) bool {
@@ -1212,8 +1319,43 @@ func isLocalBackend(backend Backend) bool {
 	return backend.Kind == KindMonoFS
 }
 
+// providerForBackend maps a proxy backend to the provider whose identity
+// labels should be used for partition pushdown.
+func providerForBackend(backend Backend) telemetrylabels.Provider {
+	switch {
+	case isLocalBackend(backend):
+		return telemetrylabels.ProviderDoctor
+	case backend.Kind == KindAWS:
+		return telemetrylabels.ProviderAWS
+	case backend.Kind == KindGCP:
+		return telemetrylabels.ProviderGCP
+	default:
+		return ""
+	}
+}
+
 func isAWSBackend(backend Backend) bool {
 	return backend.Kind == KindAWS
+}
+
+func filterLogTargetsByKind(targets []logTarget, kind string) []logTarget {
+	out := make([]logTarget, 0, len(targets))
+	for _, target := range targets {
+		if target.backend.Kind == kind {
+			out = append(out, target)
+		}
+	}
+	return out
+}
+
+func filterTraceTargetsByKind(targets []traceTarget, kind string) []traceTarget {
+	out := make([]traceTarget, 0, len(targets))
+	for _, target := range targets {
+		if target.backend.Kind == kind {
+			out = append(out, target)
+		}
+	}
+	return out
 }
 
 func targetRank(backend Backend) int {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -12,13 +13,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/doctor/internal/store"
 	"github.com/radryc/monofs/pkg/authz"
+	"github.com/radryc/monofs/pkg/authz/policy"
 	"sigs.k8s.io/yaml"
 )
+
+// LimitsProvider exposes the partition rule quota. A nil provider disables
+// rule-count enforcement.
+type LimitsProvider interface {
+	RulesQuota(partition string) policy.RulesQuota
+}
 
 // Authorizer gates rule mutations. A nil authorizer allows everything
 // (observe-first rollout).
 type Authorizer interface {
-	CanModify(ctx context.Context, tenant, group string) bool
+	CanModify(ctx context.Context, partition, group string) bool
 }
 
 // AuthenticatedAuthorizer allows mutations from any authenticated caller.
@@ -37,6 +45,7 @@ type API struct {
 	Store      *Store
 	Evaluator  *Evaluator
 	Authorizer Authorizer
+	Limits     LimitsProvider
 	Scheduler  *Scheduler
 	Lease      *LeaseManager
 	Logger     *log.Logger
@@ -83,10 +92,10 @@ func (a *API) handleCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type groupSummary struct {
-		Tenant   string `json:"tenant"`
-		Group    string `json:"group"`
-		Interval string `json:"interval"`
-		Rules    int    `json:"rules"`
+		Partition string `json:"partition"`
+		Group     string `json:"group"`
+		Interval  string `json:"interval"`
+		Rules     int    `json:"rules"`
 	}
 	out := make([]groupSummary, 0, len(refs))
 	for _, ref := range refs {
@@ -96,20 +105,20 @@ func (a *API) handleCollection(w http.ResponseWriter, r *http.Request) {
 			interval = ref.File.Groups[0].IntervalOrDefault().String()
 			rules = len(ref.File.Groups[0].Rules)
 		}
-		out = append(out, groupSummary{Tenant: ref.Tenant, Group: ref.Group, Interval: interval, Rules: rules})
+		out = append(out, groupSummary{Partition: ref.Partition, Group: ref.Group, Interval: interval, Rules: rules})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"groups": out})
 }
 
 func (a *API) handleGroup(w http.ResponseWriter, r *http.Request) {
-	tenant, group, ok := parseGroupPath(r.URL.Path)
+	partition, group, ok := parseGroupPath(r.URL.Path)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "path must be /v1/rules/{tenant}/{group}")
+		writeError(w, http.StatusBadRequest, "path must be /v1/rules/{partition}/{group}")
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		file, err := a.Store.Get(r.Context(), tenant, group)
+		file, err := a.Store.Get(r.Context(), partition, group)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -123,7 +132,7 @@ func (a *API) handleGroup(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	case http.MethodPut:
-		if !a.canModify(r.Context(), tenant, group) {
+		if !a.canModify(r.Context(), partition, group) {
 			writeError(w, http.StatusForbidden, "not authorized to modify this rule group")
 			return
 		}
@@ -138,23 +147,27 @@ func (a *API) handleGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for i := range file.Groups {
-			file.Groups[i].Tenant = tenant
+			file.Groups[i].Partition = partition
 		}
-		if err := a.Store.Put(r.Context(), tenant, group, file, false); err != nil {
+		if err := a.checkLimits(r.Context(), partition, group, file); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if err := a.Store.Put(r.Context(), partition, group, file, false); err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "tenant": tenant, "group": group})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "partition": partition, "group": group})
 	case http.MethodDelete:
-		if !a.canModify(r.Context(), tenant, group) {
+		if !a.canModify(r.Context(), partition, group) {
 			writeError(w, http.StatusForbidden, "not authorized to modify this rule group")
 			return
 		}
-		if err := a.Store.Delete(r.Context(), tenant, group); err != nil {
+		if err := a.Store.Delete(r.Context(), partition, group); err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "tenant": tenant, "group": group})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "partition": partition, "group": group})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -165,13 +178,13 @@ func (a *API) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	partition := strings.TrimSpace(r.URL.Query().Get("partition"))
 	group := strings.TrimSpace(r.URL.Query().Get("group"))
-	if tenant == "" || group == "" {
-		writeError(w, http.StatusBadRequest, "tenant and group are required")
+	if partition == "" || group == "" {
+		writeError(w, http.StatusBadRequest, "partition and group are required")
 		return
 	}
-	file, err := a.Store.Get(r.Context(), tenant, group)
+	file, err := a.Store.Get(r.Context(), partition, group)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -183,14 +196,51 @@ func (a *API) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
-func (a *API) canModify(ctx context.Context, tenant, group string) bool {
+func (a *API) canModify(ctx context.Context, partition, group string) bool {
 	if a.Authorizer == nil {
 		return true
 	}
-	return a.Authorizer.CanModify(ctx, tenant, group)
+	return a.Authorizer.CanModify(ctx, partition, group)
 }
 
-func parseGroupPath(path string) (tenant, group string, ok bool) {
+// checkLimits enforces the partition's group/rule envelope before a write.
+func (a *API) checkLimits(ctx context.Context, partition, group string, file *File) error {
+	if a.Limits == nil {
+		return nil
+	}
+	limits := a.Limits.RulesQuota(partition)
+	if limits.MaxGroups == 0 && limits.MaxRules == 0 && limits.MaxRulesPerGroup == 0 {
+		return nil
+	}
+	newRules := countRules(file)
+	if limits.MaxRulesPerGroup > 0 && newRules > limits.MaxRulesPerGroup {
+		return fmt.Errorf("partition %s rule group %s has %d rules; limit %d", partition, group, newRules, limits.MaxRulesPerGroup)
+	}
+	groups, rules, err := a.Store.Count(ctx, partition)
+	if err != nil {
+		return err
+	}
+	_, getErr := a.Store.Get(ctx, partition, group)
+	exists := getErr == nil
+	if !exists {
+		groups++
+	} else {
+		existingRules, err := a.Store.CountGroup(ctx, partition, group)
+		if err != nil {
+			return err
+		}
+		rules -= existingRules
+	}
+	if limits.MaxGroups > 0 && groups > limits.MaxGroups {
+		return fmt.Errorf("partition %s has %d rule groups; limit %d", partition, groups, limits.MaxGroups)
+	}
+	if limits.MaxRules > 0 && rules+newRules > limits.MaxRules {
+		return fmt.Errorf("partition %s would have %d rules; limit %d", partition, rules+newRules, limits.MaxRules)
+	}
+	return nil
+}
+
+func parseGroupPath(path string) (partition, group string, ok bool) {
 	rest := strings.TrimPrefix(path, "/v1/rules/")
 	parts := strings.Split(rest, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

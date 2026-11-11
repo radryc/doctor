@@ -127,9 +127,11 @@ type PipelineStats struct {
 }
 
 func (p *Pipeline) submit(ctx context.Context, w work) error {
+	// Increment before the send: a fast worker must not be able to decrement
+	// the gauge before the submitter has counted the item.
+	p.pending.Add(1)
 	select {
 	case p.queue <- w:
-		p.pending.Add(1)
 		// Wait for the worker to finish processing.
 		select {
 		case err := <-w.errCh:
@@ -138,6 +140,7 @@ func (p *Pipeline) submit(ctx context.Context, w work) error {
 			return ctx.Err()
 		}
 	default:
+		p.pending.Add(-1)
 		p.dropped.Add(1)
 		return ErrQueueFull
 	}
@@ -148,11 +151,14 @@ func (p *Pipeline) runWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Drain remaining items.
+			// Drain remaining items with a live context. Using the canceled
+			// shutdown context would make every queued write fail, silently
+			// dropping the backlog that was already accepted.
+			drainCtx := context.WithoutCancel(ctx)
 			for {
 				select {
 				case w := <-p.queue:
-					p.processWork(ctx, w)
+					p.processWork(drainCtx, w)
 				default:
 					return
 				}

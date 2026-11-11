@@ -23,6 +23,61 @@ type DashboardStore interface {
 	ListVersions(ctx context.Context, tenant, id string) ([]dashboards.DashboardVersion, error)
 }
 
+// dashboardReadable reports whether the caller may see a dashboard. Dashboards
+// without declared partitions are legacy/built-in and stay readable; new
+// documents declare partitions so reads can be scoped.
+func (s *Service) dashboardReadable(r *http.Request, doc *dashboards.DashboardDocument) bool {
+	if s.policyGate == nil || !s.policyGate.Enforced() || doc == nil {
+		return true
+	}
+	partitions := doc.EffectivePartitions()
+	if len(partitions) == 0 {
+		return true
+	}
+	identity := identityFromContext(r.Context())
+	for _, partition := range partitions {
+		if !s.policyGate.CanSeePartition(identity, partition) {
+			return false
+		}
+	}
+	return true
+}
+
+// dashboardWritable reports whether the caller may create, update, or delete a
+// dashboard. Every effective partition requires maintainer or admin role.
+func (s *Service) dashboardWritable(r *http.Request, doc *dashboards.DashboardDocument) (bool, string) {
+	if s.policyGate == nil || !s.policyGate.Enforced() || doc == nil {
+		return true, ""
+	}
+	identity := identityFromContext(r.Context())
+	if s.policyGate.IsAdmin(identity) {
+		return true, ""
+	}
+	partitions := doc.EffectivePartitions()
+	if len(partitions) == 0 {
+		return false, "partitions is required when access enforcement is enabled"
+	}
+	for _, partition := range partitions {
+		if !s.policyGate.CanModifyPartition(identity, partition) {
+			return false, fmt.Sprintf("maintainer or admin role required on partition %q", partition)
+		}
+	}
+	return true, ""
+}
+
+func filterReadableDashboards(r *http.Request, s *Service, docs []dashboards.DashboardDocument) []dashboards.DashboardDocument {
+	if s.policyGate == nil || !s.policyGate.Enforced() {
+		return docs
+	}
+	out := make([]dashboards.DashboardDocument, 0, len(docs))
+	for i := range docs {
+		if s.dashboardReadable(r, &docs[i]) {
+			out = append(out, docs[i])
+		}
+	}
+	return out
+}
+
 // handleListDashboards serves GET /v1/dashboards?tenant=<t>&tag=<tag>&q=<search>
 func (s *Service) handleListDashboards(w http.ResponseWriter, r *http.Request) {
 	if s.dashboardStore == nil {
@@ -41,6 +96,7 @@ func (s *Service) handleListDashboards(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, r, err)
 		return
 	}
+	docs = filterReadableDashboards(r, s, docs)
 	writeJSON(w, http.StatusOK, map[string]any{"dashboards": docs})
 }
 
@@ -64,6 +120,10 @@ func (s *Service) handleGetDashboard(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeInternalError(w, r, err)
 		}
+		return
+	}
+	if !s.dashboardReadable(r, doc) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: dashboard affects partitions you cannot read"})
 		return
 	}
 
@@ -118,6 +178,24 @@ func (s *Service) handlePutDashboard(w http.ResponseWriter, r *http.Request) {
 	doc.Tenant = tenant
 	doc.ID = id
 
+	// A dashboard is partition-scoped control-plane state: changing it requires
+	// maintainer/admin on both the old and the new declared partitions.
+	existing, getErr := s.dashboardStore.Get(r.Context(), tenant, id)
+	if getErr != nil && !errors.Is(getErr, dashboards.ErrNotFound) {
+		writeInternalError(w, r, getErr)
+		return
+	}
+	if existing != nil {
+		if ok, reason := s.dashboardWritable(r, existing); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: " + reason})
+			return
+		}
+	}
+	if ok, reason := s.dashboardWritable(r, doc); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: " + reason})
+		return
+	}
+
 	ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
 	if err := s.dashboardStore.Put(r.Context(), tenant, id, doc, ifMatch); err != nil {
 		switch err {
@@ -142,6 +220,20 @@ func (s *Service) handleDeleteDashboard(w http.ResponseWriter, r *http.Request) 
 	tenant, id, ok := parseDashboardPath(r.URL.Path)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path: expected /v1/dashboards/{tenant}/{id}"})
+		return
+	}
+
+	existing, err := s.dashboardStore.Get(r.Context(), tenant, id)
+	if err != nil {
+		if errors.Is(err, dashboards.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "dashboard not found"})
+		} else {
+			writeInternalError(w, r, err)
+		}
+		return
+	}
+	if ok, reason := s.dashboardWritable(r, existing); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: " + reason})
 		return
 	}
 
@@ -174,6 +266,20 @@ func (s *Service) handleDashboardVersions(w http.ResponseWriter, r *http.Request
 		return
 	}
 	tenant, id := parts[0], parts[1]
+
+	doc, err := s.dashboardStore.Get(r.Context(), tenant, id)
+	if err != nil {
+		if errors.Is(err, dashboards.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "dashboard not found"})
+		} else {
+			writeInternalError(w, r, err)
+		}
+		return
+	}
+	if !s.dashboardReadable(r, doc) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: dashboard affects partitions you cannot read"})
+		return
+	}
 
 	versions, err := s.dashboardStore.ListVersions(r.Context(), tenant, id)
 	if err != nil {
@@ -225,6 +331,35 @@ func (s *Service) handleImportDashboards(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		docs = append(docs, *doc)
+	}
+
+	// Preflight the whole bundle before writing anything. A partially applied
+	// import is worse than an explicit 403, and each document must be writable
+	// on every partition it declares.
+	for idx := range docs {
+		doc := &docs[idx]
+		t := doc.Tenant
+		if t == "" || t == "*" {
+			t = tenant
+		}
+		doc.Tenant = t
+		if ok, reason := s.dashboardWritable(r, doc); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": fmt.Sprintf("forbidden: dashboard %q: %s", doc.ID, reason)})
+			return
+		}
+		if mode == "overwrite" {
+			existing, getErr := s.dashboardStore.Get(r.Context(), t, doc.ID)
+			if getErr != nil && !errors.Is(getErr, dashboards.ErrNotFound) {
+				writeInternalError(w, r, getErr)
+				return
+			}
+			if existing != nil {
+				if ok, reason := s.dashboardWritable(r, existing); !ok {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": fmt.Sprintf("forbidden: existing dashboard %q: %s", doc.ID, reason)})
+					return
+				}
+			}
+		}
 	}
 
 	imported := 0
@@ -327,6 +462,8 @@ func (s *Service) handleExportDashboards(w http.ResponseWriter, r *http.Request)
 		}
 		docs = filtered
 	}
+
+	docs = filterReadableDashboards(r, s, docs)
 
 	bundle := dashboards.DashboardBundle{
 		Version:    dashboards.BundleVersion,

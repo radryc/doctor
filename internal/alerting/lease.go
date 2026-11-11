@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log"
 	"os"
@@ -68,7 +69,10 @@ func (m *LeaseManager) Run(ctx context.Context, onLeader func(context.Context)) 
 		if ctx.Err() != nil {
 			return
 		}
-		if m.TryAcquire(ctx) {
+		ok, err := m.tryAcquire(ctx)
+		if err != nil {
+			m.logf("lease acquire failed: %v", err)
+		} else if ok {
 			m.setLeader(true)
 			m.runLeader(ctx, onLeader)
 			m.setLeader(false)
@@ -84,38 +88,45 @@ func (m *LeaseManager) Run(ctx context.Context, onLeader func(context.Context)) 
 
 // TryAcquire attempts to take or renew the shard lease.
 func (m *LeaseManager) TryAcquire(ctx context.Context) bool {
+	ok, _ := m.tryAcquire(ctx)
+	return ok
+}
+
+// tryAcquire distinguishes "another replica owns the lease" (false, nil) from
+// a transient store error (false, err). The renewal loop must not step down on
+// a single read error.
+func (m *LeaseManager) tryAcquire(ctx context.Context) (bool, error) {
 	now := m.now()
 	content, err := json.Marshal(Lease{Owner: m.Owner, Shard: m.Shard, AcquiredAt: now, ExpiresAt: now.Add(m.TTL)})
 	if err != nil {
-		return false
+		return false, err
 	}
 	data, version, err := m.read(ctx, m.Path)
 	if err != nil {
-		m.logf("lease read failed: %v", err)
-		return false
+		return false, fmt.Errorf("read lease: %w", err)
 	}
 	if data == nil {
 		if err := m.write(ctx, m.Path, content, "absent"); err != nil {
-			return false
+			return false, fmt.Errorf("create lease: %w", err)
 		}
 		m.logf("acquired shard %d lease", m.Shard)
-		return true
+		return true, nil
 	}
 	var lease Lease
 	if err := json.Unmarshal(data, &lease); err != nil {
 		m.logf("lease malformed: %v", err)
-		return false
+		return false, nil
 	}
 	if now.Before(lease.ExpiresAt) && lease.Owner != m.Owner {
-		return false
+		return false, nil
 	}
 	if err := m.write(ctx, m.Path, content, version); err != nil {
-		return false
+		return false, fmt.Errorf("replace lease: %w", err)
 	}
 	if lease.Owner != m.Owner {
 		m.logf("took over shard %d lease from %s", m.Shard, lease.Owner)
 	}
-	return true
+	return true, nil
 }
 
 func (m *LeaseManager) runLeader(ctx context.Context, onLeader func(context.Context)) {
@@ -134,7 +145,12 @@ func (m *LeaseManager) runLeader(ctx context.Context, onLeader func(context.Cont
 			<-done
 			return
 		case <-ticker.C:
-			if !m.TryAcquire(ctx) {
+			ok, err := m.tryAcquire(ctx)
+			if err != nil {
+				m.logf("shard %d lease renew failed: %v", m.Shard, err)
+				continue
+			}
+			if !ok {
 				m.logf("lost shard %d lease; stepping down", m.Shard)
 				cancel()
 				<-done

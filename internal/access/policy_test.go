@@ -203,6 +203,40 @@ func TestAWSCanonicalization(t *testing.T) {
 	}
 }
 
+func TestReadPartitionsIncludesAWSAliases(t *testing.T) {
+	gate := newTestGate(t, true)
+
+	logs, restricted := gate.ReadPartitions(foo(), policy.SignalLogs)
+	if !restricted {
+		t.Fatal("logs should be restricted for foo")
+	}
+	wantLogs := []string{"123456789012", "aws-x", "us-east-1"}
+	if len(logs) != len(wantLogs) {
+		t.Fatalf("log read partitions = %v, want %v", logs, wantLogs)
+	}
+	for i, want := range wantLogs {
+		if logs[i] != want {
+			t.Fatalf("log read partitions = %v, want %v", logs, wantLogs)
+		}
+	}
+
+	// k8s-z has no AWS binding, so only the canonical name is pushed down.
+	traces, restricted := gate.ReadPartitions(foo(), policy.SignalTraces)
+	if !restricted || len(traces) != 1 || traces[0] != "k8s-z" {
+		t.Fatalf("trace read partitions = %v, restricted=%v; want [k8s-z]", traces, restricted)
+	}
+
+	// Admins are not restricted, so nothing is pushed down. Observe mode still
+	// reports the set (the SQL console uses it), but the query layer only
+	// pushes it down while enforcement is active.
+	if parts, restricted := gate.ReadPartitions(admin(), policy.SignalTraces); restricted || parts != nil {
+		t.Fatalf("admin read partitions = %v, restricted=%v; want unrestricted", parts, restricted)
+	}
+	if _, restricted := newTestGate(t, false).ReadPartitions(foo(), policy.SignalLogs); !restricted {
+		t.Fatal("ReadPartitions should still report the visible set in observe mode")
+	}
+}
+
 func TestCanSeePartition(t *testing.T) {
 	gate := newTestGate(t, true)
 	if !gate.CanSeePartition(foo(), "aws-x") || !gate.CanSeePartition(foo(), "k8s-z") {
@@ -279,5 +313,46 @@ func TestMiddleware(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authenticated trace request: got %d, want 200", rec.Code)
+	}
+}
+
+func TestVisiblePartitionsForSQLRespectsSignalScopes(t *testing.T) {
+	for _, enforce := range []bool{true, false} {
+		gate := newTestGate(t, enforce)
+		logs, restricted := gate.VisiblePartitions(foo(), policy.SignalLogs)
+		if !restricted || len(logs) != 1 || logs[0] != "aws-x" {
+			t.Fatalf("enforce=%v logs = %v, restricted=%v; want [aws-x] restricted", enforce, logs, restricted)
+		}
+		traces, restricted := gate.VisiblePartitions(foo(), policy.SignalTraces)
+		if !restricted || len(traces) != 1 || traces[0] != "k8s-z" {
+			t.Fatalf("enforce=%v traces = %v, restricted=%v; want [k8s-z] restricted", enforce, traces, restricted)
+		}
+		metrics, restricted := gate.VisiblePartitions(foo(), policy.SignalMetrics)
+		if restricted || metrics != nil {
+			t.Fatalf("enforce=%v metrics = %v, restricted=%v; want unrestricted", enforce, metrics, restricted)
+		}
+		adminLogs, restricted := gate.VisiblePartitions(admin(), policy.SignalLogs)
+		if restricted || adminLogs != nil {
+			t.Fatalf("enforce=%v admin logs = %v, restricted=%v; want unrestricted", enforce, adminLogs, restricted)
+		}
+	}
+}
+
+func TestAccessiblePartitionsUsesPartitionScope(t *testing.T) {
+	gate := newTestGate(t, true)
+	partitions, restricted := gate.AccessiblePartitions(foo())
+	if !restricted {
+		t.Fatal("expected a restricted partition list")
+	}
+	if len(partitions) != 2 || partitions[0] != "aws-x" || partitions[1] != "k8s-z" {
+		t.Fatalf("partitions = %v, want [aws-x k8s-z]", partitions)
+	}
+	if _, restricted := gate.AccessiblePartitions(admin()); restricted {
+		t.Fatal("admin must be unrestricted")
+	}
+
+	observe := newTestGate(t, false)
+	if _, restricted := observe.AccessiblePartitions(foo()); restricted {
+		t.Fatal("observe-only gate must not restrict the catalog")
 	}
 }

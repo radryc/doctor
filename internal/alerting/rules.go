@@ -47,9 +47,10 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON implements json.Marshaler.
+// MarshalJSON implements json.Marshaler. Durations use the compact form the
+// UI and rule examples use ("5m", not "5m0s").
 func (d Duration) MarshalJSON() ([]byte, error) {
-	return json.Marshal(time.Duration(d).String())
+	return json.Marshal(formatDuration(time.Duration(d)))
 }
 
 // RuleFile is one alert rule group file.
@@ -67,15 +68,83 @@ type RuleGroup struct {
 	Rules     []AlertRule `json:"rules" yaml:"rules"`
 }
 
-// AlertRule is one Sentinel PromQL alert rule.
+// AlertRule is one Sentinel alert rule. Guided rules carry a structured Spec
+// that is compiled into Expr; PromQL rules carry Expr directly.
 type AlertRule struct {
+	Mode          string            `json:"mode,omitempty" yaml:"mode,omitempty"`
 	Alert         string            `json:"alert" yaml:"alert"`
+	Spec          *AlertSpec        `json:"spec,omitempty" yaml:"spec,omitempty"`
 	Expr          string            `json:"expr" yaml:"expr"`
 	For           Duration          `json:"for,omitempty" yaml:"for,omitempty"`
 	KeepFiringFor Duration          `json:"keep_firing_for,omitempty" yaml:"keep_firing_for,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 	Annotations   map[string]string `json:"annotations,omitempty" yaml:"annotations,omitempty"`
 	Notify        []string          `json:"notify,omitempty" yaml:"notify,omitempty"`
+}
+
+// ModeOrDefault infers the authoring mode for legacy rules.
+func (r *AlertRule) ModeOrDefault() string {
+	if r.Mode != "" {
+		return r.Mode
+	}
+	if r.Spec != nil {
+		return ModeGuided
+	}
+	return ModePromQL
+}
+
+// Prepare validates the rule and compiles guided specs into Expr.
+func (r *AlertRule) Prepare() error {
+	switch r.ModeOrDefault() {
+	case ModeGuided:
+		if r.Spec == nil {
+			return fmt.Errorf("alerting: rule %q is guided but has no spec", r.Alert)
+		}
+		expr, err := CompileSpec(r.Spec)
+		if err != nil {
+			return fmt.Errorf("alerting: rule %q: %w", r.Alert, err)
+		}
+		r.Mode = ModeGuided
+		r.Expr = expr
+		r.For = r.Spec.For
+		r.KeepFiringFor = r.Spec.KeepFiringFor
+		if r.Labels == nil {
+			r.Labels = map[string]string{}
+		}
+		if r.Spec.Severity != "" {
+			r.Labels["severity"] = r.Spec.Severity
+		}
+		if r.Annotations == nil {
+			r.Annotations = map[string]string{}
+		}
+		if r.Spec.Summary != "" {
+			r.Annotations["summary"] = r.Spec.Summary
+		}
+		if r.Spec.RunbookURL != "" {
+			r.Annotations["runbook_url"] = r.Spec.RunbookURL
+		}
+		r.Annotations["sentinel.signal"] = r.Spec.Signal
+		if r.Notify == nil {
+			r.Notify = append([]string(nil), r.Spec.Destinations...)
+		}
+	case ModePromQL:
+		if strings.TrimSpace(r.Expr) == "" {
+			return fmt.Errorf("alerting: rule %q has no expr", r.Alert)
+		}
+		r.Mode = ModePromQL
+	default:
+		return fmt.Errorf("alerting: rule %q has unsupported mode %q", r.Alert, r.Mode)
+	}
+	if r.Labels == nil {
+		r.Labels = map[string]string{}
+	}
+	if r.Annotations == nil {
+		r.Annotations = map[string]string{}
+	}
+	if r.Labels["severity"] == "" {
+		r.Labels["severity"] = "warning"
+	}
+	return nil
 }
 
 var alertNamePattern = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
@@ -128,8 +197,8 @@ func (f *RuleFile) Validate() error {
 			if !alertNamePattern.MatchString(rule.Alert) {
 				return fmt.Errorf("alerting: group %q rule %q has invalid alert name", group.Name, rule.Alert)
 			}
-			if strings.TrimSpace(rule.Expr) == "" {
-				return fmt.Errorf("alerting: group %q rule %q has no expr", group.Name, rule.Alert)
+			if err := rule.Prepare(); err != nil {
+				return fmt.Errorf("alerting: group %q: %w", group.Name, err)
 			}
 			if _, exists := seenRules[rule.Alert]; exists {
 				return fmt.Errorf("alerting: group %q has duplicate alert %q", group.Name, rule.Alert)
@@ -381,6 +450,7 @@ func (s *Service) evaluateRule(ctx context.Context, group RuleGroup, rule AlertR
 			StartsAt:    startsAt,
 			Value:       strconv.FormatFloat(value, 'g', -1, 64),
 			Delivery:    DeliverySentinel,
+			Notify:      append([]string(nil), rule.Notify...),
 			LastSeenAt:  &lastSeen,
 		}
 		alert.ID = alert.Fingerprint

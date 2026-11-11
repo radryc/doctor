@@ -49,6 +49,7 @@ type MetricPointRecord struct {
     Partition, Intent, Asset string
     TraceID, SpanID string
     MetricName, Description, Unit, Type string
+    MetricType string
     Timestamp, StartTime time.Time
     Temporality string
     Attributes, ResourceAttributes map[string]string
@@ -58,9 +59,14 @@ type MetricPointRecord struct {
 }
 ```
 
-- Gauges/sums keep one point.
+- `MetricType` is the OTLP aggregation kind: `gauge`, `counter`, `up_down_counter`,
+  `histogram`, `exponential_histogram`, or `summary`. OTLP does not distinguish synchronous from
+  observable instruments, so an Observable Counter arrives and is stored as `counter`.
+- Gauges/sums keep one point. Sum monotonicity selects `counter` vs `up_down_counter`.
 - Histograms become `_bucket` (with `le`), `_count`, and `_sum` series.
-- Exponential histograms lose bucket detail and keep `_count`/`_sum`.
+- Exponential histograms are expanded into explicit `_bucket` series with computed `le`
+  boundaries, so `histogram_quantile()` works. Expansion is capped at 160 buckets; larger points
+  keep only `_count`/`_sum` and carry `guardian.histogram.buckets.truncated=true`.
 - Summaries become quantile series plus `_count`/`_sum`.
 - `TraceID`/`SpanID` are exemplar correlation fields, not series identity.
 
@@ -72,6 +78,7 @@ Series-index metadata used by discovery and presence aggregations:
 type MetricSeriesMeta struct {
     Tenant, Service, Partition, Intent, Asset string
     MetricName string
+    MetricType, Unit, Description string
     Labels map[string]string
     MinTime, MaxTime time.Time
 }
@@ -171,7 +178,9 @@ The service discovery catalog aggregates identity from logs, traces, metrics, an
 | `TraceID`, `SpanID` | typed fields for logs/traces; correlation labels for metrics |
 | `Timestamp` / `StartTime`+`EndTime` | `TimestampUnixNano` / `StartUnixNano`+`EndUnixNano` |
 | `ResourceAttributes`, `Attributes`, identity | merged `Labels` / `Attributes` |
-| `Description`, `Unit`, `Type`, `Temporality` | **dropped** for metrics |
+| `MetricType`, `Temporality` | `MetricType`, `Temporality` |
+| `Description`, `Unit` | series-index metadata (`Description`, `Unit`) |
+| `Type` (point role) | **not stored**; derived from query shape |
 | `SeverityNumber` | **dropped** for logs (only `SeverityText`) |
 | `Events` | **dropped** for traces |
 | `Kind` | **dropped** for traces |
@@ -344,19 +353,17 @@ a data-model detail.
 
 Observed issues:
 
-1. **Metric metadata loss** at the MonoFS boundary (unit, description, type, temporality). Query
-   responses report synthesized types (`gauge`/untyped in metadata) rather than stored metadata.
-2. **Log severity number loss**; only text survives.
-3. **Trace kind and events loss**; Tempo output always uses empty scope and no events from storage.
-4. **Canonicalization heuristics**: `dottedLabelName` converts any underscore to a dot when retrying
+1. **Log severity number loss**; only text survives.
+2. **Trace kind and events loss**; Tempo output always uses empty scope and no events from storage.
+3. **Canonicalization heuristics**: `dottedLabelName` converts any underscore to a dot when retrying
    series-index discovery; this can be ambiguous for labels that genuinely contain underscores.
-5. **Service alias ambiguity**: short service names and canonical names can both exist; query
+4. **Service alias ambiguity**: short service names and canonical names can both exist; query
    projections prefer canonical but preserve aliases.
-6. **AWS partition fallback**: when no policy binding matches, region is used as the partition, which
+5. **AWS partition fallback**: when no policy binding matches, region is used as the partition, which
    can collide with a real partition name.
-7. **Federation `byTrace` index is dead**: the map is read by `Catalog.ByTrace` but never written, so
+6. **Federation `byTrace` index is dead**: the map is read by `Catalog.ByTrace` but never written, so
    trace-ID planning always falls back to a full/small-catalog fan-out.
-8. **AWS dimension-only metrics** are kept even when a partition filter is active; they can reveal
+7. **AWS dimension-only metrics** are kept even when a partition filter is active; they can reveal
    metrics outside the selected partition.
-9. **Trace discovery cache** entries are keyed by tenant+identity+tag and never globally evicted on
+8. **Trace discovery cache** entries are keyed by tenant+identity+tag and never globally evicted on
    expiry; a large user population accumulates entries.

@@ -68,7 +68,7 @@ type File struct {
 // Group is a set of rules evaluated on one interval.
 type Group struct {
 	Name            string   `json:"name" yaml:"name"`
-	Tenant          string   `json:"tenant" yaml:"tenant"`
+	Partition       string   `json:"partition" yaml:"partition"`
 	Interval        Duration `json:"interval,omitempty" yaml:"interval,omitempty"`
 	EvaluationDelay Duration `json:"evaluation_delay,omitempty" yaml:"evaluation_delay,omitempty"`
 	Rules           []Rule   `json:"rules" yaml:"rules"`

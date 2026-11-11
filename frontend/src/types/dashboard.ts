@@ -73,6 +73,8 @@ export interface DashboardWidget {
   gridPos: GridPos;
   queries: WidgetQuery[];
   visualization?: WidgetVisualization;
+  /** Optional per-panel partition scope; inherits the dashboard scope when empty. */
+  partitions?: string[];
 }
 
 export interface DashboardMeta {
@@ -93,6 +95,8 @@ export interface DashboardDocument {
   refreshInterval?: string;
   variables?: DashboardVariable[];
   layout?: DashboardWidget[];
+  /** Partitions this dashboard affects. Write access requires maintainer/admin on each. */
+  partitions?: string[];
   meta?: DashboardMeta;
 }
 

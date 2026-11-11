@@ -268,7 +268,7 @@ function TimeseriesWidget({ widget, tenant, variableValues, macros, from, to, re
             if (r.data.resultType !== "matrix") return [];
             return (r.data.result as LokiMatrixSeries[]).map((s) => ({
               label: formatLegend(q.legendFormat ?? "", s.metric) || q.refId || "A",
-              points: s.values.map(([ts, v]) => ({
+              points: (s.values ?? []).map(([ts, v]) => ({
                 timestamp: new Date(ts * 1000).toISOString(),
                 value: parseFloat(v),
               })),
@@ -291,7 +291,7 @@ function TimeseriesWidget({ widget, tenant, variableValues, macros, from, to, re
                   .filter(([k]) => k !== "__name__")
                   .map(([k, v]) => `${k}="${v}"`)
                   .join(", ") || (q.refId ?? "A"),
-            points: s.values.map(([ts, v]) => ({
+            points: (s.values ?? []).map(([ts, v]) => ({
               timestamp: new Date(ts * 1000).toISOString(),
               value: parseFloat(v),
             })),
@@ -395,8 +395,9 @@ function ToplistWidget({ widget, tenant, variableValues, macros, from, to, refre
       const sorted = r.data.result
         .map((s) => ({
           label: formatLegend(query.legendFormat ?? "", s.metric) || JSON.stringify(s.metric),
-          value: parseFloat(s.value[1]),
+          value: s.value ? parseFloat(s.value[1]) : NaN,
         }))
+        .filter((row) => Number.isFinite(row.value))
         .sort((a, b) => b.value - a.value)
         .slice(0, 10);
       setRows(sorted);
@@ -682,7 +683,7 @@ function TableWidget({ widget, tenant, variableValues, macros, to, refreshTick }
         setRows(
           r.data.result.map((s) => ({
             label: formatLegend(query.legendFormat ?? "", s.metric) || JSON.stringify(s.metric),
-            value: s.value[1],
+            value: s.value ? s.value[1] : "histogram",
           }))
         );
       })
@@ -753,7 +754,7 @@ function GaugeWidget({ widget, tenant, variableValues, macros, to, refreshTick }
       .queryPrometheus(new URLSearchParams({ query: expr, time: (to.getTime() / 1000).toFixed(0) }))
       .then((r) => {
         if (!active) return;
-        if (r.data.resultType === "vector" && r.data.result[0]) {
+        if (r.data.resultType === "vector" && r.data.result[0]?.value) {
           setValue(parseFloat(r.data.result[0].value[1]));
         } else {
           setValue(null);

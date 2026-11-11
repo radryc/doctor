@@ -85,12 +85,17 @@ function DashboardBrowser() {
   };
 
   const cloneDashboard = async (doc: DashboardDocument) => {
+    const partitions = (doc.partitions ?? []).length > 0
+      ? doc.partitions
+      : promptPartitions(config.default_partition);
+    if (!partitions) return;
     const cloned: DashboardDocument = {
       ...doc,
       id: `${doc.id}-copy-${Date.now()}`,
       title: `${doc.title} (copy)`,
       builtIn: false,
       tenant: config.default_tenant,
+      partitions,
       meta: undefined,
     };
     try {
@@ -195,6 +200,7 @@ function DashboardCard({ doc, tenant, onOpen, onClone, onDelete }: CardProps) {
       <div className="dash-card__meta">
         {(doc.layout ?? []).length} widget{(doc.layout ?? []).length === 1 ? "" : "s"}
         {doc.defaultTimeRange ? ` · ${doc.defaultTimeRange}` : ""}
+        {(doc.partitions ?? []).length > 0 ? ` · ${(doc.partitions ?? []).join(", ")}` : ""}
       </div>
       <div className="dash-card__actions" onClick={(e) => e.stopPropagation()}>
         <button className="icon-btn" title="Clone to shared dashboard" onClick={onClone}>
@@ -224,12 +230,18 @@ function NewDashboard() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [tags, setTags] = useState("");
+  const [partitions, setPartitions] = useState(config.default_partition ?? "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
   const create = async () => {
     if (!title.trim()) {
       setError("Give the dashboard a title.");
+      return;
+    }
+    const partitionList = partitions.split(",").map((p) => p.trim()).filter(Boolean);
+    if (partitionList.length === 0) {
+      setError("Specify at least one affected partition.");
       return;
     }
     setSaving(true);
@@ -244,6 +256,7 @@ function NewDashboard() {
       tenant: config.default_tenant,
       tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
       defaultTimeRange: "1h",
+      partitions: partitionList,
       variables: [
         { name: "partition", label: "Partition", type: "partition", defaultValue: "$__all", includeAll: true },
         { name: "service", label: "Service", type: "service", defaultValue: "$__all", includeAll: true },
@@ -283,6 +296,11 @@ function NewDashboard() {
             Tags
             <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="apm, production, on-call" />
           </label>
+          <label>
+            Affected partitions
+            <input value={partitions} onChange={(e) => setPartitions(e.target.value)} placeholder="agent, monofs" />
+            <span className="dash-hint">Comma-separated. Creating and editing this dashboard requires maintainer or admin on every listed partition.</span>
+          </label>
           {error && <div className="import-error">{error}</div>}
           <div className="new-dashboard__actions">
             <button className="btn" onClick={() => navigate("/dashboards")}>Cancel</button>
@@ -312,6 +330,7 @@ function DashboardView({ id }: { id: string }) {
   const [editMode, setEditMode] = useState(false);
   const [editorWidget, setEditorWidget] = useState<DashboardWidget | null | undefined>(undefined);
   const [saving, setSaving] = useState(false);
+  const [partitionDraft, setPartitionDraft] = useState("");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -320,6 +339,7 @@ function DashboardView({ id }: { id: string }) {
       .getDashboard(config.default_tenant, id)
       .then((d) => {
         setDoc(d);
+        setPartitionDraft((d.partitions ?? []).join(", "));
         // Initialize variable values: URL params override defaults.
         const fromURL = variablesFromParams(searchParamsRef.current);
         const defaults: VariableValues = {};
@@ -340,14 +360,20 @@ function DashboardView({ id }: { id: string }) {
   };
 
   const save = async (next: DashboardDocument) => {
+    const partitionList = partitionDraft.split(",").map((p) => p.trim()).filter(Boolean);
+    if (!next.builtIn && partitionList.length === 0) {
+      setError("Specify at least one affected partition before saving.");
+      return;
+    }
     setSaving(true);
     setError("");
     setSaveMessage("");
+    const payload: DashboardDocument = { ...next, partitions: partitionList };
     try {
-      await api.putDashboard(config.default_tenant, next.id, next, next.meta?.versionId);
+      await api.putDashboard(config.default_tenant, payload.id, payload, payload.meta?.versionId);
       // The server issues a new CAS version on every write; clear the local
       // version so the next save starts from the latest revision.
-      setDoc({ ...next, meta: undefined });
+      setDoc({ ...payload, meta: undefined });
       setEditMode(false);
       setSaveMessage("Saved");
       window.setTimeout(() => setSaveMessage(""), 1800);
@@ -379,11 +405,16 @@ function DashboardView({ id }: { id: string }) {
 
   const clone = async () => {
     if (!doc) return;
+    const partitions = (doc.partitions ?? []).length > 0
+      ? doc.partitions
+      : promptPartitions(config.default_partition);
+    if (!partitions) return;
     const cloned: DashboardDocument = {
       ...doc,
       id: `${doc.id}-copy-${Date.now()}`,
       title: `${doc.title} (copy)`,
       builtIn: false,
+      partitions,
       meta: undefined,
     };
     try {
@@ -411,6 +442,21 @@ function DashboardView({ id }: { id: string }) {
           </button>
           <h2>{doc.title}</h2>
           {doc.builtIn && <span className="dash-card__badge">Built-in Preset</span>}
+          {!doc.builtIn && (doc.partitions ?? []).length > 0 && (
+            <span className="dash-card__badge" title="Creating or editing this dashboard requires maintainer/admin on every listed partition">
+              {(doc.partitions ?? []).join(", ")}
+            </span>
+          )}
+          {editMode && !doc.builtIn && (
+            <input
+              className="xp-search"
+              value={partitionDraft}
+              onChange={(e) => setPartitionDraft(e.target.value)}
+              placeholder="Affected partitions (agent, monofs)"
+              title="Comma-separated partitions. Saving requires maintainer/admin on every listed partition."
+              style={{ maxWidth: 260 }}
+            />
+          )}
           {saveMessage && <span className="dash-saved">{saveMessage}</span>}
         </div>
         <div className="xp-toolbar">
@@ -508,4 +554,14 @@ function slugify(value: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
+}
+
+function promptPartitions(fallback?: string): string[] | null {
+  const answer = window.prompt(
+    "Affected partitions for this dashboard (comma-separated). Saving requires maintainer/admin on each.",
+    fallback ?? ""
+  );
+  if (answer === null) return null;
+  const partitions = [...new Set(answer.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean))];
+  return partitions.length > 0 ? partitions : null;
 }

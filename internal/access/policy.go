@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -109,6 +110,15 @@ func (g *PolicyGate) policy() *policy.Policy {
 	return g.loader.Get()
 }
 
+// CurrentPolicy returns the currently loaded bundle, or nil when no policy is
+// loaded. It lets other features (quotas) share the same loader.
+func (g *PolicyGate) CurrentPolicy() *policy.Policy {
+	if g == nil {
+		return nil
+	}
+	return g.policy()
+}
+
 // IsAdmin reports whether the identity bypasses filtering. The break-glass
 // admin subject (from the shared auth verifier) always bypasses, even while no
 // policy is loaded.
@@ -118,6 +128,89 @@ func (g *PolicyGate) IsAdmin(id authz.Identity) bool {
 	}
 	p := g.policy()
 	return p != nil && p.IsAdmin(id)
+}
+
+// VisiblePartitions returns the partitions the caller may read for a signal.
+// Unlike record filtering, this runs even in observe mode: the SQL console is
+// a new read surface and fails closed while the policy is unavailable. Metrics
+// are always visible under the Strata policy.
+func (g *PolicyGate) VisiblePartitions(id authz.Identity, signal policy.Signal) ([]string, bool) {
+	if g == nil || signal == policy.SignalMetrics {
+		return nil, false
+	}
+	if g.IsAdmin(id) {
+		return nil, false
+	}
+	p := g.policy()
+	if p == nil {
+		return []string{}, true
+	}
+	names, all := p.VisiblePartitions(id)
+	if all {
+		if p.CanReadSignal(id, "*", signal) {
+			return nil, false
+		}
+		return []string{}, true
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if p.CanReadSignal(id, name, signal) {
+			out = append(out, name)
+		}
+	}
+	return out, true
+}
+
+// ReadPartitions returns the raw storage partition labels that may contain
+// records the caller can read. It starts from VisiblePartitions and adds the
+// AWS account/region aliases bound to each visible partition because legacy
+// federated records can carry the region (or account) as guardian_partition.
+// A storage pushdown using only the canonical partition names would hide those
+// rows even though the record-level canonicalizer would keep them.
+//
+// The returned set is deliberately a superset: callers must still apply
+// FilterLogs/FilterSpans after reading. It is sorted so pushdown requests and
+// cache keys are deterministic.
+func (g *PolicyGate) ReadPartitions(id authz.Identity, signal policy.Signal) ([]string, bool) {
+	partitions, restricted := g.VisiblePartitions(id, signal)
+	if !restricted {
+		return nil, false
+	}
+	p := g.policy()
+	if p == nil || len(partitions) == 0 {
+		return partitions, true
+	}
+
+	visible := make(map[string]struct{}, len(partitions))
+	for _, partition := range partitions {
+		visible[partition] = struct{}{}
+	}
+
+	seen := make(map[string]struct{}, len(partitions))
+	out := make([]string, 0, len(partitions))
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	for _, partition := range partitions {
+		add(partition)
+	}
+	for _, binding := range p.AWSBindings() {
+		if _, ok := visible[binding.Partition]; !ok {
+			continue
+		}
+		add(binding.Account)
+		add(binding.Region)
+	}
+	sort.Strings(out)
+	return out, true
 }
 
 // Allowed is the request-level gate: metrics always pass; disabled and
@@ -139,6 +232,33 @@ func (g *PolicyGate) Allowed(id authz.Identity, signal policy.Signal) bool {
 	return g.Ready()
 }
 
+// AccessiblePartitions returns the partition names the identity may see at
+// all (the same partition scope CanSeePartition enforces). restricted is false
+// when the gate does not restrict the identity: enforcement is disabled, the
+// identity is an admin or has a wildcard grant, or the policy has not loaded
+// yet.
+func (g *PolicyGate) AccessiblePartitions(id authz.Identity) ([]string, bool) {
+	if g == nil || !g.enforce {
+		return nil, false
+	}
+	if g.IsAdmin(id) {
+		return nil, false
+	}
+	p := g.policy()
+	if p == nil {
+		return nil, false
+	}
+	names, all := p.VisiblePartitions(id)
+	if all {
+		return nil, false
+	}
+	if names == nil {
+		names = []string{}
+	}
+	sort.Strings(names)
+	return names, true
+}
+
 // CanSeePartition reports whether the identity may see the partition in
 // catalog/list views such as APM Services, Synthetics, and Fleet. Metrics stay
 // globally readable; this gate is for partition identities, not metric data.
@@ -158,6 +278,28 @@ func (g *PolicyGate) CanSeePartition(id authz.Identity, partition string) bool {
 		return false
 	}
 	return p.CanSeePartition(id, partition)
+}
+
+// CanModifyPartition reports whether the identity may create, update, or
+// delete partition-scoped control-plane objects (dashboards, saved graphs)
+// for the partition. Maintainer and admin roles allow modification; viewer and
+// ingester do not. Observe mode and a disabled gate pass through.
+func (g *PolicyGate) CanModifyPartition(id authz.Identity, partition string) bool {
+	if g == nil || !g.enforce {
+		return true
+	}
+	partition = strings.TrimSpace(partition)
+	if partition == "" || id.IsAnonymous() {
+		return false
+	}
+	if g.IsAdmin(id) {
+		return true
+	}
+	p := g.policy()
+	if p == nil {
+		return false
+	}
+	return p.Role(id, partition).Allows(authz.ActionModify)
 }
 
 // PartitionVisible decides one record. Under enforcement, records without a

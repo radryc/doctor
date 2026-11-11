@@ -72,6 +72,14 @@ type GRPCClient struct {
 	creds       credentials.TransportCredentials
 	nodeConns   map[string]*grpc.ClientConn
 	nodeClients map[string]pb.MonoFSClient
+	nodeAddrs   map[string]string
+
+	// Node discovery is refreshed at most once per nodeRefreshTTL instead of on
+	// every ReadFile/ListDir. nodeRefreshMu serializes refreshes so a burst of
+	// reads does not issue one GetClusterInfo RPC per request.
+	nodeRefreshMu    sync.Mutex
+	nodeRefreshTTL   time.Duration
+	nodesRefreshedAt time.Time
 
 	stopHeartbeat chan struct{}
 	stopOnce      sync.Once
@@ -148,6 +156,7 @@ func NewGRPCClient(ctx context.Context, cfg ClientConfig) (*GRPCClient, error) {
 		creds:                creds,
 		nodeConns:            map[string]*grpc.ClientConn{},
 		nodeClients:          map[string]pb.MonoFSClient{},
+		nodeAddrs:            map[string]string{},
 		stopHeartbeat:        make(chan struct{}),
 	}
 
@@ -167,13 +176,22 @@ func NewGRPCClient(ctx context.Context, cfg ClientConfig) (*GRPCClient, error) {
 func (c *GRPCClient) Close() error {
 	c.stopHeartbeatLoop()
 
+	// Snapshot the connection state under the lock, then release it before the
+	// unregister RPC (which may take up to 5s) and the closes. Holding c.mu
+	// across network I/O blocks every concurrent node snapshot.
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	router := c.router
+	routerConn := c.routerConn
+	nodeConns := make(map[string]*grpc.ClientConn, len(c.nodeConns))
+	for id, conn := range c.nodeConns {
+		nodeConns[id] = conn
+	}
+	c.mu.Unlock()
 
 	var errs []error
-	if c.router != nil {
+	if router != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := c.router.UnregisterClient(ctx, &pb.UnregisterClientRequest{
+		_, err := router.UnregisterClient(ctx, &pb.UnregisterClientRequest{
 			ClientId: c.clientID,
 			Reason:   "doctor shutdown",
 		})
@@ -182,13 +200,13 @@ func (c *GRPCClient) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	for nodeID, conn := range c.nodeConns {
+	for nodeID, conn := range nodeConns {
 		if err := conn.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close node %s: %w", nodeID, err))
 		}
 	}
-	if c.routerConn != nil {
-		if err := c.routerConn.Close(); err != nil {
+	if routerConn != nil {
+		if err := routerConn.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -498,6 +516,11 @@ func (c *GRPCClient) stopHeartbeatLoop() {
 }
 
 func (c *GRPCClient) healthyNodes(ctx context.Context) ([]nodeTarget, error) {
+	if c.nodesFresh() {
+		if nodes := c.snapshotNodeTargets(); len(nodes) > 0 {
+			return nodes, nil
+		}
+	}
 	if err := c.refreshNodes(ctx); err != nil {
 		if ctx.Err() != nil {
 			return nil, err
@@ -513,6 +536,25 @@ func (c *GRPCClient) healthyNodes(ctx context.Context) ([]nodeTarget, error) {
 		return nil, fmt.Errorf("no healthy monofs nodes available")
 	}
 	return out, nil
+}
+
+func (c *GRPCClient) nodeRefreshInterval() time.Duration {
+	if c.nodeRefreshTTL > 0 {
+		return c.nodeRefreshTTL
+	}
+	return 30 * time.Second
+}
+
+// nodesFresh reports whether the cached node list is still within its TTL. An
+// empty node list is never considered fresh, so a failed initial discovery is
+// retried on the next call.
+func (c *GRPCClient) nodesFresh() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.nodesRefreshedAt.IsZero() || len(c.nodeClients) == 0 {
+		return false
+	}
+	return time.Since(c.nodesRefreshedAt) < c.nodeRefreshInterval()
 }
 
 func (c *GRPCClient) snapshotNodeTargets() []nodeTarget {
@@ -533,6 +575,14 @@ func (c *GRPCClient) snapshotNodeTargets() []nodeTarget {
 }
 
 func (c *GRPCClient) refreshNodes(ctx context.Context) error {
+	// Serialize discovery: a burst of concurrent reads must not each issue a
+	// GetClusterInfo call while the cached list is being rebuilt.
+	c.nodeRefreshMu.Lock()
+	defer c.nodeRefreshMu.Unlock()
+	if c.nodesFresh() {
+		return nil
+	}
+
 	callCtx, cancel := c.withTimeout(ctx)
 	defer cancel()
 	resp, err := c.router.GetClusterInfo(callCtx, &pb.ClusterInfoRequest{
@@ -559,14 +609,24 @@ func (c *GRPCClient) refreshNodes(ctx context.Context) error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.nodeAddrs == nil {
+		c.nodeAddrs = map[string]string{}
+	}
 	seen := map[string]struct{}{}
 	for _, node := range healthy {
 		nodeID := node.GetNodeId()
 		seen[nodeID] = struct{}{}
-		if c.nodeConns[nodeID] != nil {
-			continue
-		}
 		address := c.rewriteNodeAddress(node.GetAddress())
+		if conn := c.nodeConns[nodeID]; conn != nil {
+			if c.nodeAddrs[nodeID] == address {
+				continue
+			}
+			// The node kept its ID but moved. Close the stale connection so
+			// subsequent reads reach the new address instead of failing forever.
+			_ = conn.Close()
+			delete(c.nodeConns, nodeID)
+			delete(c.nodeClients, nodeID)
+		}
 		nodeConn, dialErr := grpc.NewClient(
 			address,
 			grpc.WithTransportCredentials(c.creds),
@@ -580,6 +640,7 @@ func (c *GRPCClient) refreshNodes(ctx context.Context) error {
 		}
 		c.nodeConns[nodeID] = nodeConn
 		c.nodeClients[nodeID] = pb.NewMonoFSClient(nodeConn)
+		c.nodeAddrs[nodeID] = address
 	}
 	for nodeID, conn := range c.nodeConns {
 		if _, ok := seen[nodeID]; ok {
@@ -588,7 +649,9 @@ func (c *GRPCClient) refreshNodes(ctx context.Context) error {
 		_ = conn.Close()
 		delete(c.nodeConns, nodeID)
 		delete(c.nodeClients, nodeID)
+		delete(c.nodeAddrs, nodeID)
 	}
+	c.nodesRefreshedAt = time.Now()
 	return nil
 }
 

@@ -7,14 +7,24 @@ import {
   FileCode2,
   ListChecks,
   Play,
+  Plus,
   RefreshCw,
+  Save,
 } from "lucide-react";
 import { api } from "../api/client";
+import { useConfig } from "../context/ConfigContext";
 import { copyText } from "../lib/clipboard";
 import type { RecordingRuleGroupSummary, RecordingRulesStatus } from "../types/api";
 
 export default function RecordingRulesPage() {
+  const { config } = useConfig();
   const [groups, setGroups] = useState<RecordingRuleGroupSummary[]>([]);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorPartition, setEditorPartition] = useState("");
+  const [editorGroup, setEditorGroup] = useState("");
+  const [editorYaml, setEditorYaml] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<RecordingRulesStatus | null>(null);
@@ -65,7 +75,7 @@ export default function RecordingRulesPage() {
     setEvalResult("");
     setYamlLoading(true);
     try {
-      setYaml(await api.getRecordingRuleGroup(group.tenant, group.group));
+      setYaml(await api.getRecordingRuleGroup(group.partition, group.group));
     } catch (e) {
       setYaml(e instanceof Error ? e.message : "could not load rule group");
     } finally {
@@ -81,8 +91,8 @@ export default function RecordingRulesPage() {
     setEvaluating(true);
     try {
       const [ruleYAML, result] = await Promise.all([
-        api.getRecordingRuleGroup(group.tenant, group.group),
-        api.evaluateRecordingRuleGroup(group.tenant, group.group),
+        api.getRecordingRuleGroup(group.partition, group.group),
+        api.evaluateRecordingRuleGroup(group.partition, group.group),
       ]);
       setYaml(ruleYAML);
       setEvalResult(JSON.stringify(result, null, 2));
@@ -99,7 +109,7 @@ export default function RecordingRulesPage() {
     setEvaluating(true);
     setEvalResult("");
     try {
-      const result = await api.evaluateRecordingRuleGroup(selected.tenant, selected.group);
+      const result = await api.evaluateRecordingRuleGroup(selected.partition, selected.group);
       setEvalResult(JSON.stringify(result, null, 2));
     } catch (e) {
       setEvalResult(e instanceof Error ? e.message : "evaluation failed");
@@ -113,6 +123,141 @@ export default function RecordingRulesPage() {
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
   };
+
+  const openEditor = (partition = "", group = "", yaml = "") => {
+    const nextPartition =
+      partition ||
+      config.default_partition ||
+      config.accessible_partitions?.[0] ||
+      config.default_tenant ||
+      "default";
+    const nextGroup = group || "shard-health";
+    setEditorPartition(nextPartition);
+    setEditorGroup(nextGroup);
+    setEditorYaml(yaml || exampleRule(nextPartition, nextGroup));
+    setSaveError("");
+    setEditorOpen(true);
+  };
+
+  const saveEditor = async () => {
+    const partition = editorPartition.trim();
+    const group = editorGroup.trim();
+    if (!partition || !group) {
+      setSaveError("Partition and group are required.");
+      return;
+    }
+    setSaving(true);
+    setSaveError("");
+    try {
+      await api.putRecordingRuleGroup(partition, group, editorYaml);
+      await refresh();
+      setEditorOpen(false);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "could not save the rule group");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editorOpen) {
+    return (
+      <div className="h-full w-full overflow-auto bg-slate-950">
+        <div className="px-6 pt-4 pb-8">
+          <button
+            type="button"
+            onClick={() => setEditorOpen(false)}
+            className="text-xs text-slate-400 hover:text-slate-200 mb-3 inline-flex items-center gap-1"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Back to recording rules
+          </button>
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
+            <h2 className="text-lg font-semibold text-slate-100">Rule group</h2>
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-sky-500/30 text-sky-300 bg-sky-500/10">
+              per partition
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">
+                Partition
+              </label>
+              <input
+                list="recording-rule-partitions"
+                value={editorPartition}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setEditorPartition(next);
+                  setEditorYaml((current) =>
+                    current.replace(/^(\s*partition:\s*).*$/m, `$1${next}`)
+                  );
+                }}
+                placeholder="checkout"
+                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 outline-none focus:border-sky-500/60"
+              />
+              <datalist id="recording-rule-partitions">
+                {(config.accessible_partitions ?? []).map((partition) => (
+                  <option key={partition} value={partition} />
+                ))}
+              </datalist>
+              <p className="mt-2 text-[11px] text-slate-500">
+                The rule group is stored under this partition. The API path is
+                <code className="text-slate-400"> /v1/rules/{editorPartition || "{partition}"}/{editorGroup || "{group}"}</code>.
+              </p>
+
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1 mt-4">
+                Group
+              </label>
+              <input
+                value={editorGroup}
+                onChange={(event) => setEditorGroup(event.target.value)}
+                placeholder="shard-health"
+                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 outline-none focus:border-sky-500/60"
+              />
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-2">
+                YAML
+              </div>
+              <textarea
+                value={editorYaml}
+                onChange={(event) => setEditorYaml(event.target.value)}
+                spellCheck={false}
+                className="h-[340px] w-full resize-y rounded border border-slate-700 bg-slate-950 p-3 font-mono text-[11px] leading-relaxed text-slate-300 outline-none focus:border-sky-500/60"
+              />
+            </div>
+          </div>
+
+          {saveError && (
+            <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300">
+              {saveError}
+            </div>
+          )}
+
+          <div className="mt-4 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void saveEditor()}
+              disabled={saving}
+              className="px-3 py-1.5 rounded border border-emerald-600/40 bg-emerald-500/10 text-emerald-300 text-xs hover:bg-emerald-500/20 disabled:opacity-50 inline-flex items-center gap-1"
+            >
+              <Save className="w-3.5 h-3.5" />
+              {saving ? "Saving…" : "Save rule group"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditorOpen(false)}
+              className="px-3 py-1.5 rounded border border-slate-700 bg-slate-900 text-slate-300 text-xs hover:border-slate-500"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (selected) {
     return (
@@ -129,12 +274,21 @@ export default function RecordingRulesPage() {
           <div className="flex items-center gap-2 mb-4 flex-wrap">
             <h2 className="text-lg font-semibold text-slate-100">{selected.group}</h2>
             <span className="text-[10px] px-1.5 py-0.5 rounded border border-sky-500/30 text-sky-300 bg-sky-500/10">
-              {selected.tenant}
+              {selected.partition}
             </span>
             {selected.interval && (
               <span className="text-[10px] text-slate-500">every {selected.interval}</span>
             )}
             <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => openEditor(selected.partition, selected.group, yaml)}
+                disabled={yamlLoading}
+                className="px-2.5 py-1 rounded border border-slate-600 bg-slate-900 text-slate-300 text-xs hover:border-sky-500/40 hover:text-sky-300 disabled:opacity-50 inline-flex items-center gap-1"
+              >
+                <FileCode2 className="w-3.5 h-3.5" />
+                Edit YAML
+              </button>
               <button
                 type="button"
                 onClick={() => void evaluate()}
@@ -197,14 +351,24 @@ export default function RecordingRulesPage() {
               written back to the logengine as derived metrics.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void refresh()}
-            className="px-2.5 py-1 rounded border border-slate-700 bg-slate-900 text-slate-300 text-xs hover:border-sky-500/40 hover:text-sky-300 inline-flex items-center gap-1"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => openEditor()}
+              className="px-2.5 py-1 rounded border border-sky-700/50 bg-sky-500/10 text-sky-300 text-xs hover:bg-sky-500/20 inline-flex items-center gap-1"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              New rule group
+            </button>
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              className="px-2.5 py-1 rounded border border-slate-700 bg-slate-900 text-slate-300 text-xs hover:border-sky-500/40 hover:text-sky-300 inline-flex items-center gap-1"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Refresh
+            </button>
+          </div>
         </div>
 
         <EngineStatus status={status} error={statusError} groups={groups.length} />
@@ -226,9 +390,17 @@ export default function RecordingRulesPage() {
                 Create one through the doctor-rules API. The scheduler will pick it up within
                 the poll interval.
               </p>
+              <button
+                type="button"
+                onClick={() => openEditor()}
+                className="mb-3 px-2.5 py-1 rounded border border-sky-700/50 bg-sky-500/10 text-sky-300 text-xs hover:bg-sky-500/20 inline-flex items-center gap-1"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Create rule group
+              </button>
               <pre className="text-[11px] leading-relaxed text-slate-300 bg-slate-950 border border-slate-800 rounded p-3 overflow-x-auto whitespace-pre">
 {`curl -fsS -X PUT \\
-  http://<doctor-rules>:18081/v1/rules/default/shard-health \\
+  http://<doctor-rules>:18081/v1/rules/{partition}/shard-health \\
   -H 'Content-Type: application/yaml' \\
   --data-binary @doctor-rules.yaml`}
               </pre>
@@ -255,7 +427,7 @@ export default function RecordingRulesPage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-900/60">
-                  <th className="text-left px-4 py-2.5 font-medium">Tenant</th>
+                  <th className="text-left px-4 py-2.5 font-medium">Partition</th>
                   <th className="text-left px-4 py-2.5 font-medium">Group</th>
                   <th className="text-left px-4 py-2.5 font-medium">Interval</th>
                   <th className="text-right px-4 py-2.5 font-medium">Rules</th>
@@ -265,11 +437,11 @@ export default function RecordingRulesPage() {
               <tbody className="divide-y divide-slate-800/60">
                 {groups.map((group) => (
                   <tr
-                    key={`${group.tenant}/${group.group}`}
+                    key={`${group.partition}/${group.group}`}
                     className="hover:bg-slate-800/30 cursor-pointer"
                     onClick={() => void openGroup(group)}
                   >
-                    <td className="px-4 py-2.5 text-slate-400">{group.tenant}</td>
+                    <td className="px-4 py-2.5 text-slate-400">{group.partition}</td>
                     <td className="px-4 py-2.5 font-mono text-slate-200">{group.group}</td>
                     <td className="px-4 py-2.5 text-slate-400">{group.interval || "1m0s"}</td>
                     <td className="px-4 py-2.5 text-right text-slate-300">{group.rules}</td>
@@ -363,10 +535,25 @@ function formatTime(value?: string) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function exampleRule(partition: string, group: string) {
+  return `version: 1
+groups:
+  - name: ${group}
+    partition: ${partition}
+    interval: 30s
+    rules:
+      - record: doctor:up:sum
+        expr: sum(up) by (job)
+        labels:
+          tier: edge
+        merge: sum
+`;
+}
+
 const EXAMPLE_RULE = `version: 1
 groups:
   - name: shard-health
-    tenant: default
+    partition: default
     interval: 30s
     rules:
       - record: doctor:up:sum

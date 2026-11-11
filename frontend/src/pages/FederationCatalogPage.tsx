@@ -11,7 +11,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { api } from "../api/client";
-import type { FederationStatus, FederationTarget } from "../types/api";
+import type { FederationStatus, FederationTarget, ProxyEndpointInfo } from "../types/api";
 import "./federation.css";
 
 const PAGE_SIZE = 100;
@@ -107,11 +107,13 @@ function StatCard({
 export default function FederationCatalogPage() {
   const [status, setStatus] = useState<FederationStatus | null>(null);
   const [targets, setTargets] = useState<FederationTarget[]>([]);
+  const [endpoints, setEndpoints] = useState<ProxyEndpointInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("");
   const [regionFilter, setRegionFilter] = useState("");
+  const [providerFilter, setProviderFilter] = useState("");
   const [partitionFilter, setPartitionFilter] = useState("");
   const [healthFilter, setHealthFilter] = useState("");
   const [cursor, setCursor] = useState("");
@@ -133,10 +135,15 @@ export default function FederationCatalogPage() {
     if (search.trim()) params.set("q", search.trim());
     if (cursor) params.set("cursor", cursor);
 
-    Promise.all([api.getFederationStatus(), api.getFederationTargets(params)])
-      .then(([nextStatus, page]) => {
+    Promise.all([
+      api.getFederationStatus(),
+      api.getFederationTargets(params),
+      api.getProxyEndpoints(new URLSearchParams({ limit: "200" })),
+    ])
+      .then(([nextStatus, page, proxy]) => {
         setStatus(nextStatus);
         setTargets(page.targets ?? []);
+        setEndpoints(proxy.endpoints ?? []);
         setMatched(page.matched ?? 0);
         setNextCursor(page.nextCursor ?? "");
         setHasMore(Boolean(page.hasMore));
@@ -175,9 +182,32 @@ export default function FederationCatalogPage() {
     return [...values].filter(Boolean).sort();
   }, [status, targets]);
 
+  const providerOf = (value: { provider?: string; kind?: string }) =>
+    (value.provider || value.kind || "").toLowerCase();
+
+  const providerOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const target of targets) values.add(providerOf(target));
+    for (const endpoint of endpoints) values.add(providerOf(endpoint));
+    return [...values].filter(Boolean).sort();
+  }, [endpoints, targets]);
+
   const visibleTargets = useMemo(
-    () => (healthFilter ? targets.filter((target) => targetHealth(target) === healthFilter) : targets),
-    [healthFilter, targets],
+    () =>
+      targets.filter(
+        (target) =>
+          (!healthFilter || targetHealth(target) === healthFilter) &&
+          (!providerFilter || providerOf(target) === providerFilter),
+      ),
+    [healthFilter, providerFilter, targets],
+  );
+
+  const visibleEndpoints = useMemo(
+    () =>
+      endpoints.filter(
+        (endpoint) => !providerFilter || providerOf(endpoint) === providerFilter,
+      ),
+    [endpoints, providerFilter],
   );
 
   const resetPage = () => {
@@ -215,6 +245,8 @@ export default function FederationCatalogPage() {
   const partitions = status?.partition_count ?? partitionOptions.length;
   const regions = Object.keys(status?.regions ?? {}).length;
   const targetCount = status?.targets ?? targets.length;
+  const endpointCount = visibleEndpoints.length;
+  const providers = providerOptions.length;
   const openCircuits = status?.open_circuits ?? 0;
   const enabled = status?.enabled !== false;
 
@@ -226,9 +258,11 @@ export default function FederationCatalogPage() {
           <p>
             {loading
               ? "Loading…"
-              : `${targetCount} target${targetCount === 1 ? "" : "s"} · ${partitions} partition${
-                  partitions === 1 ? "" : "s"
-                } · ${accounts} account${accounts === 1 ? "" : "s"} visible to you`}
+              : `${targetCount} catalog target${targetCount === 1 ? "" : "s"} · ${endpointCount} provider endpoint${
+                  endpointCount === 1 ? "" : "s"
+                } · ${partitions} partition${partitions === 1 ? "" : "s"} · ${providers} provider${
+                  providers === 1 ? "" : "s"
+                } visible to you`}
           </p>
         </div>
         <div className="xp-toolbar">
@@ -243,7 +277,10 @@ export default function FederationCatalogPage() {
         {!enabled && !loading ? (
           <div className="fed-banner fed-banner--warn">
             <TriangleAlert size={15} />
-            <span>Federation is not configured. No AWS catalog is loaded.</span>
+            <span>
+              Federation catalog is not configured. Discovered provider endpoints (AWS, GCP, Kubernetes) are still
+              shown below.
+            </span>
           </div>
         ) : null}
 
@@ -266,7 +303,8 @@ export default function FederationCatalogPage() {
 
         <div className="fed-stats">
           <StatCard icon={<Server size={14} />} label="Targets" value={targetCount} />
-          <StatCard icon={<Cloud size={14} />} label="Accounts" value={accounts} />
+          <StatCard icon={<Cloud size={14} />} label="Accounts / Projects" value={accounts} />
+          <StatCard icon={<Server size={14} />} label="Provider endpoints" value={endpointCount} />
           <StatCard icon={<ShieldCheck size={14} />} label="Partitions" value={partitions} />
           <StatCard icon={<Globe2 size={14} />} label="Regions" value={regions} />
           <StatCard
@@ -296,7 +334,7 @@ export default function FederationCatalogPage() {
           <input
             type="text"
             className="xp-search"
-            placeholder="Search target, account, region, endpoint, partition…"
+            placeholder="Search target, account/project, region, endpoint, partition…"
             value={search}
             onChange={(event) => {
               setSearch(event.target.value);
@@ -304,7 +342,25 @@ export default function FederationCatalogPage() {
             }}
           />
           <label className="filter-label">
-            Account
+            Provider
+            <select
+              className="xp-select"
+              value={providerFilter}
+              onChange={(event) => {
+                setProviderFilter(event.target.value);
+                resetPage();
+              }}
+            >
+              <option value="">All</option>
+              {providerOptions.map((provider) => (
+                <option key={provider} value={provider}>
+                  {provider}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-label">
+            Account / Project
             <select
               className="xp-select"
               value={accountFilter}
@@ -376,7 +432,7 @@ export default function FederationCatalogPage() {
         <div className="fed-table">
           <div className="fed-table__head">
             <span>Target</span>
-            <span>Account / Region</span>
+            <span>Account / Project</span>
             <span>Partitions</span>
             <span>Endpoint</span>
             <span>Signals</span>
@@ -438,9 +494,9 @@ export default function FederationCatalogPage() {
                       {healthLabel(health)}
                     </span>
                     <span className="fed-discovered">
-                      <span title="CloudWatch metric names">M {target.metric_count}</span>
-                      <span title="CloudWatch log groups">L {target.log_group_count}</span>
-                      <span title="X-Ray services">X {target.xray_service_count}</span>
+                      <span title="Discovered metrics">M {target.metric_count}</span>
+                      <span title="Discovered logs">L {target.log_group_count}</span>
+                      <span title="Discovered traces">T {target.xray_service_count}</span>
                     </span>
                     <span className="fed-chevron">
                       {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
@@ -466,9 +522,9 @@ export default function FederationCatalogPage() {
                             ) : null}
                           </div>
                           <div className="fed-detail__grid">
-                            <MetadataList title="CloudWatch metrics" items={detail.metric_names ?? []} />
+                            <MetadataList title="Discovered metrics" items={detail.metric_names ?? []} />
                             <MetadataList title="Log groups" items={detail.log_groups ?? []} />
-                            <MetadataList title="X-Ray services" items={detail.xray_services ?? []} />
+                            <MetadataList title="Discovered trace services" items={detail.xray_services ?? []} />
                           </div>
                           {detail.service_partitions &&
                           Object.keys(detail.service_partitions).length > 0 ? (
@@ -527,6 +583,57 @@ export default function FederationCatalogPage() {
               Next
             </button>
           </div>
+        </div>
+
+        <div className="fed-endpoints">
+          <div className="fed-endpoints__header">
+            <h3>Provider endpoints</h3>
+            <p>
+              Cloud read APIs discovered through Guardian. GCP endpoints appear here as soon as the pusher registers
+              its <code>observedApiUrl</code>.
+            </p>
+          </div>
+          {visibleEndpoints.length === 0 ? (
+            <div className="fed-empty">No provider endpoints match the current filters.</div>
+          ) : (
+            <div className="fed-endpoints__table">
+              <div className="fed-endpoints__head">
+                <span>Name</span>
+                <span>Provider</span>
+                <span>Account / Project</span>
+                <span>Region</span>
+                <span>Signals</span>
+                <span>Status</span>
+                <span>Endpoint</span>
+              </div>
+              {visibleEndpoints.map((endpoint) => (
+                <div className="fed-endpoints__row" key={endpoint.name}>
+                  <span title={endpoint.name}>{endpoint.name}</span>
+                  <span>
+                    <span className={`fed-provider fed-provider--${providerOf(endpoint) || "unknown"}`}>
+                      {providerOf(endpoint) || "unknown"}
+                    </span>
+                  </span>
+                  <span>{endpoint.account || "—"}</span>
+                  <span>{endpoint.region || "—"}</span>
+                  <span className="fed-signals">
+                    {(endpoint.signals ?? []).map((signal) => (
+                      <span key={signal} className={`fed-signal fed-signal--${signal.toLowerCase()}`} title={signal}>
+                        {signalBadge(signal)}
+                      </span>
+                    ))}
+                  </span>
+                  <span className={`fed-health fed-health--${endpoint.healthy === false ? "unhealthy" : "healthy"}`}>
+                    <span className="fed-health__dot" />
+                    {endpoint.status || (endpoint.healthy === false ? "Unhealthy" : "Healthy")}
+                  </span>
+                  <span className="fed-endpoint" title={endpoint.resolver || endpoint.ownersPath}>
+                    {endpoint.resolver || endpoint.ownersPath || "—"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

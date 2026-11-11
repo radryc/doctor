@@ -3,11 +3,13 @@ package query
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/segment"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 )
@@ -27,9 +29,11 @@ func identityFromContext(ctx context.Context) authz.Identity {
 	return id
 }
 
-// QueryLogs filters log records by the caller's log partitions.
+// QueryLogs pushes the caller's visible partitions into storage, then filters
+// the returned records as a second line of defence.
 func (b *policyBackend) QueryLogs(ctx context.Context, tenant, query, service string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	records, err := b.inner.QueryLogs(ctx, tenant, query, service, from, to, limit)
+	visible, restricted := b.readScope(ctx, policy.SignalLogs)
+	records, err := queryLogsBackend(ctx, b.inner, tenant, query, service, from, to, limit, visible, restricted)
 	if err != nil {
 		return records, err
 	}
@@ -41,11 +45,8 @@ func (b *policyBackend) QueryLogs(ctx context.Context, tenant, query, service st
 // the LogQL selector is passed as a text filter to QueryLogs and matches
 // nothing.
 func (b *policyBackend) QueryLogsRaw(ctx context.Context, tenant, query string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
-	raw, ok := b.inner.(rawLogQueryBackend)
-	if !ok {
-		return nil, fmt.Errorf("log backend does not support raw queries")
-	}
-	records, err := raw.QueryLogsRaw(ctx, tenant, query, from, to, limit)
+	visible, restricted := b.readScope(ctx, policy.SignalLogs)
+	records, err := queryRawLogsBackend(ctx, b.inner, tenant, query, from, to, limit, visible, restricted)
 	if err != nil {
 		return records, err
 	}
@@ -70,11 +71,46 @@ func (b *policyBackend) StreamMetricSeries(ctx context.Context, tenant string, q
 // QueryTraces filters spans by the caller's trace partitions (span-level: a
 // trace remains visible while at least one span survives).
 func (b *policyBackend) QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error) {
-	spans, err := b.inner.QueryTraces(ctx, tenant, traceID, service, from, to, limit)
+	visible, restricted := b.readScope(ctx, policy.SignalTraces)
+	spans, err := queryTracesBackend(ctx, b.inner, tenant, traceID, service, from, to, limit, visible, restricted)
 	if err != nil {
 		return spans, err
 	}
 	return b.gate.FilterSpans(identityFromContext(ctx), spans), nil
+}
+
+// QueryTracesPage is the bounded trace-scan variant used by the recent-trace
+// list. truncated reflects the storage batch before policy filtering, so a
+// scoped scan keeps walking older batches even when most of a batch is
+// invisible to the caller.
+func (b *policyBackend) QueryTracesPage(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, bool, time.Time, error) {
+	visible, restricted := b.readScope(ctx, policy.SignalTraces)
+	spans, truncated, watermark, err := queryTracesPageBackend(ctx, b.inner, tenant, traceID, service, from, to, limit, visible, restricted)
+	if err != nil {
+		return nil, false, time.Time{}, err
+	}
+	return b.gate.FilterSpans(identityFromContext(ctx), spans), truncated, watermark, nil
+}
+
+// QueryDuckDBSQL runs a read-only SQL statement against the caller's visible
+// partitions. The policy gate computes the partition list before the request
+// reaches MonoFS; the MonoFS router intersects it with its own scope again.
+func (b *policyBackend) QueryDuckDBSQL(ctx context.Context, tenant, dataset, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) (monofsstore.DuckDBSQLResponse, error) {
+	signal := policy.SignalLogs
+	switch strings.ToLower(strings.TrimSpace(dataset)) {
+	case "logs":
+		signal = policy.SignalLogs
+	case "traces":
+		signal = policy.SignalTraces
+	case "metrics":
+		signal = policy.SignalMetrics
+	default:
+		return monofsstore.DuckDBSQLResponse{}, fmt.Errorf("unsupported SQL dataset %q", dataset)
+	}
+	if b.gate != nil {
+		visiblePartitions, restricted = b.gate.VisiblePartitions(identityFromContext(ctx), signal)
+	}
+	return b.inner.QueryDuckDBSQL(ctx, tenant, dataset, query, from, to, limit, visiblePartitions, restricted)
 }
 
 // AWSUpstream adapts the AWS client with the same access-policy filters as
@@ -114,4 +150,32 @@ func (s *Service) policyPartitionAllowed(ctx context.Context, account, region, c
 	}
 	canonical := s.policyGate.CanonicalPartition(account, region, current)
 	return canonical, s.policyGate.PartitionVisible(identityFromContext(ctx), canonical, signal)
+}
+
+// GCPUpstream adapts the GCP client with the same access-policy filters as the
+// AWS upstream.
+func (s *Service) GCPUpstream() *proxy.GCPUpstream {
+	up := &proxy.GCPUpstream{Client: s.gcp}
+	gate := s.policyGate
+	if gate == nil || s.gcp == nil {
+		return up
+	}
+	up.FilterLogs = func(ctx context.Context, records []segment.LogRecord) []segment.LogRecord {
+		return gate.FilterLogs(identityFromContext(ctx), records)
+	}
+	up.FilterSpans = func(ctx context.Context, spans []segment.TraceRecord) []segment.TraceRecord {
+		return gate.FilterSpans(identityFromContext(ctx), spans)
+	}
+	up.FilterSummaries = func(ctx context.Context, summaries []proxy.TraceSummary) []proxy.TraceSummary {
+		id := identityFromContext(ctx)
+		kept := make([]proxy.TraceSummary, 0, len(summaries))
+		for _, summary := range summaries {
+			partition := gate.CanonicalPartition(summary.Account, summary.Region, summary.Partition)
+			if gate.PartitionVisible(id, partition, policy.SignalTraces) {
+				kept = append(kept, summary)
+			}
+		}
+		return kept
+	}
+	return up
 }

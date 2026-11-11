@@ -25,6 +25,7 @@ type PartitionInfo struct {
 // account/region read API.
 type PusherInfo struct {
 	Name     string `json:"name" yaml:"name"`
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
 	Account  string `json:"account" yaml:"account"`
 	Region   string `json:"region" yaml:"region"`
 	Endpoint string `json:"endpoint" yaml:"endpoint"`
@@ -94,8 +95,9 @@ type BuildResult struct {
 }
 
 type accountRegion struct {
-	account string
-	region  string
+	provider string
+	account  string
+	region   string
 }
 
 // BuildCatalog joins Guardian partition ownership with pusher addressing and
@@ -108,13 +110,14 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 
 	pushers := make(map[accountRegion][]PusherInfo)
 	for _, pusher := range input.Pushers {
+		pusher.Provider = normalizeProvider(pusher.Provider)
 		pusher.Account = strings.TrimSpace(pusher.Account)
 		pusher.Region = strings.TrimSpace(pusher.Region)
 		if pusher.Account == "" || pusher.Region == "" || strings.TrimSpace(pusher.Endpoint) == "" {
 			continue
 		}
-		pushers[accountRegion{account: pusher.Account, region: pusher.Region}] = append(
-			pushers[accountRegion{account: pusher.Account, region: pusher.Region}], pusher)
+		key := accountRegion{provider: pusher.Provider, account: pusher.Account, region: pusher.Region}
+		pushers[key] = append(pushers[key], pusher)
 	}
 	for key := range pushers {
 		sort.Slice(pushers[key], func(i, j int) bool {
@@ -128,11 +131,8 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 		partition.Name = strings.TrimSpace(partition.Name)
 		partition.Account = strings.TrimSpace(partition.Account)
 		partition.Region = strings.TrimSpace(partition.Region)
-		provider := strings.ToLower(strings.TrimSpace(partition.Provider))
-		if provider == "" && partition.Account != "" && partition.Region != "" {
-			provider = "aws"
-		}
-		if provider != "aws" {
+		provider := normalizeProvider(partition.Provider)
+		if provider != "aws" && provider != "gcp" {
 			warnings = append(warnings, fmt.Sprintf("partition %s skipped: provider=%s", partition.Name, provider))
 			continue
 		}
@@ -140,7 +140,7 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 			warnings = append(warnings, fmt.Sprintf("partition %q skipped: name, account and region are required", partition.Name))
 			continue
 		}
-		key := accountRegion{account: partition.Account, region: partition.Region}
+		key := accountRegion{provider: provider, account: partition.Account, region: partition.Region}
 		groups[key] = append(groups[key], partition)
 	}
 
@@ -149,6 +149,9 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].provider != keys[j].provider {
+			return keys[i].provider < keys[j].provider
+		}
 		if keys[i].account == keys[j].account {
 			return keys[i].region < keys[j].region
 		}
@@ -159,7 +162,7 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 	for _, key := range keys {
 		candidates := pushers[key]
 		if len(candidates) == 0 {
-			warnings = append(warnings, fmt.Sprintf("account %s/%s skipped: no healthy pusher", key.account, key.region))
+			warnings = append(warnings, fmt.Sprintf("%s account %s/%s skipped: no healthy pusher", key.provider, key.account, key.region))
 			continue
 		}
 		pusher := candidates[0]
@@ -167,14 +170,14 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 		sort.Slice(partitions, func(i, j int) bool { return partitions[i].Name < partitions[j].Name })
 
 		target := Target{
-			ID:           "aws-" + key.account + "-" + key.region,
+			ID:           key.provider + "-" + key.account + "-" + key.region,
 			Account:      key.account,
 			Region:       key.region,
 			Tenant:       "default",
 			Endpoint:     strings.TrimRight(strings.TrimSpace(pusher.Endpoint), "/"),
 			TokenRef:     strings.TrimSpace(pusher.TokenRef),
 			TokenEnv:     strings.TrimSpace(pusher.TokenEnv),
-			Provider:     "aws",
+			Provider:     key.provider,
 			Capabilities: []Signal{SignalMetrics, SignalLogs, SignalTraces},
 			Health:       pusher.Health,
 			Version:      pusher.Version,
@@ -188,16 +191,22 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 			if partition.LogGroup != "" {
 				target.LogGroups = append(target.LogGroups, partition.LogGroup)
 			}
-			// Guardian convention: the CDK app writes to
-			// guardian/<account>/<region>/<partition>/app.
-			target.LogGroups = append(target.LogGroups,
-				fmt.Sprintf("guardian/%s/%s/%s/app", key.account, key.region, partition.Name))
+			if key.provider == "aws" {
+				// Guardian convention: the CDK app writes to
+				// guardian/<account>/<region>/<partition>/app.
+				target.LogGroups = append(target.LogGroups,
+					fmt.Sprintf("guardian/%s/%s/%s/app", key.account, key.region, partition.Name))
+			}
 		}
 
-		// Discovery metadata is keyed either by account/region or pusher name.
-		meta := input.Meta[key.account+"/"+key.region]
-		if len(meta.MetricNames) == 0 && len(meta.LogGroups) == 0 && len(meta.XrayServices) == 0 {
-			meta = input.Meta[pusher.Name]
+		// Discovery metadata is AWS-specific (/v1/aws/meta). GCP metadata is
+		// discovered lazily by the read API client.
+		var meta TargetMeta
+		if key.provider == "aws" {
+			meta = input.Meta[key.account+"/"+key.region]
+			if len(meta.MetricNames) == 0 && len(meta.LogGroups) == 0 && len(meta.XrayServices) == 0 {
+				meta = input.Meta[pusher.Name]
+			}
 		}
 		target.MetricNames = append(target.MetricNames, meta.MetricNames...)
 		target.LogGroups = append(target.LogGroups, meta.LogGroups...)
@@ -222,6 +231,18 @@ func BuildCatalog(input BuildInput) (BuildResult, error) {
 		Snapshot: Snapshot{Version: version, GeneratedAt: time.Now().UTC(), Targets: targets},
 		Warnings: warnings,
 	}, nil
+}
+
+func normalizeProvider(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "", "aws", "amazon":
+		return "aws"
+	case "gcp", "google", "google-cloud":
+		return "gcp"
+	default:
+		return provider
+	}
 }
 
 func betterPusher(left, right PusherInfo) bool {

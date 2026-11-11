@@ -116,6 +116,38 @@ func main() {
 		log.Printf("sentinel aws source enabled: %s", cfg.AWSURL)
 	}
 
+	if cfg.GCPEnabled && cfg.GCPURL != "" {
+		source := &alerting.GCPSource{
+			BaseURL:     cfg.GCPURL,
+			Token:       cfg.GCPToken,
+			Project:     cfg.GCPProject,
+			Region:      cfg.GCPRegion,
+			Partition:   cfg.GCPPartition,
+			Tenant:      cfg.DefaultTenant,
+			Service:     service,
+			Store:       store,
+			Logger:      log.Default(),
+			Interval:    cfg.GCPPollInterval,
+			DefaultMode: alerting.GCPPolicyMode(cfg.GCPPolicy),
+		}
+		go source.Run(ctx)
+		log.Printf("sentinel gcp source enabled: %s", cfg.GCPURL)
+	}
+
+	if cfg.GuardianEnabled && cfg.GuardianURL != "" {
+		source := &alerting.GuardianSource{
+			BaseURL:  cfg.GuardianURL,
+			Token:    cfg.GuardianToken,
+			Tenant:   cfg.DefaultTenant,
+			Service:  service,
+			Store:    store,
+			Logger:   log.Default(),
+			Interval: cfg.GuardianPollInterval,
+		}
+		go source.Run(ctx)
+		log.Printf("sentinel guardian source enabled: %s", cfg.GuardianURL)
+	}
+
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: api.Handler()}
 	go func() {
 		<-ctx.Done()

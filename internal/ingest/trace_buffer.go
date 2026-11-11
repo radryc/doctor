@@ -126,12 +126,10 @@ func (b *TraceBuffer) Append(ctx context.Context, records []segment.TraceRecord)
 	if shouldFlush {
 		b.signalFlush()
 	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
-	}
+	// The batch is already durably staged in the WAL. Reporting a late
+	// cancellation here would make the caller retry data that was accepted and
+	// produce duplicate records.
+	return nil
 }
 
 func (b *TraceBuffer) Replay(ctx context.Context) error {
@@ -177,9 +175,8 @@ func (b *TraceBuffer) Replay(ctx context.Context) error {
 	if err := flushReplay(); err != nil {
 		return err
 	}
-	return b.log.Replace(nil)
+	return b.log.Retire(nil)
 }
-
 
 func (b *TraceBuffer) Stats() TraceBufferStats {
 	b.mu.Lock()
@@ -224,42 +221,59 @@ func (b *TraceBuffer) flushPending(ctx context.Context) error {
 		return nil
 	}
 	b.flushing = true
-	batches := append([]wal.TraceBatch(nil), b.batches...)
-	b.batches = nil
-	b.recordCount = 0
-	b.byteCount = 0
+	batches, flushedBytes, flushedRecords := b.takeFlushBatchesLocked()
 	b.mu.Unlock()
 
 	err := b.flushBatches(ctx, batches)
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.flushing = false
 	if err != nil {
+		// Re-queue on failure. Only restore accounting owned by these batches:
+		// reservations made by concurrent Appends that are still in WAL I/O
+		// must stay counted.
 		b.batches = append(batches, b.batches...)
-		for _, batch := range batches {
-			b.recordCount += len(batch.Records)
-			for _, record := range batch.Records {
-				b.byteCount += estimateTraceRecordSize(record)
-			}
-		}
+		b.byteCount += flushedBytes
+		b.recordCount += flushedRecords
+		b.mu.Unlock()
 		return err
 	}
 	remaining := append([]wal.TraceBatch(nil), b.batches...)
-	recalcBytes := 0
-	recalcRecords := 0
-	for _, batch := range remaining {
-		recalcRecords += len(batch.Records)
-		for _, record := range batch.Records {
-			recalcBytes += estimateTraceRecordSize(record)
-		}
-	}
-	b.byteCount = recalcBytes
-	b.recordCount = recalcRecords
-	if err := b.log.Replace(remaining); err != nil {
+	hasMore := len(remaining) > 0
+	if err := b.log.Retire(remaining); err != nil {
+		b.mu.Unlock()
 		return err
 	}
+	b.mu.Unlock()
+	if hasMore {
+		b.signalFlush()
+	}
 	return nil
+}
+
+// takeFlushBatchesLocked moves every buffered batch out of the buffer and
+// subtracts exactly the bytes/records reserved for those batches. byteCount may
+// also include reservations for Appends that have not inserted their batch
+// yet; those are intentionally left in place so a concurrent flush cannot
+// erase their accounting.
+func (b *TraceBuffer) takeFlushBatchesLocked() ([]wal.TraceBatch, int, int) {
+	batches := append([]wal.TraceBatch(nil), b.batches...)
+	b.batches = nil
+	bytes := 0
+	records := 0
+	for _, batch := range batches {
+		records += len(batch.Records)
+		bytes += estimateTraceBatchSize(batch)
+	}
+	b.byteCount -= bytes
+	if b.byteCount < 0 {
+		b.byteCount = 0
+	}
+	b.recordCount -= records
+	if b.recordCount < 0 {
+		b.recordCount = 0
+	}
+	return batches, bytes, records
 }
 
 func (b *TraceBuffer) flushBatches(ctx context.Context, batches []wal.TraceBatch) error {

@@ -3,10 +3,18 @@ import { Maximize2 } from "lucide-react";
 import type { EChartsCoreOption } from "echarts/core";
 import EChart from "./EChart";
 import SeriesLegend from "./SeriesLegend";
-import { escapeHtml, useChartTheme } from "../../lib/chartTheme";
+import { escapeHtml, useChartTheme, type ChartTheme } from "../../lib/chartTheme";
 import type { MetricSeries } from "../../types/api";
 
-export type ChartDisplayMode = "line" | "area" | "bars";
+export type ChartDisplayMode = "line" | "area" | "bars" | "scatter" | "gauge";
+
+export const CHART_DISPLAY_MODES: { value: ChartDisplayMode; label: string }[] = [
+  { value: "line", label: "Line" },
+  { value: "area", label: "Area" },
+  { value: "bars", label: "Bars" },
+  { value: "scatter", label: "Scatter" },
+  { value: "gauge", label: "Gauge" },
+];
 
 export const CHART_PALETTE = [
   "var(--chart-1)",
@@ -102,6 +110,115 @@ function tooltipFormatter(params: unknown): string {
   return `<div class="ts-tooltip"><div class="ts-tooltip__time">${escapeHtml(label)}</div>${body}</div>`;
 }
 
+/** Latest finite sample for a series, used by the gauge visualisation. */
+function latestSeriesValue(series: MetricSeries | undefined): number | null {
+  if (!series) return null;
+  let latest: number | null = null;
+  let latestTs = -Infinity;
+  for (const point of series.points) {
+    const value = Number(point.value);
+    const ts = new Date(point.timestamp).getTime();
+    if (!Number.isFinite(value) || !Number.isFinite(ts)) continue;
+    if (ts >= latestTs) {
+      latestTs = ts;
+      latest = value;
+    }
+  }
+  return latest;
+}
+
+interface GaugeItem {
+  key: string;
+  label: string;
+  value: number;
+  color: string;
+}
+
+function GaugeTile({
+  item,
+  min,
+  max,
+  theme,
+}: {
+  item: GaugeItem;
+  min: number;
+  max: number;
+  theme: ChartTheme;
+}) {
+  const option = useMemo<EChartsCoreOption>(
+    () => ({
+      animation: false,
+      series: [
+        {
+          type: "gauge",
+          startAngle: 210,
+          endAngle: -30,
+          min,
+          max,
+          radius: "96%",
+          center: ["50%", "56%"],
+          progress: {
+            show: true,
+            width: 8,
+            roundCap: true,
+            itemStyle: { color: item.color },
+          },
+          axisLine: {
+            roundCap: true,
+            lineStyle: { width: 8, color: [[1, theme.grid]] },
+          },
+          axisTick: { show: false },
+          splitLine: { show: false },
+          axisLabel: { show: false },
+          pointer: { show: false },
+          anchor: { show: false },
+          title: { show: false },
+          detail: {
+            valueAnimation: false,
+            offsetCenter: [0, 0],
+            fontSize: 15,
+            fontWeight: 700,
+            color: theme.text,
+            formatter: (value: number) => formatChartValue(Number(value)),
+          },
+          data: [{ value: item.value }],
+        },
+      ],
+    }),
+    [item, min, max, theme]
+  );
+
+  return (
+    <div className="timeseries-gauge" title={`${item.label}: ${formatChartValue(item.value)}`}>
+      <EChart option={option} ariaLabel={`Gauge for ${item.label}`} />
+      <span className="timeseries-gauge__label">{item.label}</span>
+    </div>
+  );
+}
+
+function GaugeGrid({ items, theme }: { items: GaugeItem[]; theme: ChartTheme }) {
+  const bounds = useMemo(() => {
+    const values = items.map((item) => item.value).filter((value) => Number.isFinite(value));
+    if (values.length === 0) return { min: 0, max: 1 };
+    let min = Math.min(...values);
+    let max = Math.max(...values);
+    if (min === max) {
+      const pad = Math.abs(min) * 0.1 || 1;
+      min -= pad;
+      max += pad;
+    }
+    return { min, max };
+  }, [items]);
+
+  return (
+    <div className="timeseries-gauge-grid">
+      {items.map((item) => (
+        <GaugeTile key={item.key} item={item} min={bounds.min} max={bounds.max} theme={theme} />
+      ))}
+    </div>
+  );
+}
+
 export default function TimeSeriesChart({
   series,
   height,
@@ -157,6 +274,17 @@ export default function TimeSeriesChart({
     [keys, hidden, activeIsolation]
   );
 
+  const gaugeItems = useMemo<GaugeItem[]>(() => {
+    if (displayMode !== "gauge") return [];
+    const items: GaugeItem[] = [];
+    for (const item of visibleKeys) {
+      const value = latestSeriesValue(visibleSeries[item.index]);
+      if (value === null) continue;
+      items.push({ key: item.key, label: item.label, value, color: item.color });
+    }
+    return items;
+  }, [displayMode, visibleKeys, visibleSeries]);
+
   const withDate = useMemo(() => {
     let min = Infinity;
     let max = -Infinity;
@@ -183,8 +311,22 @@ export default function TimeSeriesChart({
         .filter(([ts, value]) => Number.isFinite(ts) && Number.isFinite(value))
         .sort((left, right) => left[0] - right[0]);
 
+      // A single sample (typical for instant queries) is invisible when line
+      // symbols are hidden, so show the marker in that case.
+      const showPoint = data.length <= 1;
       const stack = stacked ? "total" : undefined;
       const emphasis = { focus: "series" as const };
+
+      if (displayMode === "scatter") {
+        return {
+          type: "scatter" as const,
+          name: item.label,
+          data,
+          symbolSize: 5,
+          itemStyle: { color: item.color, opacity: 0.85 },
+          emphasis,
+        };
+      }
 
       if (displayMode === "bars") {
         return {
@@ -205,9 +347,9 @@ export default function TimeSeriesChart({
           data,
           stack,
           smooth: false,
-          showSymbol: false,
+          showSymbol: showPoint,
           symbol: "circle",
-          symbolSize: 6,
+          symbolSize: showPoint ? 7 : 6,
           connectNulls: true,
           sampling: "lttb" as const,
           lineStyle: { color: item.color, width: 2 },
@@ -222,9 +364,9 @@ export default function TimeSeriesChart({
         name: item.label,
         data,
         smooth: false,
-        showSymbol: false,
+        showSymbol: showPoint,
         symbol: "circle",
-        symbolSize: 6,
+        symbolSize: showPoint ? 7 : 6,
         connectNulls: true,
         sampling: "lttb" as const,
         lineStyle: { color: item.color, width: 2 },
@@ -323,6 +465,12 @@ export default function TimeSeriesChart({
       <div className="timeseries-chart__plot">
         {visibleKeys.length === 0 ? (
           <div className="dash-empty">All series are hidden. Click a legend item to show it again.</div>
+        ) : displayMode === "gauge" ? (
+          gaugeItems.length === 0 ? (
+            <div className="dash-empty">No numeric samples to display as gauges.</div>
+          ) : (
+            <GaugeGrid items={gaugeItems} theme={theme} />
+          )
         ) : (
           <EChart
             option={option}

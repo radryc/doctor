@@ -63,6 +63,12 @@ func (f *fakeMetricsUpstream) callCount() int {
 	return f.calls
 }
 
+func (f *fakeMetricsUpstream) lastQueryValue() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastQuery
+}
+
 type fakeLogsUpstream struct {
 	name    string
 	records []segment.LogRecord

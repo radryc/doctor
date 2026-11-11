@@ -1,6 +1,8 @@
 # Compiled binaries
 /doctor-ingest
 /doctor-query
+/doctor-rules
+/doctor-sentinel
 
 # Runtime data directory (WAL, local catalog, local object store)
 /.doctor/

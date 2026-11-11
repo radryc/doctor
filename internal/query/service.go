@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/federation"
 	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/segment"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/monofs/pkg/authz"
@@ -37,6 +39,7 @@ type LogEngineBackend interface {
 	// series index without reading sample data.
 	StreamMetricSeries(ctx context.Context, tenant string, query segment.MetricQuery, from, to time.Time, yield func(segment.MetricSeriesMeta) error) error
 	QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error)
+	QueryDuckDBSQL(ctx context.Context, tenant, dataset, query string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) (monofsstore.DuckDBSQLResponse, error)
 }
 
 type Service struct {
@@ -48,6 +51,8 @@ type Service struct {
 	logEngine        LogEngineBackend
 	aws              proxy.AWSClient
 	awsViaRouter     bool
+	gcp              proxy.GCPClient
+	gcpViaRouter     bool
 	proxyRouter      *proxy.Router
 	guardianClient   *http.Client
 	rulesProxy       *httputil.ReverseProxy
@@ -55,6 +60,11 @@ type Service struct {
 	rulesToken       string
 	policyGate       *access.PolicyGate
 	dashboardStore   DashboardStore
+	quotaEngine      *quota.Engine
+	quotaProvider    *quota.Provider
+	ingestURL        string
+	ingestToken      string
+	ingestClient     *http.Client
 
 	traceDiscoveryMu       sync.Mutex
 	traceDiscoveryCacheTTL time.Duration
@@ -62,6 +72,70 @@ type Service struct {
 	traceTagValuesCache    map[string]traceTagValuesCacheEntry
 	traceTagsCache         map[string]traceTagsCacheEntry
 	traceScopesCache       map[string]traceScopesCacheEntry
+
+	discoveryCacheOnce sync.Once
+	discoveryCache     *discoveryCache
+
+	metricsCacheOnce sync.Once
+	metricsCache     *resultCache
+}
+
+// getDiscoveryCache lazily initializes the catalog cache so tests that build a
+// Service literal keep working without extra setup.
+func (s *Service) getDiscoveryCache() *discoveryCache {
+	s.discoveryCacheOnce.Do(func() {
+		s.discoveryCache = newDiscoveryCache(time.Minute)
+	})
+	return s.discoveryCache
+}
+
+// getMetricsCache returns the short-TTL PromQL result cache. Metrics are not
+// partition-filtered by the access policy, so caching the local engine's raw
+// result is safe; callers receive a shallow copy before request-level identity
+// filters are applied.
+func (s *Service) getMetricsCache() *resultCache {
+	s.metricsCacheOnce.Do(func() {
+		ttl := queryCacheTTLFromEnv()
+		if ttl > 0 {
+			// Bound memory: PromQL results can be wide, so keep a smaller
+			// number of distinct result sets than the log catalog cache.
+			s.metricsCache = newResultCacheWithLimit(ttl, 64)
+		}
+	})
+	return s.metricsCache
+}
+
+// discoveryScopeKey identifies the caller's effective log/trace visibility. It
+// lets the catalog cache serve users with the same partition access without
+// ever sharing a filtered response across different scopes.
+func (s *Service) discoveryScopeKey(ctx context.Context, signals ...policy.Signal) string {
+	if s.policyGate == nil || !s.policyGate.Enforced() {
+		return "all"
+	}
+	id := identityFromContext(ctx)
+	parts := make([]string, 0)
+	for _, signal := range signals {
+		visible, restricted := s.policyGate.VisiblePartitions(id, signal)
+		if !restricted {
+			return "all"
+		}
+		parts = append(parts, visible...)
+	}
+	sort.Strings(parts)
+	if len(parts) == 0 {
+		return "none"
+	}
+	out := parts[:0]
+	for _, partition := range parts {
+		if len(out) == 0 || out[len(out)-1] != partition {
+			out = append(out, partition)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+func discoveryBucket(now time.Time) string {
+	return now.UTC().Truncate(time.Minute).Format(time.RFC3339)
 }
 
 // SetPolicyGate installs the repo-managed access policy. Logs and traces are
@@ -90,6 +164,21 @@ func (s *Service) SetAWSBackend(client proxy.AWSClient) {
 // and once through the direct Service.aws fallback).
 func (s *Service) SetAWSViaRouter(viaRouter bool) {
 	s.awsViaRouter = viaRouter
+}
+
+// SetGCPBackend configures the optional GCP (Cloud Monitoring/Logging/Trace)
+// federation backend served by guardian-pusher-gcp.
+func (s *Service) SetGCPBackend(client proxy.GCPClient) {
+	if client == nil {
+		s.gcp = nil
+		return
+	}
+	s.gcp = client
+}
+
+// SetGCPViaRouter records that proxyRouter already owns the GCP backend.
+func (s *Service) SetGCPViaRouter(viaRouter bool) {
+	s.gcpViaRouter = viaRouter
 }
 
 type federationStatusProvider interface {
@@ -234,6 +323,25 @@ func (s *Service) SetDefaultPartition(p string) { s.defaultPartition = p }
 // SetDashboardStore installs the shared dashboard persistence store.
 func (s *Service) SetDashboardStore(store DashboardStore) {
 	s.dashboardStore = store
+}
+
+// SetQuota installs the partition quota provider and enforcement engine.
+func (s *Service) SetQuota(provider *quota.Provider, engine *quota.Engine) {
+	s.quotaProvider = provider
+	s.quotaEngine = engine
+}
+
+// SetIngestUsage configures the optional doctor-ingest usage proxy used by the
+// quota dashboard.
+func (s *Service) SetIngestUsage(url, token string) {
+	s.ingestURL = strings.TrimRight(strings.TrimSpace(url), "/")
+	s.ingestToken = strings.TrimSpace(token)
+	if s.ingestURL == "" {
+		return
+	}
+	if s.ingestClient == nil {
+		s.ingestClient = &http.Client{Timeout: 5 * time.Second}
+	}
 }
 
 // SetRulesURL configures the doctor-rules API base URL used by the UI proxy.
@@ -629,9 +737,15 @@ func valueOrDefault(value, fallback string) string {
 
 // NewServiceLogEngine creates a query service backed by the monofs logengine.
 func NewServiceLogEngine(c *monofsstore.LogEngineClient, defaultTenant string) *Service {
+	var backend LogEngineBackend = c
+	if c != nil {
+		if ttl := queryCacheTTLFromEnv(); ttl > 0 {
+			backend = newCachingBackend(backend, ttl)
+		}
+	}
 	return &Service{
 		defaultTenant: defaultTenant,
-		logEngine:     c,
+		logEngine:     backend,
 		guardianClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -680,6 +794,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/traces/", s.handleTraceByID)
 	mux.HandleFunc("/v1/logs/services", s.handleLogServices)
 	mux.HandleFunc("/v1/logs/search", s.handleLogSearch)
+	mux.HandleFunc("/v1/sql/query", s.handleDuckDBSQL)
 	mux.HandleFunc("/v1/federation/status", s.handleFederationStatus)
 	mux.HandleFunc("/v1/federation/targets", s.handleFederationTargets)
 	mux.HandleFunc("/v1/federation/plan", s.handleFederationPlan)
@@ -700,6 +815,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/guardian/probes", s.handleGuardianProbes)
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
+	mux.HandleFunc("/v1/quota", s.handleQuota)
 	mux.HandleFunc("/", s.handleUI)
 	return withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLogging(withWarningHeaders(s.guardianTokenMiddleware(mux)))))))
 }
@@ -741,9 +857,9 @@ func (s *Service) guardianTokenMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleRulesProxy exposes the doctor-rules list/detail and manual-evaluate
-// endpoints through the query UI origin. Mutations stay on the rules service
-// API; the UI is read-only except for manual evaluation.
+// handleRulesProxy exposes the doctor-rules list/detail, manual-evaluate, and
+// partition-scoped mutation endpoints through the query UI origin. Mutations
+// require maintainer/admin access to the target partition.
 func (s *Service) handleRulesProxy(w http.ResponseWriter, r *http.Request) {
 	if s.rulesProxy == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "recording rules service is not configured"})
@@ -756,11 +872,40 @@ func (s *Service) handleRulesProxy(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
+	case http.MethodPut, http.MethodDelete:
+		partition, ok := rulesProxyPartition(r.URL.Path)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /v1/rules/{partition}/{group}"})
+			return
+		}
+		if s.policyGate != nil {
+			identity, _ := authz.IdentityFromContext(r.Context())
+			if !s.policyGate.CanModifyPartition(identity, partition) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized to modify rules for this partition"})
+				return
+			}
+		}
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 	s.rulesProxy.ServeHTTP(w, r)
+}
+
+func rulesProxyPartition(path string) (string, bool) {
+	rest := strings.TrimPrefix(path, "/v1/rules/")
+	if rest == path {
+		return "", false
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", false
+	}
+	switch parts[0] {
+	case "evaluate", "status":
+		return "", false
+	}
+	return parts[0], true
 }
 
 // handleSentinelProxy forwards alert reads and operator actions to
@@ -796,6 +941,15 @@ func (s *Service) handleSentinelProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			cloned.Header.Set("X-Doctor-Partition-Access", partition)
+		} else if s.policyGate != nil {
+			// Tenant-wide alert summaries (used by Fleet and Subspace) should
+			// include every partition the caller can see, not just the ones
+			// named in the URL. Use the partition scope rather than a telemetry
+			// signal: SignalMetrics is always unrestricted and would leave the
+			// header unset.
+			if visible, restricted := s.policyGate.AccessiblePartitions(identity); restricted && len(visible) > 0 {
+				cloned.Header.Set("X-Doctor-Partition-Access", strings.Join(visible, ","))
+			}
 		}
 	}
 	s.sentinelProxy.ServeHTTP(w, cloned)
@@ -821,16 +975,34 @@ func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Service) handleUIConfig(w http.ResponseWriter, _ *http.Request) {
+func (s *Service) handleUIConfig(w http.ResponseWriter, r *http.Request) {
 	defaultTenant := strings.TrimSpace(s.defaultTenant)
 	if defaultTenant == "" {
 		defaultTenant = "default"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	payload := map[string]any{
 		"default_tenant":    defaultTenant,
 		"guardian_url":      s.guardianURL,
 		"default_partition": s.defaultPartition,
-	})
+	}
+	// A configured default partition (for example the platform "doctor"
+	// partition) may not be visible to a restricted identity. Return the list
+	// the caller may actually read and pre-select one of those instead, so
+	// partition-scoped pages never start against a partition the API rejects.
+	if s.policyGate != nil {
+		if identity, ok := authz.IdentityFromContext(r.Context()); ok && !identity.IsAnonymous() {
+			if partitions, restricted := s.policyGate.AccessiblePartitions(identity); restricted {
+				payload["accessible_partitions"] = partitions
+				switch {
+				case len(partitions) == 0:
+					payload["default_partition"] = ""
+				case !slices.Contains(partitions, s.defaultPartition):
+					payload["default_partition"] = partitions[0]
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // handleUIUser reports the signed-in caller for the header.
@@ -983,11 +1155,11 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject broad live-AWS searches before any fan-out. Native/local queries
-	// are unaffected; this only applies when the query or log-group picker
-	// targets AWS.
-	if _, awsMode := proxy.AWSQueryMode(query); awsMode != proxy.AWSQueryNone || logGroup != "" {
+	// and GCP log-name selectors are unaffected.
+	gcpLogGroup := isGCPLogName(logGroup)
+	if _, awsMode := proxy.AWSQueryMode(query); awsMode != proxy.AWSQueryNone || (logGroup != "" && !gcpLogGroup) {
 		groups := []string(nil)
-		if logGroup != "" {
+		if logGroup != "" && !gcpLogGroup {
 			groups = []string{logGroup}
 		}
 		if err := s.checkAWSLogScope(r.Context(), query, groups); err != nil {
@@ -1016,7 +1188,7 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			// CloudWatch and merge the records. The CloudWatch log-group picker
 			// is an AWS selector too, so it must not depend on the free-text
 			// query containing source="aws".
-			if logGroup != "" {
+			if logGroup != "" && !gcpLogGroup {
 				plan := lokiPlan{selector: fmt.Sprintf(`{source="aws", aws_log_group=%q}`, logGroup)}
 				if awsLogs := s.queryAWSLogsForLoki(r.Context(), tenant, plan, from, to, limit); len(awsLogs) > 0 {
 					records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
@@ -1255,10 +1427,20 @@ func (s *Service) fetchAllGuardianTopologies(ctx context.Context) ([]augmentedTo
 	}
 	ch := make(chan result, len(partitions))
 	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
 
+loop:
 	for _, p := range partitions {
+		// Acquire the slot before spawning so a large fleet cannot create one
+		// blocked goroutine per partition.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break loop
+		}
+		wg.Add(1)
 		go func(part string) {
-			sem <- struct{}{}
+			defer wg.Done()
 			defer func() { <-sem }()
 			topo, err := s.fetchGuardianTopology(ctx, part)
 			if err != nil || topo == nil {
@@ -1275,11 +1457,12 @@ func (s *Service) fetchAllGuardianTopologies(ctx context.Context) ([]augmentedTo
 			ch <- result{nodes: nodes, edges: topo.Edges}
 		}(p)
 	}
+	wg.Wait()
+	close(ch)
 
 	var allNodes []augmentedTopologyNode
 	var allEdges []guardianTopologyEdge
-	for range partitions {
-		r := <-ch
+	for r := range ch {
 		allNodes = append(allNodes, r.nodes...)
 		allEdges = append(allEdges, r.edges...)
 	}
@@ -1393,32 +1576,55 @@ func (s *Service) handleGuardianEvents(w http.ResponseWriter, r *http.Request) {
 		Revision  string `json:"revision,omitempty"`
 	}
 
+	// Fetch partition histories concurrently, bounded so a large fleet does not
+	// turn one UI request into hundreds of serial Guardian round trips.
+	perPartition := make([][]outEvent, len(partitions))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+loop:
+	for i, p := range partitions {
+		select {
+		case sem <- struct{}{}:
+		case <-r.Context().Done():
+			break loop
+		}
+		wg.Add(1)
+		go func(index int, part string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			hist, err := s.fetchGuardianHistory(r.Context(), part)
+			if err != nil || hist == nil {
+				return
+			}
+			events := make([]outEvent, 0, len(hist.Events))
+			for _, e := range hist.Events {
+				if e.Timestamp.Before(cutoff) {
+					continue
+				}
+				if intent != "" && e.Intent != "" && e.Intent != intent {
+					continue
+				}
+				events = append(events, outEvent{
+					Tenant:    tenant,
+					Partition: part,
+					Intent:    e.Intent,
+					Asset:     e.Asset,
+					Kind:      e.Kind,
+					Timestamp: e.Timestamp.UTC().Format(time.RFC3339),
+					Status:    e.Status,
+					Message:   e.Message,
+					TaskID:    e.TaskID,
+					Revision:  e.DeploymentRevision,
+				})
+			}
+			perPartition[index] = events
+		}(i, p)
+	}
+	wg.Wait()
+
 	var all []outEvent
-	for _, p := range partitions {
-		hist, err := s.fetchGuardianHistory(r.Context(), p)
-		if err != nil || hist == nil {
-			continue
-		}
-		for _, e := range hist.Events {
-			if e.Timestamp.Before(cutoff) {
-				continue
-			}
-			if intent != "" && e.Intent != "" && e.Intent != intent {
-				continue
-			}
-			all = append(all, outEvent{
-				Tenant:    tenant,
-				Partition: p,
-				Intent:    e.Intent,
-				Asset:     e.Asset,
-				Kind:      e.Kind,
-				Timestamp: e.Timestamp.UTC().Format(time.RFC3339),
-				Status:    e.Status,
-				Message:   e.Message,
-				TaskID:    e.TaskID,
-				Revision:  e.DeploymentRevision,
-			})
-		}
+	for _, events := range perPartition {
+		all = append(all, events...)
 	}
 
 	// Sort newest first.
@@ -1727,11 +1933,55 @@ func (s *Service) handleRecentTraces(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
 	partition := partitionFromRequest(r)
+	include := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include")))
+	signals := []policy.Signal{policy.SignalLogs}
+	if strings.Contains(include, "traces") {
+		signals = append(signals, policy.SignalTraces)
+	}
+	scope := s.discoveryScopeKey(r.Context(), signals...)
+	if strings.Contains(include, "aws") && s.aws != nil {
+		// AWS visibility can depend on account/region bindings that are not
+		// captured by partition names alone; keep those responses per-principal.
+		scope += "|id:" + identityFromContext(r.Context()).PrincipalID()
+	}
+	cacheKey := strings.Join([]string{
+		"log-services",
+		tenant,
+		partition,
+		include,
+		scope,
+		discoveryBucket(time.Now()),
+	}, "\x00")
+
+	body, cacheStatus, err := s.getDiscoveryCache().getOrLoad(r.Context(), cacheKey, 3*time.Second, func(ctx context.Context) ([]byte, error) {
+		return s.buildLogServices(ctx, tenant, partition, include)
+	})
+	if err != nil {
+		w.Header().Set("X-Doctor-Cache", "error")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tenant":     tenant,
+			"services":   []string{},
+			"partitions": []string{},
+			"identities": []logIdentityInfo{},
+			"log_groups": []string{},
+		})
+		return
+	}
+	w.Header().Set("X-Doctor-Cache", cacheStatus)
+	w.Header().Set("Cache-Control", "private, max-age=30")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(body)
+}
+
+func (s *Service) buildLogServices(ctx context.Context, tenant, partition, include string) ([]byte, error) {
 	from := time.Now().UTC().Add(-1 * time.Hour)
 	to := time.Now().UTC()
 
-	results, err := s.logEngine.QueryLogs(r.Context(), tenant, "", "", from, to, 2000)
+	results, err := s.logEngine.QueryLogs(ctx, tenant, "", "", from, to, 2000)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		results = nil
 	}
 
@@ -1778,9 +2028,12 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 	// Trace services may have no log records in the scan window. Include them
 	// when the caller asks for a trace-oriented catalog so the traces page can
 	// offer the same partition-scoped service filter as the logs page.
-	include := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include")))
 	if strings.Contains(include, "traces") {
-		if spans, spanErr := s.logEngine.QueryTraces(r.Context(), tenant, "", "", from, to, traceDiscoverySpanLimit); spanErr == nil {
+		spans, spanErr := s.logEngine.QueryTraces(ctx, tenant, "", "", from, to, traceDiscoverySpanLimit)
+		if spanErr != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if spanErr == nil {
 			for _, span := range spans {
 				part, intent, asset := traceIdentityLabels(span)
 				if part != "" && !seenParts[part] {
@@ -1801,8 +2054,8 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 
 	// Federated X-Ray services have no local log records, but should still be
 	// selectable alongside native services and carry their AWS partition.
-	for _, svc := range s.awsServiceInfos(r.Context()) {
-		part, allowed := s.policyPartitionAllowed(r.Context(), svc.Account, svc.Region,
+	for _, svc := range s.awsServiceInfos(ctx) {
+		part, allowed := s.policyPartitionAllowed(ctx, svc.Account, svc.Region,
 			awsPartition(svc.Region, svc.Account), policy.SignalLogs)
 		if !allowed {
 			continue
@@ -1820,9 +2073,9 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 		}
 		addIdentity(part, "", "", svc.Name)
 	}
-	logGroups := make([]string, 0)
-	if strings.Contains(include, "aws") && s.awsDiscoveryReady(r.Context()) {
-		awsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	logGroupSet := map[string]struct{}{}
+	if strings.Contains(include, "aws") && s.awsDiscoveryReady(ctx) {
+		awsCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		for _, group := range proxy.AWSLogGroups(awsCtx, s.aws) {
 			groupPartition := proxy.LogGroupPartition(group)
@@ -1832,12 +2085,24 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 			if partition != "" && groupPartition != partition {
 				continue
 			}
-			if _, allowed := s.policyPartitionAllowed(r.Context(), "", "", groupPartition, policy.SignalLogs); !allowed {
+			if _, allowed := s.policyPartitionAllowed(ctx, "", "", groupPartition, policy.SignalLogs); !allowed {
 				continue
 			}
-			logGroups = append(logGroups, group)
+			logGroupSet[group] = struct{}{}
 		}
 	}
+	if s.gcpDiscoveryReady() {
+		gcpCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if names, err := s.gcp.ListLogNames(gcpCtx); err == nil {
+			for _, name := range names {
+				if name != "" {
+					logGroupSet[name] = struct{}{}
+				}
+			}
+		}
+	}
+	logGroups := sortedStrings(logGroupSet)
 	sort.Strings(components)
 	sort.Strings(partitions)
 	sort.Strings(logGroups)
@@ -1855,7 +2120,7 @@ func (s *Service) handleLogServices(w http.ResponseWriter, r *http.Request) {
 		return left.Service < right.Service
 	})
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	return json.Marshal(map[string]any{
 		"tenant":     tenant,
 		"services":   components,
 		"partitions": partitions,
@@ -1993,6 +2258,54 @@ func mergeServiceIdentity(info *svcInfo, primary, secondary map[string]string, p
 }
 
 func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request) {
+	tenant := s.tenantFromRequest(r)
+	window := parseWindow(r.URL.Query().Get("window"))
+	if window == 0 {
+		window = 24 * time.Hour
+	}
+	includeAssets := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_assets")), "true")
+	scope := s.discoveryScopeKey(r.Context(), policy.SignalLogs, policy.SignalTraces)
+	if s.aws != nil {
+		// Federated AWS service visibility can depend on account/region
+		// bindings beyond the partition set, so keep it per-principal.
+		scope += "|id:" + identityFromContext(r.Context()).PrincipalID()
+	}
+	cacheKey := strings.Join([]string{
+		"service-discovery",
+		tenant,
+		window.String(),
+		fmt.Sprintf("%t", includeAssets),
+		scope,
+		discoveryBucket(time.Now()),
+	}, "\x00")
+
+	body, cacheStatus, err := s.getDiscoveryCache().getOrLoad(r.Context(), cacheKey, 5*time.Second, func(ctx context.Context) ([]byte, error) {
+		recorder := &bufferedResponse{}
+		s.serveServiceDiscovery(recorder, r.Clone(ctx))
+		if recorder.status != 0 && recorder.status != http.StatusOK {
+			return nil, fmt.Errorf("service discovery returned status %d", recorder.status)
+		}
+		return recorder.body.Bytes(), nil
+	})
+	if err != nil {
+		w.Header().Set("X-Doctor-Cache", "error")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tenant":         tenant,
+			"window":         window.String(),
+			"services":       []any{},
+			"total_services": 0,
+			"include_assets": includeAssets,
+			"discovered_at":  time.Now().UTC(),
+		})
+		return
+	}
+	w.Header().Set("X-Doctor-Cache", cacheStatus)
+	w.Header().Set("Cache-Control", "private, max-age=30")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(body)
+}
+
+func (s *Service) serveServiceDiscovery(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
 	window := parseWindow(r.URL.Query().Get("window"))
 	if window == 0 {

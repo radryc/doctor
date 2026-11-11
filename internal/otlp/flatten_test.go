@@ -11,6 +11,8 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+
+	"github.com/radryc/doctor/internal/segment"
 )
 
 func float64Ptr(value float64) *float64 {
@@ -552,5 +554,152 @@ func TestFlattenMetricsScrapedObservationUsesPointServiceAsSubject(t *testing.T)
 	}
 	if record.Attributes["guardian.producer.service"] != "guardian-configs.guardian.guardiand" {
 		t.Fatalf("producer service = %q", record.Attributes["guardian.producer.service"])
+	}
+}
+
+func TestFlattenMetricsPreservesInstrumentMetadata(t *testing.T) {
+	baseTime := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	sum := func(name string, monotonic bool) *metricspb.Metric {
+		return &metricspb.Metric{
+			Name:        name,
+			Description: name + " description",
+			Unit:        "1",
+			Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{
+				AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+				IsMonotonic:            monotonic,
+				DataPoints: []*metricspb.NumberDataPoint{{
+					TimeUnixNano:      uint64(baseTime.UnixNano()),
+					StartTimeUnixNano: uint64(baseTime.Add(-time.Minute).UnixNano()),
+					Value:             &metricspb.NumberDataPoint_AsDouble{AsDouble: 7},
+				}},
+			}},
+		}
+	}
+	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{{
+			Key:   "service.name",
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api"}},
+		}}},
+		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{
+			sum("requests", true),
+			sum("connections", false),
+		}}},
+	}}}
+
+	records := FlattenMetrics(req, "tenant-a", nil)
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2", len(records))
+	}
+	byName := map[string]segment.MetricPointRecord{}
+	for _, record := range records {
+		byName[record.MetricName] = record
+	}
+	if got := byName["requests"]; got.MetricType != MetricTypeCounter || got.Temporality != "cumulative" {
+		t.Fatalf("counter metadata = type %q temporality %q", got.MetricType, got.Temporality)
+	}
+	if got := byName["connections"]; got.MetricType != MetricTypeUpDownCounter {
+		t.Fatalf("updown metric type = %q", got.MetricType)
+	}
+	if got := byName["requests"]; got.Description == "" || got.Unit != "1" || got.StartTime.IsZero() {
+		t.Fatalf("metadata lost: %+v", got)
+	}
+}
+
+func TestFlattenMetricsExpandsExponentialHistogramBuckets(t *testing.T) {
+	baseTime := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{{
+			Key:   "service.name",
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api"}},
+		}}},
+		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+			Name: "latency",
+			Unit: "s",
+			Data: &metricspb.Metric_ExponentialHistogram{ExponentialHistogram: &metricspb.ExponentialHistogram{
+				AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+				DataPoints: []*metricspb.ExponentialHistogramDataPoint{{
+					TimeUnixNano:      uint64(baseTime.UnixNano()),
+					StartTimeUnixNano: uint64(baseTime.Add(-time.Minute).UnixNano()),
+					Scale:             0,
+					Count:             7,
+					Sum:               float64Ptr(9),
+					ZeroCount:         1,
+					Negative: &metricspb.ExponentialHistogramDataPoint_Buckets{
+						Offset:       0,
+						BucketCounts: []uint64{3},
+					},
+					Positive: &metricspb.ExponentialHistogramDataPoint_Buckets{
+						Offset:       0,
+						BucketCounts: []uint64{1, 2},
+					},
+				}},
+			}},
+		}}}},
+	}}}
+
+	records := FlattenMetrics(req, "tenant-a", nil)
+	buckets := map[string]float64{}
+	var count, sum float64
+	for _, record := range records {
+		switch record.MetricName {
+		case "latency_bucket":
+			buckets[record.Attributes["le"]] = record.Value
+			if record.MetricType != MetricTypeExponentialHistogram {
+				t.Fatalf("bucket metric type = %q", record.MetricType)
+			}
+		case "latency_count":
+			count = record.Value
+		case "latency_sum":
+			sum = record.Value
+		}
+	}
+	want := map[string]float64{"-1": 3, "0": 4, "2": 5, "4": 7, "+Inf": 7}
+	if len(buckets) != len(want) {
+		t.Fatalf("buckets = %#v, want %#v", buckets, want)
+	}
+	for le, value := range want {
+		if buckets[le] != value {
+			t.Fatalf("bucket le=%s = %v, want %v (all=%#v)", le, buckets[le], value, buckets)
+		}
+	}
+	if count != 7 || sum != 9 {
+		t.Fatalf("count/sum = %v/%v", count, sum)
+	}
+}
+
+func TestFlattenMetricsTruncatesOversizedExponentialHistogram(t *testing.T) {
+	baseTime := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	counts := make([]uint64, maxExpandedHistogramBuckets+1)
+	counts[0] = 1
+	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{{
+			Key:   "service.name",
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api"}},
+		}}},
+		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+			Name: "latency",
+			Data: &metricspb.Metric_ExponentialHistogram{ExponentialHistogram: &metricspb.ExponentialHistogram{
+				AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+				DataPoints: []*metricspb.ExponentialHistogramDataPoint{{
+					TimeUnixNano: uint64(baseTime.UnixNano()),
+					Scale:        0,
+					Count:        1,
+					Positive: &metricspb.ExponentialHistogramDataPoint_Buckets{
+						Offset:       0,
+						BucketCounts: counts,
+					},
+				}},
+			}},
+		}}}},
+	}}}
+
+	records := FlattenMetrics(req, "tenant-a", nil)
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want count/sum only", len(records))
+	}
+	for _, record := range records {
+		if record.Attributes["guardian.histogram.buckets.truncated"] != "true" {
+			t.Fatalf("truncated marker missing on %s: %#v", record.MetricName, record.Attributes)
+		}
 	}
 }

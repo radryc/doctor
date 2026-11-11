@@ -1,7 +1,6 @@
 # Components and interfaces
 
-This document explains what each package and binary owns. The line-by-line file inventory is in
-[internal/code-inventory.md](../internal/code-inventory.md).
+This document explains what each package and binary owns.
 
 ## 1. Binaries
 
@@ -339,7 +338,7 @@ Portable dashboard schema (`doctor.dashboard/v1`) and CAS store:
 - widget kinds: timeseries, stat, toplist, gauge, table, logs, traces, topology, markdown;
 - datasources: prometheus, loki, tempo, native_logs, native_traces;
 - variables: label values, custom, text, partition, service;
-- six built-in presets: fleet, service RED, synthetics, MonoFS storage, Doctor self, AWS federation;
+- seven built-in presets: fleet, service RED, synthetics, MonoFS storage, ClickHouse health, Doctor self, AWS federation;
 - stored dashboards are YAML at `/doctor/v1/dashboards/<tenant>/<id>.yaml`; built-ins are read-only
   and win over stored IDs;
 - CAS via expected version; `List`/`Get` populate version metadata from `ListVersions`.
@@ -614,3 +613,13 @@ Recording rules:
 | `DOCTOR_OTEL_METRIC_INTERVAL` | `15s` |
 | `HOSTNAME` | instance ID |
 | `DOCTOR_PARTITION` | resource partition |
+
+### DuckDB SQL console
+
+`internal/query/sql.go` serves `POST /v1/sql/query`. It validates the request,
+resolves the caller's signal-specific partition scope through the access policy,
+and calls the MonoFS router's `QueryDuckDBSQL` RPC. The router fans the query
+out to every healthy storage node, intersects the requested partitions with its
+own policy scope, and returns per-node results. The DuckDB view in MonoFS applies
+the partition predicate before user SQL runs. The console is read-only and
+rejects DDL/DML and external file access.

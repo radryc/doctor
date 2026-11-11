@@ -7,6 +7,7 @@ import (
 
 	"github.com/radryc/doctor/internal/segment"
 	awsstore "github.com/radryc/doctor/internal/store/aws"
+	gcpstore "github.com/radryc/doctor/internal/store/gcp"
 	"github.com/radryc/doctor/internal/tempo"
 )
 
@@ -139,6 +140,24 @@ type LogPushdown struct {
 type LogLineFilter struct {
 	Op    string
 	Value string
+}
+
+// GCPClient is the read surface Doctor federates from guardian-pusher-gcp.
+// It is implemented by internal/store/gcp.Client and by test fakes.
+type GCPClient interface {
+	Enabled() bool
+	ListMetrics(ctx context.Context, namespace, metric string) ([]gcpstore.MetricDescriptor, error)
+	QueryMetric(ctx context.Context, q gcpstore.MetricQuery) ([]gcpstore.MetricSeries, error)
+	ListServices(ctx context.Context) ([]gcpstore.ServiceInfo, error)
+	ListLogNames(ctx context.Context) ([]string, error)
+	QueryLogs(ctx context.Context, q gcpstore.LogQuery) ([]gcpstore.LogRecord, error)
+	QueryTraces(ctx context.Context, q gcpstore.TraceQuery) ([]gcpstore.TraceSummary, error)
+	GetTrace(ctx context.Context, traceID string) ([]gcpstore.Span, error)
+	PrometheusQuery(ctx context.Context, query string, at time.Time) (map[string]any, error)
+	PrometheusQueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (map[string]any, error)
+	PrometheusSeries(ctx context.Context, match []string, start, end time.Time) (map[string]any, error)
+	PrometheusLabels(ctx context.Context, match []string, start, end time.Time) (map[string]any, error)
+	PrometheusLabelValues(ctx context.Context, label string, match []string, start, end time.Time) (map[string]any, error)
 }
 
 // AWSClient is the read surface Doctor federates from guardian-pusher-aws.

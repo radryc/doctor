@@ -11,6 +11,7 @@ import (
 
 	promlabels "github.com/prometheus/prometheus/model/labels"
 	"github.com/radryc/doctor/internal/segment"
+	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
 
 // floodBackend yields a configurable number of synthetic samples for one metric
@@ -53,6 +54,10 @@ func (f *floodBackend) StreamMetrics(_ context.Context, _ string, query segment.
 
 func (f *floodBackend) QueryTraces(context.Context, string, string, string, time.Time, time.Time, int) ([]segment.TraceRecord, error) {
 	return nil, nil
+}
+
+func (f *floodBackend) QueryDuckDBSQL(context.Context, string, string, string, time.Time, time.Time, int, []string, bool) (monofsstore.DuckDBSQLResponse, error) {
+	return monofsstore.DuckDBSQLResponse{}, nil
 }
 
 func TestPrometheusQueryRejectsOverlyBroadMetricQuery(t *testing.T) {

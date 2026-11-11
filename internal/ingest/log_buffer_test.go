@@ -41,6 +41,34 @@ func testLogRecord(body string) segment.LogRecord {
 	}
 }
 
+func TestLogBufferFlushKeepsInflightReservations(t *testing.T) {
+	log, err := wal.NewLogBatchLog(filepath.Join(t.TempDir(), "log-wal"))
+	if err != nil {
+		t.Fatalf("NewLogBatchLog() error = %v", err)
+	}
+	buffer := NewLogBuffer(&logBufferTestWriter{}, log, LogBufferConfig{})
+
+	staged := testLogRecord("staged")
+	inFlight := testLogRecord("in-flight-but-not-yet-inserted")
+	stagedBytes := estimateLogRecordSize(staged)
+	inFlightBytes := estimateLogRecordSize(inFlight)
+
+	buffer.mu.Lock()
+	buffer.batches = []wal.LogBatch{{ID: "a", Records: []segment.LogRecord{staged}}}
+	// byteCount contains the staged batch plus a reservation made by a
+	// concurrent Append that has not inserted its batch yet.
+	buffer.byteCount = stagedBytes + inFlightBytes
+	batches, flushedBytes := buffer.takeFlushBatchesLocked()
+	buffer.mu.Unlock()
+
+	if len(batches) != 1 || flushedBytes != stagedBytes {
+		t.Fatalf("takeFlushBatchesLocked() = %d batches, %d bytes; want 1, %d", len(batches), flushedBytes, stagedBytes)
+	}
+	if buffer.byteCount != inFlightBytes {
+		t.Fatalf("byteCount after take = %d, want in-flight reservation %d", buffer.byteCount, inFlightBytes)
+	}
+}
+
 func TestLogBufferReplayFlushesIncrementally(t *testing.T) {
 	writer := &logBufferTestWriter{}
 	log, err := wal.NewLogBatchLog(filepath.Join(t.TempDir(), "log-wal"))
@@ -74,4 +102,3 @@ func TestLogBufferReplayFlushesIncrementally(t *testing.T) {
 		t.Fatalf("log wal count after replay = %d, want 0", got)
 	}
 }
-

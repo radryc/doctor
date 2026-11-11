@@ -412,7 +412,7 @@ func DefaultSignals(kind string) []Signal {
 		return []Signal{SignalLogs, SignalTraces}
 	case KindBigQuery:
 		return []Signal{SignalMetrics, SignalLogs, SignalTraces}
-	case KindMonoFS, KindAWS:
+	case KindMonoFS, KindAWS, KindGCP:
 		return []Signal{SignalMetrics, SignalLogs, SignalTraces}
 	default:
 		return nil
@@ -446,7 +446,7 @@ func policyFromLabels(labels map[string]string, kind string) QueryPolicy {
 		return PolicyFallback
 	}
 	// Preserve the legacy AWS federation behavior for discovered AWS pushers.
-	if kind == KindAWS {
+	if kind == KindAWS || kind == KindGCP {
 		return PolicyFallback
 	}
 	return PolicyAlways

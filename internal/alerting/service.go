@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
+
+	doctorstore "github.com/radryc/doctor/internal/store"
 )
 
 // GuardianAlert mirrors guardian/internal/notify.Alert.
@@ -107,51 +110,118 @@ func (s *Service) Apply(ctx context.Context, incoming Alert) (*Alert, error) {
 	if incoming.ID == "" {
 		incoming.ID = incoming.Fingerprint
 	}
+
+	// The notification decision depends on the previous state, so the write
+	// must be conditional on the version that was read. Without this, two
+	// concurrent Apply calls both observe ErrNotFound and both enqueue.
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		next := incoming
+		now := s.now()
+		if next.CreatedAt.IsZero() {
+			next.CreatedAt = now
+		}
+		next.UpdatedAt = now
+
+		previous, version, err := s.Store.GetAlertVersioned(ctx, next.Tenant, next.Partition, next.Fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		enqueue := s.shouldNotify(previous, &next)
+		if previous != nil {
+			next.CreatedAt = previous.CreatedAt
+			if next.Status == StatusFiring && previous.Status == StatusFiring {
+				next.StartsAt = previous.StartsAt
+			}
+			next.Acked = previous.Acked
+			next.AckedBy = previous.AckedBy
+			next.AckedAt = previous.AckedAt
+			// Sources re-publish alert state on every poll. Preserve delivery
+			// metadata so "last notified" survives a poll and so routing
+			// reconciliation does not re-send an alert that was already
+			// delivered.
+			next.LastNotifiedAt = previous.LastNotifiedAt
+			next.SilenceIDs = previous.SilenceIDs
+		}
+		if next.Status == StatusResolved && next.EndsAt == nil {
+			next.EndsAt = &now
+		}
+		var outbox []OutboxRecord
+		if enqueue {
+			silences, _ := s.Store.ListSilences(ctx, next.Tenant, next.Partition)
+			next.SilenceIDs = matchSilences(silences, next, now)
+			if len(next.SilenceIDs) == 0 && !next.Acked && next.Delivery == DeliverySentinel {
+				outbox, err = s.buildOutbox(ctx, next)
+				if err != nil {
+					return nil, err
+				}
+				if len(outbox) > 0 {
+					notified := now
+					next.LastNotifiedAt = &notified
+				}
+			}
+		}
+		err = s.Store.SaveAlertExpected(ctx, next, outbox, version)
+		if err == nil {
+			return &next, nil
+		}
+		if !errors.Is(err, doctorstore.ErrConflict) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// ReconcileRouting delivers firing alerts that have not been notified yet.
+// Routing changes do not create an alert transition, so without this an alert
+// that fired before a destination existed (for example a Guardian partition
+// attention alert) would stay silent until it resolved and fired again. It is
+// called after a partition routing document is saved.
+func (s *Service) ReconcileRouting(ctx context.Context, tenant, partition string) (int, error) {
+	if !s.DeliveryEnabled {
+		return 0, nil
+	}
+	alerts, err := s.Store.ListAlerts(ctx, tenant, partition)
+	if err != nil {
+		return 0, err
+	}
+	if len(alerts) == 0 {
+		return 0, nil
+	}
+	silences, err := s.Store.ListSilences(ctx, tenant, partition)
+	if err != nil {
+		return 0, err
+	}
 	now := s.now()
-	if incoming.CreatedAt.IsZero() {
-		incoming.CreatedAt = now
-	}
-	incoming.UpdatedAt = now
-	previous, err := s.Store.GetAlert(ctx, incoming.Tenant, incoming.Partition, incoming.Fingerprint)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	enqueue := s.shouldNotify(previous, &incoming)
-	if previous != nil {
-		incoming.CreatedAt = previous.CreatedAt
-		if incoming.Status == StatusFiring && previous.Status == StatusFiring {
-			incoming.StartsAt = previous.StartsAt
+	enqueued := 0
+	for i := range alerts {
+		alert := &alerts[i]
+		if alert.Status != StatusFiring || alert.Delivery != DeliverySentinel || alert.Acked {
+			continue
 		}
-		incoming.Acked = previous.Acked
-		incoming.AckedBy = previous.AckedBy
-		incoming.AckedAt = previous.AckedAt
-	}
-	if incoming.Status == StatusResolved && incoming.EndsAt == nil {
-		incoming.EndsAt = &now
-	}
-	if enqueue {
-		silences, _ := s.Store.ListSilences(ctx, incoming.Tenant, incoming.Partition)
-		matched := matchSilences(silences, incoming, now)
-		incoming.SilenceIDs = matched
-		if len(matched) == 0 && !incoming.Acked && incoming.Delivery == DeliverySentinel {
-			outbox, err := s.buildOutbox(ctx, incoming)
-			if err != nil {
-				return nil, err
-			}
-			if len(outbox) > 0 {
-				notified := now
-				incoming.LastNotifiedAt = &notified
-			}
-			if err := s.Store.SaveAlert(ctx, incoming, outbox); err != nil {
-				return nil, err
-			}
-			return &incoming, nil
+		if alert.LastNotifiedAt != nil {
+			continue
 		}
+		if len(matchSilences(silences, *alert, now)) > 0 {
+			continue
+		}
+		outbox, err := s.buildOutbox(ctx, *alert)
+		if err != nil {
+			return enqueued, err
+		}
+		if len(outbox) == 0 {
+			continue
+		}
+		alert.LastNotifiedAt = &now
+		alert.UpdatedAt = now
+		if err := s.Store.SaveAlert(ctx, *alert, outbox); err != nil {
+			return enqueued, err
+		}
+		enqueued++
 	}
-	if err := s.Store.SaveAlert(ctx, incoming, nil); err != nil {
-		return nil, err
-	}
-	return &incoming, nil
+	return enqueued, nil
 }
 
 func (s *Service) shouldNotify(previous *Alert, incoming *Alert) bool {
@@ -174,7 +244,7 @@ func (s *Service) shouldNotify(previous *Alert, incoming *Alert) bool {
 }
 
 func (s *Service) buildOutbox(ctx context.Context, alert Alert) ([]OutboxRecord, error) {
-	cfg, err := s.Store.GetReceiverConfig(ctx)
+	cfg, err := s.Store.GetPartitionRouting(ctx, alert.Tenant, alert.Partition)
 	if err != nil {
 		return nil, err
 	}
@@ -204,43 +274,97 @@ func (s *Service) buildOutbox(ctx context.Context, alert Alert) ([]OutboxRecord,
 	return out, nil
 }
 
-func matchingReceivers(cfg *ReceiverConfig, alert Alert) []string {
+func matchingReceivers(cfg *PartitionRouting, alert Alert) []string {
 	if cfg == nil {
 		return nil
 	}
-	if len(cfg.Routes) == 0 {
-		out := make([]string, 0, len(cfg.Receivers))
-		for _, receiver := range cfg.Receivers {
-			out = append(out, receiver.Name)
-		}
-		return out
+	known := make(map[string]struct{}, len(cfg.Receivers))
+	for _, receiver := range cfg.Receivers {
+		known[receiver.Name] = struct{}{}
 	}
-	selected := map[string]struct{}{}
-	for _, route := range cfg.Routes {
-		if !routeMatches(route, alert.Labels) {
+	// 1. An explicit per-alert destination wins over every route.
+	if explicit := filterKnownReceivers(alert.Notify, known); len(explicit) > 0 {
+		return explicit
+	}
+	// 2. A source-specific destination. These let source-generated alerts
+	// (Guardian partition health, CloudWatch alarms, ...) be routed explicitly
+	// even though they have no rule on which to store Notify.
+	for _, route := range cfg.AlertRoutes {
+		if route.Source != alert.Source || route.Alert != alert.Labels["alertname"] {
 			continue
 		}
+		if explicit := filterKnownReceivers(route.Receivers, known); len(explicit) > 0 {
+			return explicit
+		}
+	}
+	// 3. A partition-wide destination receives everything else.
+	if cfg.PartitionReceiver != "" {
+		if _, ok := known[cfg.PartitionReceiver]; ok {
+			return []string{cfg.PartitionReceiver}
+		}
+	}
+	// 4. Label routes.
+	selected := map[string]struct{}{}
+	matched := false
+	for _, route := range cfg.Routes {
+		if !route.Applies(alert) {
+			continue
+		}
+		matched = true
 		for _, name := range route.Receivers {
-			selected[name] = struct{}{}
+			if _, ok := known[name]; ok {
+				selected[name] = struct{}{}
+			}
 		}
 		if !route.Continue {
 			break
 		}
 	}
-	out := make([]string, 0, len(selected))
-	for name := range selected {
-		out = append(out, name)
+	if matched {
+		out := make([]string, 0, len(selected))
+		for name := range selected {
+			out = append(out, name)
+		}
+		sort.Strings(out)
+		return out
 	}
-	return out
-}
-
-func routeMatches(route Route, labels map[string]string) bool {
-	for key, want := range route.Matchers {
-		if labels[key] != want {
-			return false
+	// 5. Default receiver.
+	if cfg.DefaultReceiver != "" {
+		if _, ok := known[cfg.DefaultReceiver]; ok {
+			return []string{cfg.DefaultReceiver}
 		}
 	}
-	return true
+	// 6. Legacy behaviour: a config with no routes or fallbacks sends to every
+	// receiver. This keeps older global configs working.
+	if len(cfg.Routes) == 0 && len(cfg.AlertRoutes) == 0 && cfg.DefaultReceiver == "" && cfg.PartitionReceiver == "" {
+		out := make([]string, 0, len(cfg.Receivers))
+		for _, receiver := range cfg.Receivers {
+			out = append(out, receiver.Name)
+		}
+		sort.Strings(out)
+		return out
+	}
+	return nil
+}
+
+func filterKnownReceivers(names []string, known map[string]struct{}) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := map[string]struct{}{}
+	for _, name := range names {
+		if _, ok := known[name]; !ok {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func matchSilences(silences []Silence, alert Alert, now time.Time) []string {
