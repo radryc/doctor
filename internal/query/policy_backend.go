@@ -68,6 +68,26 @@ func (b *policyBackend) StreamMetricSeries(ctx context.Context, tenant string, q
 	return b.inner.StreamMetricSeries(ctx, tenant, query, from, to, yield)
 }
 
+// QueryLogsPartition reads one partition for discovery and still applies the
+// caller's visibility filter. Results are bounded by the caller's per-partition
+// discovery budget rather than a shared global cap.
+func (b *policyBackend) QueryLogsPartition(ctx context.Context, tenant, query, service, partition string, from, to time.Time, limit int) ([]segment.LogRecord, error) {
+	records, err := queryLogsBackend(ctx, b.inner, tenant, query, service, from, to, limit, []string{partition}, true)
+	if err != nil {
+		return records, err
+	}
+	return b.gate.FilterLogs(identityFromContext(ctx), records), nil
+}
+
+// QueryTracesPartition is the trace counterpart of QueryLogsPartition.
+func (b *policyBackend) QueryTracesPartition(ctx context.Context, tenant, traceID, service, partition string, from, to time.Time, limit int) ([]segment.TraceRecord, error) {
+	spans, err := queryTracesBackend(ctx, b.inner, tenant, traceID, service, from, to, limit, []string{partition}, true)
+	if err != nil {
+		return spans, err
+	}
+	return b.gate.FilterSpans(identityFromContext(ctx), spans), nil
+}
+
 // QueryTraces filters spans by the caller's trace partitions (span-level: a
 // trace remains visible while at least one span survives).
 func (b *policyBackend) QueryTraces(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int) ([]segment.TraceRecord, error) {

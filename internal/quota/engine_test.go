@@ -186,3 +186,41 @@ func TestStorageQuotaRejectsOverWindow(t *testing.T) {
 		t.Fatal("second batch should exceed the storage window")
 	}
 }
+
+func TestMixedBatchBatchLimitUsesPartitionShare(t *testing.T) {
+	provider := testProvider(t, policy.Quota{
+		Ingest: &policy.IngestQuota{
+			Traces: &policy.SignalIngestQuota{MaxBatchBytes: 4 << 20},
+		},
+	}, nil, nil, []string{"quiet", "loud"}, true)
+	engine := fixedEngine(t, provider, 1)
+
+	// 8 MiB split evenly across two partitions is 4 MiB each: exactly at the
+	// limit, so neither partition may be blamed for the other's bytes.
+	batch := IngestBatch{
+		Signal:  "traces",
+		Bytes:   8 << 20,
+		Records: map[string]int64{"quiet": 1000, "loud": 1000},
+	}
+	if err := engine.CheckIngest(context.Background(), batch); err != nil {
+		t.Fatalf("mixed batch should use per-partition attribution: %v", err)
+	}
+}
+
+func TestSinglePartitionOverBatchLimitRejected(t *testing.T) {
+	provider := testProvider(t, policy.Quota{
+		Ingest: &policy.IngestQuota{
+			Traces: &policy.SignalIngestQuota{MaxBatchBytes: 4 << 20},
+		},
+	}, nil, nil, []string{"loud"}, true)
+	engine := fixedEngine(t, provider, 1)
+
+	batch := IngestBatch{
+		Signal:  "traces",
+		Bytes:   5 << 20,
+		Records: map[string]int64{"loud": 1},
+	}
+	if err := engine.CheckIngest(context.Background(), batch); err == nil {
+		t.Fatal("a partition over its own batch limit should be rejected")
+	}
+}

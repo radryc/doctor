@@ -33,6 +33,19 @@ type scopedTraceQueryBackend interface {
 	QueryTracesScoped(ctx context.Context, tenant, traceID, service string, from, to time.Time, limit int, visiblePartitions []string, restricted bool) ([]segment.TraceRecord, error)
 }
 
+// partitionedLogQueryBackend scans exactly one storage partition. Service
+// discovery uses it to give every partition its own result budget instead of
+// letting a loud neighbour consume one shared newest-N cap.
+type partitionedLogQueryBackend interface {
+	QueryLogsPartition(ctx context.Context, tenant, query, service, partition string, from, to time.Time, limit int) ([]segment.LogRecord, error)
+}
+
+// partitionedTraceQueryBackend is the trace counterpart of
+// partitionedLogQueryBackend.
+type partitionedTraceQueryBackend interface {
+	QueryTracesPartition(ctx context.Context, tenant, traceID, service, partition string, from, to time.Time, limit int) ([]segment.TraceRecord, error)
+}
+
 // tracePageQuery reports whether storage returned a full batch *before* the
 // access policy filtered it, plus the oldest start time in that raw batch.
 // The recent-trace scan must keep walking older batches while the raw batch

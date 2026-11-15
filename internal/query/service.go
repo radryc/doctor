@@ -2348,6 +2348,61 @@ func (s *Service) handleServiceDiscovery(w http.ResponseWriter, r *http.Request)
 	_, _ = w.Write(body)
 }
 
+// maxDiscoveryRecordsPerPartition bounds one partition's slice of a service
+// discovery scan. Discovery fans out over the partition catalog so this budget
+// is not consumed by a noisy neighbour.
+const maxDiscoveryRecordsPerPartition = 1000
+
+// discoveryScanPartitions returns the partitions to scan individually for a
+// signal. A nil result means the caller should fall back to a single unpinned
+// scan (no policy catalog is available).
+func (s *Service) discoveryScanPartitions(ctx context.Context, signal policy.Signal) []string {
+	if s.policyGate == nil {
+		return nil
+	}
+	p := s.policyGate.CurrentPolicy()
+	if p == nil {
+		return nil
+	}
+	known := p.KnownPartitions()
+	if len(known) == 0 {
+		return nil
+	}
+	// Logs and traces are filtered by the caller's visibility, so only scan
+	// what the caller may read. Metrics stay globally readable, so scan the
+	// whole catalog to keep discovery fair for everyone.
+	if signal != policy.SignalMetrics && s.policyGate.Enforced() {
+		visible, restricted := s.policyGate.ReadPartitions(identityFromContext(ctx), signal)
+		if restricted {
+			return intersectPartitions(known, visible)
+		}
+	}
+	return known
+}
+
+func intersectPartitions(catalog, visible []string) []string {
+	if len(visible) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(visible))
+	for _, name := range visible {
+		allowed[name] = struct{}{}
+	}
+	out := make([]string, 0, len(catalog))
+	seen := make(map[string]struct{}, len(catalog))
+	for _, name := range catalog {
+		if _, ok := allowed[name]; !ok {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
 func (s *Service) serveServiceDiscovery(w http.ResponseWriter, r *http.Request) {
 	tenant := s.tenantFromRequest(r)
 	window := parseWindow(r.URL.Query().Get("window"))
@@ -2366,106 +2421,161 @@ func (s *Service) serveServiceDiscovery(w http.ResponseWriter, r *http.Request) 
 		return info
 	}
 
-	// Collect services from traces.
-	traces, err := s.logEngine.QueryTraces(r.Context(), tenant, "", "", cutoff, time.Now().UTC(), 5000)
-	if err != nil {
-		traces = nil
-	}
-	for _, t := range traces {
-		if t.Service == "" {
-			continue
+	ctx := r.Context()
+	now := time.Now().UTC()
+
+	// Collect services from traces. When the policy catalog lists partitions,
+	// scan each one with its own budget so a loud partition cannot consume the
+	// shared newest-N window and hide quieter ones.
+	scanTraces := func(partition string, limit int) {
+		var (
+			traces []segment.TraceRecord
+			err    error
+		)
+		if partitioned, ok := s.logEngine.(partitionedTraceQueryBackend); ok && partition != "" {
+			traces, err = partitioned.QueryTracesPartition(ctx, tenant, "", "", partition, cutoff, now, limit)
+		} else {
+			traces, err = s.logEngine.QueryTraces(ctx, tenant, "", "", cutoff, now, limit)
 		}
-		info := getInfo(t.Service)
-		info.hasTraces = true
-		info.traceSpanCount++
-		if t.TraceID != "" {
-			info.traceIDs[t.TraceID] = struct{}{}
-			if traceStatusIsError(t.StatusCode) {
-				info.traceErrorIDs[t.TraceID] = struct{}{}
+		if err != nil {
+			return
+		}
+		for _, t := range traces {
+			if t.Service == "" {
+				continue
 			}
-		} else if traceStatusIsError(t.StatusCode) {
-			info.traceErrorCount++
+			info := getInfo(t.Service)
+			info.hasTraces = true
+			info.traceSpanCount++
+			if t.TraceID != "" {
+				info.traceIDs[t.TraceID] = struct{}{}
+				if traceStatusIsError(t.StatusCode) {
+					info.traceErrorIDs[t.TraceID] = struct{}{}
+				}
+			} else if traceStatusIsError(t.StatusCode) {
+				info.traceErrorCount++
+			}
+			partition, intent, asset := traceIdentityLabels(t)
+			mergeServiceIdentity(info, t.ResourceAttributes, t.Attributes, partition, intent, asset)
+			if t.EndTime.After(info.lastSeen) {
+				info.lastSeen = t.EndTime
+			}
 		}
-		partition, intent, asset := traceIdentityLabels(t)
-		mergeServiceIdentity(info, t.ResourceAttributes, t.Attributes, partition, intent, asset)
-		if t.EndTime.After(info.lastSeen) {
-			info.lastSeen = t.EndTime
+	}
+	if partitions := s.discoveryScanPartitions(ctx, policy.SignalTraces); len(partitions) > 0 {
+		for _, partition := range partitions {
+			scanTraces(partition, maxDiscoveryRecordsPerPartition)
 		}
+	} else {
+		scanTraces("", maxDiscoveryScannedRecords/2)
 	}
 
-	// Collect services from logs.
-	logs, err := s.logEngine.QueryLogs(r.Context(), tenant, "", "", cutoff, time.Now().UTC(), 5000)
-	if err != nil {
-		logs = nil
-	}
+	// Collect services from logs, using the same per-partition budget as
+	// traces.
 	logCountBySvc := make(map[string]int)
 	errorCountBySvc := make(map[string]int)
 	totalLogs := 0
-	for _, l := range logs {
-		if l.Service == "" {
-			continue
+	scanLogs := func(partition string, limit int) {
+		var (
+			logs []segment.LogRecord
+			err  error
+		)
+		if partitioned, ok := s.logEngine.(partitionedLogQueryBackend); ok && partition != "" {
+			logs, err = partitioned.QueryLogsPartition(ctx, tenant, "", "", partition, cutoff, now, limit)
+		} else {
+			logs, err = s.logEngine.QueryLogs(ctx, tenant, "", "", cutoff, now, limit)
 		}
-		info := getInfo(l.Service)
-		info.hasLogs = true
-		partition, intent, asset := logIdentity(l)
-		mergeServiceIdentity(info, l.ResourceAttributes, l.Attributes, partition, intent, asset)
-		logCountBySvc[l.Service]++
-		totalLogs++
-		if l.SeverityText == "ERROR" || l.SeverityText == "FATAL" || l.SeverityNumber >= 17 {
-			errorCountBySvc[l.Service]++
-			info.logErrorCount++
+		if err != nil {
+			return
 		}
-		if l.Timestamp.After(info.lastSeen) {
-			info.lastSeen = l.Timestamp
+		for _, l := range logs {
+			if l.Service == "" {
+				continue
+			}
+			info := getInfo(l.Service)
+			info.hasLogs = true
+			partition, intent, asset := logIdentity(l)
+			mergeServiceIdentity(info, l.ResourceAttributes, l.Attributes, partition, intent, asset)
+			logCountBySvc[l.Service]++
+			totalLogs++
+			if l.SeverityText == "ERROR" || l.SeverityText == "FATAL" || l.SeverityNumber >= 17 {
+				errorCountBySvc[l.Service]++
+				info.logErrorCount++
+			}
+			if l.Timestamp.After(info.lastSeen) {
+				info.lastSeen = l.Timestamp
+			}
 		}
+	}
+	if partitions := s.discoveryScanPartitions(ctx, policy.SignalLogs); len(partitions) > 0 {
+		for _, partition := range partitions {
+			scanLogs(partition, maxDiscoveryRecordsPerPartition)
+		}
+	} else {
+		scanLogs("", maxDiscoveryScannedRecords/2)
 	}
 
 	// Discover metric names per service via Prometheus labels. Stream the
-	// records so an unbounded number of samples cannot exhaust memory.
+	// records so an unbounded number of samples cannot exhaust memory. Metrics
+	// are globally readable, so every catalog partition is scanned with its own
+	// budget; one shared newest-N scan lets the loudest partition hide the
+	// rest (the noisy-neighbour case seen with monofs vs memebank).
 	end := time.Now().UTC()
 	start := end.Add(-window)
-	scanned := 0
-	_ = s.logEngine.StreamMetrics(r.Context(), tenant, segment.MetricQuery{}, start, end, func(m segment.MetricPointRecord) error {
-		if scanned >= maxDiscoveryScannedRecords {
-			return errDiscoveryScanLimit
-		}
-		scanned++
-		if m.Service == "" {
+	scanMetrics := func(query segment.MetricQuery, limit int) {
+		scanned := 0
+		_ = s.logEngine.StreamMetrics(ctx, tenant, query, start, end, func(m segment.MetricPointRecord) error {
+			if scanned >= limit {
+				return errDiscoveryScanLimit
+			}
+			scanned++
+			if m.Service == "" {
+				return nil
+			}
+			info := getInfo(m.Service)
+			info.hasMetrics = true
+			partition, intent, asset := metricIdentity(m)
+			mergeServiceIdentity(info, m.ResourceAttributes, m.Attributes, partition, intent, asset)
+			if m.MetricName == assetObservationMetric {
+				info.hasAssetObservation = true
+				// Asset observation describes the target, so its point-level alias
+				// and type win over the producer's resource metadata.
+				info.alias = firstNonEmpty(m.Attributes["service.alias"], m.Attributes["service_alias"])
+				info.identityKind = "managed"
+				// Asset observation describes the target, so its point-level type
+				// wins over the producer's resource type.
+				if assetType := firstNonEmpty(
+					m.Attributes["guardian_asset_type"],
+					m.Attributes["guardian.asset.type"],
+					info.assetType,
+				); assetType != "" {
+					info.assetType = assetType
+				}
+				if info.partition != "" && info.intent != "" && info.asset != "" {
+					info.fullName = info.partition + "." + info.intent + "." + info.asset
+				}
+			} else {
+				info.hasRuntimeMetrics = true
+			}
+			if m.MetricName != "" {
+				info.metricNames[m.MetricName] = struct{}{}
+			}
+			if m.Timestamp.After(info.lastSeen) {
+				info.lastSeen = m.Timestamp
+			}
 			return nil
+		})
+	}
+	if partitions := s.discoveryScanPartitions(ctx, policy.SignalMetrics); len(partitions) > 0 {
+		for _, partition := range partitions {
+			scanMetrics(segment.MetricQuery{
+				VisiblePartitions:    []string{partition},
+				VisiblePartitionsSet: true,
+			}, maxDiscoveryRecordsPerPartition)
 		}
-		info := getInfo(m.Service)
-		info.hasMetrics = true
-		partition, intent, asset := metricIdentity(m)
-		mergeServiceIdentity(info, m.ResourceAttributes, m.Attributes, partition, intent, asset)
-		if m.MetricName == assetObservationMetric {
-			info.hasAssetObservation = true
-			// Asset observation describes the target, so its point-level alias
-			// and type win over the producer's resource metadata.
-			info.alias = firstNonEmpty(m.Attributes["service.alias"], m.Attributes["service_alias"])
-			info.identityKind = "managed"
-			// Asset observation describes the target, so its point-level type
-			// wins over the producer's resource type.
-			if assetType := firstNonEmpty(
-				m.Attributes["guardian_asset_type"],
-				m.Attributes["guardian.asset.type"],
-				info.assetType,
-			); assetType != "" {
-				info.assetType = assetType
-			}
-			if info.partition != "" && info.intent != "" && info.asset != "" {
-				info.fullName = info.partition + "." + info.intent + "." + info.asset
-			}
-		} else {
-			info.hasRuntimeMetrics = true
-		}
-		if m.MetricName != "" {
-			info.metricNames[m.MetricName] = struct{}{}
-		}
-		if m.Timestamp.After(info.lastSeen) {
-			info.lastSeen = m.Timestamp
-		}
-		return nil
-	})
+	} else {
+		scanMetrics(segment.MetricQuery{}, maxDiscoveryScannedRecords)
+	}
 
 	// Federated X-Ray services are trace-only signals; add them (with their AWS
 	// partition) so AWS workloads show up next to native services.

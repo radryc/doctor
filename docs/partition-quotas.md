@@ -35,6 +35,50 @@ with `quota_defaults` or `DOCTOR_QUOTA_DEFAULT_*`):
 | rules | 50 groups, 500 rules, 100 rules/group, 500 evaluation cost/s |
 | storage | 500 GiB, traces 7d, logs 14d, metrics 30d |
 
+## Size classes
+
+Quotas support named size classes so a partition picks an envelope instead of
+hand-tuning every field. The compiler resolves classes at policy-build time, so
+the data plane only sees concrete limits. Built-in classes are available
+without declaring them; a `quota_profiles` entry with the same name overrides
+the built-in.
+
+| Class | Ingest (bytes/s, records/s, batch) | Metric samples/s | Active series | Query rps / concurrent / budget | Max range | Storage |
+|---|---|---|---|---|---|---|
+| `small` | 1 MiB/s, 2k, 1 MiB | 5k | 25k | 10 / 3 / 100 | 24h | 20 GiB |
+| `small-plus` | 2 MiB/s, 5k, 2 MiB | 10k | 50k | 20 / 5 / 200 | 48h | 50 GiB |
+| `medium` | 5 MiB/s, 10k, 4 MiB | 25k | 100k | 50 / 10 / 1000 | 168h | 200 GiB |
+| `medium-plus` | 10 MiB/s, 20k, 4 MiB | 50k | 200k | 100 / 20 / 2000 | 168h | 500 GiB |
+| `large` | 25 MiB/s, 50k, 8 MiB | 100k | 500k | 200 / 40 / 5000 | 336h | 1 TiB |
+| `xlarge` | 100 MiB/s, 200k, 16 MiB | 500k | 2M | 1000 / 100 / 20000 | 720h | 5 TiB |
+
+Select one from a partition manifest or an access document:
+
+```yaml
+spec:
+  quota:
+    profile: small
+    enforcement: observe   # or enforce
+```
+
+or, for a group/client:
+
+```yaml
+quotas:
+  groups:
+    platform: { profile: large }
+```
+
+## Service discovery fairness
+
+Service discovery (`GET /v1/services/discover`) scans traces, logs, and metrics
+once per catalog partition with a per-partition record budget instead of one
+global newest-N window. A partition that ingests far more than its neighbours
+can therefore no longer consume the whole scan budget and hide quieter
+partitions from the service list. The budget is
+`maxDiscoveryRecordsPerPartition` (1000 records) per partition; callers without
+a policy catalog fall back to the legacy single scan.
+
 ## Enforcement points
 
 | Limit | Enforced by |
