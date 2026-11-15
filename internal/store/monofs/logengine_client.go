@@ -217,17 +217,22 @@ func (c *LogEngineClient) queryLogs(ctx context.Context, query, service string, 
 		FromUnixNano: timeToNano(from),
 		ToUnixNano:   timeToNano(to),
 		Limit:        int32(limit),
+		BatchSize:    queryResultBatchSize,
 	}
 	if restricted {
 		req.VisiblePartitions = append([]string(nil), visiblePartitions...)
 		req.VisiblePartitionsSet = true
 	}
-	resp, err := c.router.QueryLogs(ctx, req)
+	// Stream instead of QueryLogs: the unary response aggregates every result
+	// into one ResultsJson payload, which can exceed the router-to-node gRPC
+	// receive limit and fail even when the caller asked for only a page. The
+	// stream also lets us stop as soon as the requested limit is reached.
+	stream, err := c.router.StreamQueryLogs(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	var records []segment.LogRecord
-	if err := json.Unmarshal(resp.ResultsJson, &records); err != nil {
+	records, err := unmarshalQueryItemsLimit[segment.LogRecord](stream, limit)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal log results: %w", err)
 	}
 	return records, nil
@@ -245,17 +250,18 @@ func (c *LogEngineClient) QueryLogsRawScoped(ctx context.Context, tenant, query 
 		FromUnixNano: timeToNano(from),
 		ToUnixNano:   timeToNano(to),
 		Limit:        int32(limit),
+		BatchSize:    queryResultBatchSize,
 	}
 	if restricted {
 		req.VisiblePartitions = append([]string(nil), visiblePartitions...)
 		req.VisiblePartitionsSet = true
 	}
-	resp, err := c.router.QueryLogs(ctx, req)
+	stream, err := c.router.StreamQueryLogs(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	var records []segment.LogRecord
-	if err := json.Unmarshal(resp.ResultsJson, &records); err != nil {
+	records, err := unmarshalQueryItemsLimit[segment.LogRecord](stream, limit)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal log results: %w", err)
 	}
 	return records, nil
@@ -345,7 +351,7 @@ func (c *LogEngineClient) StreamMetrics(ctx context.Context, tenant string, quer
 // queryResultBatchSize is the number of records requested per streamed message.
 // Batching cuts the per-record gRPC overhead that otherwise dominates wide
 // metric scans.
-const queryResultBatchSize = 512
+const queryResultBatchSize = 128
 
 // StreamMetricSeries streams per-series metadata (identity plus first/last
 // sample time) from the storage chunk series index without scanning samples.
@@ -523,7 +529,7 @@ func (c *LogEngineClient) QueryTracesScoped(ctx context.Context, tenant, traceID
 	if err != nil {
 		return nil, err
 	}
-	records, err := unmarshalQueryItems[segment.TraceRecord](stream)
+	records, err := unmarshalQueryItemsLimit[segment.TraceRecord](stream, limit)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal trace results: %w", err)
 	}
@@ -544,7 +550,14 @@ type metricStreamRecord struct {
 }
 
 func unmarshalQueryItems[T any](stream grpc.ServerStreamingClient[pb.QueryResultItem]) ([]T, error) {
-	items := make([]T, 0)
+	return unmarshalQueryItemsLimit[T](stream, 0)
+}
+
+// unmarshalQueryItemsLimit stops reading once limit records have been decoded.
+// MonoFS streams results in batches; without an early stop a trace search can
+// keep scanning long after the UI's requested page is full.
+func unmarshalQueryItemsLimit[T any](stream grpc.ServerStreamingClient[pb.QueryResultItem], limit int) ([]T, error) {
+	items := make([]T, 0, limit)
 	for {
 		item, err := stream.Recv()
 		if err == io.EOF {
@@ -562,6 +575,10 @@ func unmarshalQueryItems[T any](stream grpc.ServerStreamingClient[pb.QueryResult
 				return nil, err
 			}
 			items = append(items, decoded)
+			if limit > 0 && len(items) >= limit {
+				_ = stream.CloseSend()
+				return items, nil
+			}
 		}
 	}
 }

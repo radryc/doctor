@@ -416,8 +416,8 @@ func TestHandleRecentTracesQueriesBoundedSpanSet(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if backend.lastLimit != traceDiscoverySpanLimit {
-		t.Fatalf("QueryTraces limit = %d, want %d", backend.lastLimit, traceDiscoverySpanLimit)
+	if backend.lastLimit != tracePageSpanBatch {
+		t.Fatalf("QueryTraces limit = %d, want %d", backend.lastLimit, tracePageSpanBatch)
 	}
 
 	var resp struct {

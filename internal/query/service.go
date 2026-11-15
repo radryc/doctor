@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httputil"
+	"net/http/pprof"
 	"net/url"
 	"regexp"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -78,6 +80,15 @@ type Service struct {
 
 	metricsCacheOnce sync.Once
 	metricsCache     *resultCache
+
+	// queryFlight coalesces identical in-flight PromQL queries so a burst of
+	// clients asking the same question does not multiply backend fan-out.
+	queryFlight queryFlightGroup
+
+	// federationHealth is supplied by the query process when federated
+	// providers are configured. It reports aggregate target circuits for the
+	// endpoint UI and keeps the synthetic aws/gcp backend status honest.
+	federationHealth func() map[string]any
 }
 
 // getDiscoveryCache lazily initializes the catalog cache so tests that build a
@@ -757,6 +768,15 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/ready", s.handleLokiReady)
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
 	mux.HandleFunc("/api/v1/query", s.handlePrometheusQuery)
 	mux.HandleFunc("/api/v1/query_range", s.handlePrometheusQueryRange)
 	mux.HandleFunc("/api/v1/labels", s.handlePrometheusLabels)
@@ -803,6 +823,13 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/rules/", s.handleRulesProxy)
 	mux.HandleFunc("/v1/alerts", s.handleSentinelProxy)
 	mux.HandleFunc("/v1/alerts/", s.handleSentinelProxy)
+	// Alertmanager v2 compatibility for Grafana's Alertmanager data source.
+	mux.HandleFunc("/api/v2/status", s.handleSentinelProxy)
+	mux.HandleFunc("/api/v2/alerts", s.handleSentinelProxy)
+	mux.HandleFunc("/api/v2/alerts/groups", s.handleSentinelProxy)
+	mux.HandleFunc("/api/v2/silences", s.handleSentinelProxy)
+	mux.HandleFunc("/api/v2/silence/", s.handleSentinelProxy)
+	mux.HandleFunc("/api/v2/", s.handleSentinelProxy)
 	mux.HandleFunc("/v1/services/discover", s.handleServiceDiscovery)
 	mux.HandleFunc("/v1/services/suggest", s.handleServiceSuggest)
 	mux.HandleFunc("/v1/dashboards", s.handleDashboardsRouter)
@@ -817,7 +844,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
 	mux.HandleFunc("/v1/quota", s.handleQuota)
 	mux.HandleFunc("/", s.handleUI)
-	return withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLogging(withWarningHeaders(s.guardianTokenMiddleware(mux)))))))
+	return withHTTPMetrics(withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLogging(withWarningHeaders(s.guardianTokenMiddleware(mux))))))))
 }
 
 // guardianTokenKey carries the caller's OIDC token to server-side Guardian
@@ -1049,6 +1076,7 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var spans []segment.TraceRecord
+	truncatedAt := 0
 	if s.proxyRouter != nil {
 		records, warnings, err := s.proxyRouter.GetTrace(r.Context(), tenant, traceID)
 		if err != nil {
@@ -1065,9 +1093,13 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeProxyWarnings(w, warnings)
 		spans = records
+		if len(spans) >= traceGetSpanLimit {
+			truncatedAt = traceGetSpanLimit
+		}
 	} else {
+		const legacyTraceSpanLimit = 1000
 		var err error
-		spans, err = s.logEngine.QueryTraces(r.Context(), tenant, traceID, "", from, to, 1000)
+		spans, err = s.logEngine.QueryTraces(r.Context(), tenant, traceID, "", from, to, legacyTraceSpanLimit)
 		if err != nil {
 			writeInternalError(w, r, err)
 			return
@@ -1076,12 +1108,23 @@ func (s *Service) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "trace not found", http.StatusNotFound)
 			return
 		}
+		if len(spans) >= legacyTraceSpanLimit {
+			truncatedAt = legacyTraceSpanLimit
+		}
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].StartTime.Before(spans[j].StartTime) })
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"trace_id": traceID,
 		"spans":    spans,
-	})
+	}
+	// The store caps trace detail at a fixed number of spans, so a large trace
+	// arrives as a partial (and possibly rootless) slice. Tell clients the
+	// result is incomplete instead of letting them render it as the whole trace.
+	if truncatedAt > 0 {
+		resp["truncated"] = true
+		resp["span_limit"] = truncatedAt
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Service) handleSpanSearch(w http.ResponseWriter, r *http.Request) {
@@ -1179,11 +1222,11 @@ func (s *Service) handleLogSearch(w http.ResponseWriter, r *http.Request) {
 			writeInternalError(w, r, err)
 			return
 		}
-		// The proxy router serves native storage and, when configured, the
-		// single logical AWS federated backend. Only use the direct AWS
-		// fallback when the router does not own AWS; otherwise the same query
-		// would be sent to AWS twice.
-		if !s.awsViaRouter {
+		// The proxy router serves native storage and, for federated installs,
+		// metrics/traces. It can return no AWS log records even when AWS
+		// federation is healthy, so query the AWS log manager directly unless
+		// the router already supplied AWS records.
+		if s.aws != nil && (!s.awsViaRouter || !hasLogSource(records, proxy.SourceAWS)) {
 			// When the search explicitly selects the AWS source, also query
 			// CloudWatch and merge the records. The CloudWatch log-group picker
 			// is an AWS selector too, so it must not depend on the free-text
