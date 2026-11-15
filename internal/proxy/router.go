@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/radryc/doctor/internal/access"
@@ -59,6 +60,13 @@ type RouterConfig struct {
 	Logger *log.Logger
 	// Access applies endpoint authorization. Nil allows everything.
 	Access *access.Gate
+	// LocalPolicyScoped reports that the local storage backend is already
+	// filtered by the partition access policy (doctor-query's policyBackend).
+	// When true, the OWNERS endpoint gate is not applied to local storage:
+	// it is the wrong resolver for local data and denies callers who are
+	// legitimately granted the partition. When false, local storage stays
+	// behind the endpoint gate (fail closed).
+	LocalPolicyScoped bool
 }
 
 // Upstreams groups the adapters registered for one backend.
@@ -78,10 +86,11 @@ type upstreamEntry struct {
 // one dataspace. The registry may change between requests; upstreams for
 // discovered backends are built lazily and cached until the backend changes.
 type Router struct {
-	cfg      RouterConfig
-	registry Registry
-	logger   *log.Logger
-	access   *access.Gate
+	cfg               RouterConfig
+	registry          Registry
+	logger            *log.Logger
+	access            *access.Gate
+	localPolicyScoped atomic.Bool
 
 	mu                sync.RWMutex
 	explicit          map[string]upstreamEntry
@@ -109,13 +118,14 @@ func NewRouter(cfg RouterConfig, registry Registry) *Router {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	return &Router{
+	router := &Router{
 		cfg: RouterConfig{
 			MaxInflight:       maxInflight,
 			MaxFanoutBackends: maxFanout,
 			BackendTimeout:    timeout,
 			Logger:            cfg.Logger,
 			Access:            cfg.Access,
+			LocalPolicyScoped: cfg.LocalPolicyScoped,
 		},
 		registry: registry,
 		logger:   cfg.Logger,
@@ -124,6 +134,18 @@ func NewRouter(cfg RouterConfig, registry Registry) *Router {
 		built:    make(map[string]upstreamEntry),
 		breakers: make(map[string]*breaker),
 	}
+	router.localPolicyScoped.Store(cfg.LocalPolicyScoped)
+	return router
+}
+
+// SetLocalPolicyScoped records whether local storage reads are already filtered
+// by the partition access policy. When true, accessDecision skips the endpoint
+// OWNERS gate for the local backend (see RouterConfig.LocalPolicyScoped).
+func (r *Router) SetLocalPolicyScoped(scoped bool) {
+	if r == nil {
+		return
+	}
+	r.localPolicyScoped.Store(scoped)
 }
 
 // EndpointFor converts a backend into its access-control endpoint.
@@ -148,7 +170,9 @@ func (r *Router) accessDecision(ctx context.Context, backend Backend, signal acc
 	// for OWNERS at the backend name ("monofs"), not at the partition that owns
 	// the records, so it denies every non-admin caller and the UI shows
 	// "access denied" even though the list (which uses the policy gate) works.
-	if isLocalBackend(backend) && strings.EqualFold(strings.TrimSpace(backend.Origin), "local") {
+	// Only skip the endpoint gate when the partition policy is actually in
+	// charge; otherwise fall through so local storage stays fail-closed.
+	if isLocalBackend(backend) && strings.EqualFold(strings.TrimSpace(backend.Origin), "local") && r.localPolicyScoped.Load() {
 		return true, access.Decision{Endpoint: backend.Name, Signal: signal, Allowed: true, Resolver: "local-policy"}, false
 	}
 	if r.access == nil {

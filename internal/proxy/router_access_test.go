@@ -17,6 +17,7 @@ func TestAccessDecisionBypassesOwnersForLocalStorage(t *testing.T) {
 		nil,
 	)
 	router := &Router{access: gate}
+	router.localPolicyScoped.Store(true)
 
 	local := Backend{Name: "monofs", Kind: KindMonoFS, Origin: "local"}
 	for _, signal := range []access.Signal{access.SignalTraces, access.SignalLogs} {
@@ -39,6 +40,27 @@ func TestAccessDecisionBypassesOwnersForLocalStorage(t *testing.T) {
 	}
 	if !enforced {
 		t.Fatal("remote backend denial should be enforced")
+	}
+}
+
+func TestAccessDecisionKeepsLocalFailClosedWithoutPolicy(t *testing.T) {
+	gate := access.NewGate(
+		access.NewStatic("", "", ""),
+		map[access.Signal]bool{access.SignalTraces: true},
+		nil,
+		nil,
+	)
+	// localPolicyScoped=false means no partition policy is in charge, so the
+	// local backend must stay behind the endpoint gate.
+	router := &Router{access: gate}
+
+	local := Backend{Name: "monofs", Kind: KindMonoFS, Origin: "local"}
+	allowed, decision, enforced := router.accessDecision(context.Background(), local, access.SignalTraces)
+	if allowed {
+		t.Fatalf("local backend should stay gated without a partition policy: %#v", decision)
+	}
+	if !enforced {
+		t.Fatal("local denial should be enforced when no policy is configured")
 	}
 }
 
@@ -66,6 +88,7 @@ func TestTraceTargetsKeepLocalWhenRemoteDenied(t *testing.T) {
 		},
 	)
 	router.access = gate
+	router.localPolicyScoped.Store(true)
 
 	targets, warnings, err := router.traceTargets(context.Background())
 	if err != nil {

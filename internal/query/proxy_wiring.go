@@ -17,7 +17,15 @@ import (
 
 // SetProxyRouter installs the multi-backend router. When nil, handlers use the
 // legacy single-backend plus AWS path.
-func (s *Service) SetProxyRouter(router *proxy.Router) { s.proxyRouter = router }
+func (s *Service) SetProxyRouter(router *proxy.Router) {
+	s.proxyRouter = router
+	if router != nil {
+		// Local storage is already filtered by policyBackend when a partition
+		// policy is installed; tell the router not to apply the OWNERS gate on
+		// top. Without a policy gate this stays false (fail closed).
+		router.SetLocalPolicyScoped(s.PolicyScoped())
+	}
+}
 
 // SetFederationHealth installs the federation provider health reporter used by
 // the endpoint UI and the synthetic aws/gcp backend status.

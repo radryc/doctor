@@ -149,6 +149,13 @@ func discoveryBucket(now time.Time) string {
 	return now.UTC().Truncate(time.Minute).Format(time.RFC3339)
 }
 
+// PolicyScoped reports whether local reads are filtered by the partition
+// access policy. The proxy router must only skip the endpoint OWNERS gate for
+// local storage when this is true; otherwise local storage stays fail-closed.
+func (s *Service) PolicyScoped() bool {
+	return s != nil && s.policyGate != nil
+}
+
 // SetPolicyGate installs the repo-managed access policy. Logs and traces are
 // filtered per partition by the caller's identity; metrics are never filtered.
 func (s *Service) SetPolicyGate(gate *access.PolicyGate) {
