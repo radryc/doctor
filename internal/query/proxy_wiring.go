@@ -19,6 +19,12 @@ import (
 // legacy single-backend plus AWS path.
 func (s *Service) SetProxyRouter(router *proxy.Router) { s.proxyRouter = router }
 
+// SetFederationHealth installs the federation provider health reporter used by
+// the endpoint UI and the synthetic aws/gcp backend status.
+func (s *Service) SetFederationHealth(reporter func() map[string]any) {
+	s.federationHealth = reporter
+}
+
 // ProxyRouter returns the installed router, if any.
 func (s *Service) ProxyRouter() *proxy.Router { return s.proxyRouter }
 
@@ -317,7 +323,8 @@ func (s *Service) LocalTracesUpstream() proxy.TracesUpstream {
 }
 
 const (
-	traceDiscoverySpanLimit = 5000
+	traceDiscoverySpanLimit = 2000
+	traceSpanSetLimit       = 200
 	traceGetSpanLimit       = 20000
 	logQueryRecordLimit     = 5000
 )
@@ -446,6 +453,16 @@ func (l localTracesUpstream) GetTraceWindow(ctx context.Context, tenant, traceID
 	if len(records) == 0 {
 		return nil, false, nil
 	}
+	// The store returns at most traceGetSpanLimit spans and may drop parents
+	// that fall outside the returned slice. Surface the truncation instead of
+	// rendering a silently incomplete (and rootless) trace.
+	if len(records) >= traceGetSpanLimit {
+		proxy.AddWarning(ctx, proxy.Warning{
+			Backend: "monofs",
+			Signal:  proxy.SignalTraces,
+			Message: fmt.Sprintf("trace %s truncated at %d spans; returning a partial span set", traceID, traceGetSpanLimit),
+		})
+	}
 	return canonicalizeTraceRecords(records), true, nil
 }
 
@@ -506,7 +523,7 @@ func (l localTracesUpstream) SearchSpanSets(ctx context.Context, tenant string, 
 	if spss <= 0 {
 		return nil, nil
 	}
-	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, "", search.Service, search.From, search.To, traceDiscoverySpanLimit)
+	records, err := l.svc.logEngine.QueryTraces(ctx, tenant, "", search.Service, search.From, search.To, traceSpanSetLimit)
 	if err != nil {
 		return nil, err
 	}

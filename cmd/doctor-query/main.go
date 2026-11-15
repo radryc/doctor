@@ -212,6 +212,22 @@ func main() {
 		}
 		awsClient = federation.NewMulti(awsManager, managers...)
 		svc.SetAWSBackend(awsClient)
+		svc.SetFederationHealth(func() map[string]any {
+			out := make(map[string]any, len(managers))
+			for _, manager := range managers {
+				summary := manager.HealthSummary()
+				if summary.Provider == "" {
+					continue
+				}
+				out[summary.Provider] = map[string]any{
+					"provider": summary.Provider,
+					"total":    summary.Total,
+					"open":     summary.Open,
+					"healthy":  summary.Healthy,
+				}
+			}
+			return out
+		})
 
 		catalogMetrics, metricsErr := federation.RegisterCatalogMetrics(managers[0])
 		if metricsErr != nil {
@@ -421,13 +437,6 @@ func setupSecurity(ctx context.Context, cfg config.QueryConfig) (*access.Gate, *
 
 func buildAccessResolver(ctx context.Context, cfg config.QueryConfig) (access.Resolver, func(), error) {
 	static := access.NewStatic(cfg.AccessStaticAllow, cfg.AccessStaticAllowGroups, cfg.AccessStaticDeny)
-	grantsResolver := func() (access.Resolver, error) {
-		store, err := authz.NewGrantStore(cfg.AccessGrantsPath)
-		if err != nil {
-			return nil, err
-		}
-		return &access.Grants{Store: store}, nil
-	}
 	ownersResolver := func() (access.Resolver, func(), error) {
 		mapping, err := loadTeamMapping(cfg.AccessTeamMapping)
 		if err != nil {
@@ -456,20 +465,12 @@ func buildAccessResolver(ctx context.Context, cfg config.QueryConfig) (access.Re
 		return access.AllowAll{}, nil, nil
 	case "static":
 		return static, nil, nil
-	case "grants":
-		resolver, err := grantsResolver()
-		return resolver, nil, err
 	case "chain":
 		owners, cleanup, err := ownersResolver()
 		if err != nil {
 			return nil, nil, err
 		}
-		grants, err := grantsResolver()
-		if err != nil {
-			cleanup()
-			return nil, nil, err
-		}
-		return access.NewChain(owners, grants, static), cleanup, nil
+		return access.NewChain(owners, static), cleanup, nil
 	default:
 		resolver, cleanup, err := ownersResolver()
 		return resolver, cleanup, err
