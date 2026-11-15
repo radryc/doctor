@@ -142,6 +142,15 @@ func EndpointFor(backend Backend) access.Endpoint {
 
 // accessDecision evaluates the gate for a backend and signal.
 func (r *Router) accessDecision(ctx context.Context, backend Backend, signal access.Signal) (bool, access.Decision, bool) {
+	// Local storage is already scoped by the partition access policy inside the
+	// query backend (policyBackend -> FilterLogs/FilterSpans). Running it
+	// through the endpoint OWNERS resolver as well is wrong: the resolver looks
+	// for OWNERS at the backend name ("monofs"), not at the partition that owns
+	// the records, so it denies every non-admin caller and the UI shows
+	// "access denied" even though the list (which uses the policy gate) works.
+	if isLocalBackend(backend) && strings.EqualFold(strings.TrimSpace(backend.Origin), "local") {
+		return true, access.Decision{Endpoint: backend.Name, Signal: signal, Allowed: true, Resolver: "local-policy"}, false
+	}
 	if r.access == nil {
 		return true, access.Decision{Endpoint: backend.Name, Signal: signal, Allowed: true, Resolver: "none"}, false
 	}
@@ -443,6 +452,11 @@ func (r *Router) endpointInfoFor(ctx context.Context, backend Backend, now time.
 		Status:        backend.Status,
 		LastHeartbeat: backend.LastHeartbeat,
 	}
+	if !info.Healthy {
+		// The catalog may still say "healthy"; the live breaker is authoritative
+		// for the endpoint table.
+		info.Status = "unhealthy"
+	}
 	info.Health = endpointHealthLabel(info.Healthy, backend.Status)
 	if r.access != nil {
 		identity, _ := authz.IdentityFromContext(ctx)
@@ -642,7 +656,8 @@ func (r *Router) logTargets(ctx context.Context, criteria selectorCriteria) ([]l
 		}
 		targets = append(targets, logTarget{backend: backend, upstream: upstream})
 	}
-	if enforced > 0 && denied == enforced {
+	// A denied remote backend must not suppress an allowed local backend.
+	if len(targets) == 0 && enforced > 0 && denied == enforced {
 		return nil, warnings, access.ErrAccessDenied
 	}
 	return targets, warnings, nil
@@ -1245,7 +1260,40 @@ func (r *Router) noteBackendFailure(backend Backend, err error) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
+	if fastFailBackendError(err) {
+		// A dead federation endpoint should be skipped immediately. Waiting
+		// for the failure threshold multiplies one bad target across every
+		// dashboard query.
+		r.breakerFor(backend.Name).forceOpen(time.Now())
+		return
+	}
 	r.recordFailure(backend.Name, time.Now())
+}
+
+func fastFailBackendError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"connection refused",
+		"no such host",
+		"context deadline exceeded",
+		"i/o timeout",
+		"eof",
+		"http 401",
+		"http 502",
+		"http 503",
+		"http 504",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // backendHealthy reports circuit-breaker health for the endpoint UI. The local
@@ -1380,8 +1428,8 @@ func backendFingerprint(backend Backend) string {
 }
 
 const (
-	breakerThreshold = 5
-	breakerCooldown  = 30 * time.Second
+	breakerThreshold = 2
+	breakerCooldown  = 15 * time.Second
 )
 
 type breaker struct {

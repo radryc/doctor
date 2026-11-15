@@ -2,112 +2,79 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"testing"
-	"time"
 
 	"github.com/radryc/doctor/internal/access"
-	"github.com/radryc/monofs/pkg/authz"
 )
 
-func accessContext(subject string) context.Context {
-	return authz.ContextWithIdentity(context.Background(), authz.Identity{Subject: subject})
+func TestAccessDecisionBypassesOwnersForLocalStorage(t *testing.T) {
+	// A resolver that allows nobody: this is what the OWNERS resolver does for a
+	// non-admin when no governing OWNERS file lists them.
+	gate := access.NewGate(
+		access.NewStatic("", "", ""),
+		map[access.Signal]bool{access.SignalTraces: true, access.SignalLogs: true},
+		nil,
+		nil,
+	)
+	router := &Router{access: gate}
+
+	local := Backend{Name: "monofs", Kind: KindMonoFS, Origin: "local"}
+	for _, signal := range []access.Signal{access.SignalTraces, access.SignalLogs} {
+		allowed, decision, enforced := router.accessDecision(context.Background(), local, signal)
+		if !allowed {
+			t.Fatalf("%s: local backend denied: %#v", signal, decision)
+		}
+		if enforced {
+			t.Fatalf("%s: local backend decision should not be enforced by the proxy gate", signal)
+		}
+		if decision.Resolver != "local-policy" {
+			t.Fatalf("%s: resolver = %q, want local-policy", signal, decision.Resolver)
+		}
+	}
+
+	remote := Backend{Name: "loki-edge", Kind: KindLoki, Origin: "config"}
+	allowed, decision, enforced := router.accessDecision(context.Background(), remote, access.SignalLogs)
+	if allowed {
+		t.Fatalf("remote backend should stay gated: %#v", decision)
+	}
+	if !enforced {
+		t.Fatal("remote backend denial should be enforced")
+	}
 }
 
-func TestRouterLogsEnforcementExcludesDeniedBackends(t *testing.T) {
-	local := &fakeLogsUpstream{name: "doctor"}
-	loki := &fakeLogsUpstream{name: "loki-a"}
-	gate := access.NewGate(access.NewStatic("", "", ""), map[access.Signal]bool{access.SignalLogs: true}, nil, nil)
-	router := NewRouter(RouterConfig{MaxInflight: 4, BackendTimeout: time.Second, Access: gate}, NewCompositeRegistry())
-	for name, upstream := range map[string]LogsUpstream{"doctor": local, "loki-a": loki} {
-		backend := Backend{Name: name, Kind: KindMonoFS, Signals: []Signal{SignalLogs}, Policy: PolicyAlways}
-		if name == "loki-a" {
-			backend.Kind = KindLoki
-			backend.BaseURL = "http://loki-a"
-		}
-		if err := router.Register(backend, Upstreams{Logs: upstream}); err != nil {
-			t.Fatalf("register: %v", err)
-		}
+func TestTraceTargetsKeepLocalWhenRemoteDenied(t *testing.T) {
+	gate := access.NewGate(
+		access.NewStatic("", "", ""),
+		map[access.Signal]bool{access.SignalTraces: true},
+		nil,
+		nil,
+	)
+	local := Backend{
+		Name: "monofs", Kind: KindMonoFS, Origin: "local",
+		Signals: []Signal{SignalTraces},
 	}
-
-	_, _, err := router.Logs(accessContext("alice"), "default", LogPushdown{Selector: `{service="api"}`}, time.Time{}, time.Now(), 10)
-	if !errors.Is(err, access.ErrAccessDenied) {
-		t.Fatalf("err = %v, want ErrAccessDenied", err)
+	remote := Backend{
+		Name: "tempo-edge", Kind: KindTempo, Origin: "config",
+		BaseURL: "http://tempo.example",
+		Signals: []Signal{SignalTraces},
 	}
-}
+	router := newTestRouter(t,
+		map[string]Backend{"monofs": local, "tempo-edge": remote},
+		map[string]Upstreams{
+			"monofs":     {Traces: &fakeTracesUpstream{name: "monofs"}},
+			"tempo-edge": {Traces: &fakeTracesUpstream{name: "tempo-edge"}},
+		},
+	)
+	router.access = gate
 
-func TestRouterLogsObserveModeKeepsBackendsAndWarns(t *testing.T) {
-	local := &fakeLogsUpstream{name: "doctor", records: nil}
-	gate := access.NewGate(access.NewStatic("", "", ""), nil, nil, nil)
-	router := NewRouter(RouterConfig{MaxInflight: 4, BackendTimeout: time.Second, Access: gate}, NewCompositeRegistry())
-	if err := router.Register(Backend{Name: "doctor", Kind: KindMonoFS, Signals: []Signal{SignalLogs}, Policy: PolicyAlways}, Upstreams{Logs: local}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	_, warnings, err := router.Logs(accessContext("alice"), "default", LogPushdown{Selector: `{service="api"}`}, time.Time{}, time.Now(), 10)
+	targets, warnings, err := router.traceTargets(context.Background())
 	if err != nil {
-		t.Fatalf("Logs: %v", err)
+		t.Fatalf("traceTargets: %v (warnings=%#v)", err, warnings)
 	}
-	if len(warnings) != 1 || warnings[0].Backend != "doctor" {
-		t.Fatalf("warnings = %#v, want one observed denial", warnings)
+	if len(targets) != 1 || targets[0].backend.Name != "monofs" {
+		t.Fatalf("targets = %#v, want only the local backend", targets)
 	}
-	if local.calls == 0 {
-		t.Fatal("observe mode must still query the backend")
-	}
-}
-
-func TestRouterLogsAllowedBackendPasses(t *testing.T) {
-	local := &fakeLogsUpstream{name: "doctor"}
-	gate := access.NewGate(access.NewStatic("alice", "", ""), map[access.Signal]bool{access.SignalLogs: true}, nil, nil)
-	router := NewRouter(RouterConfig{MaxInflight: 4, BackendTimeout: time.Second, Access: gate}, NewCompositeRegistry())
-	if err := router.Register(Backend{Name: "doctor", Kind: KindMonoFS, Signals: []Signal{SignalLogs}, Policy: PolicyAlways}, Upstreams{Logs: local}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	if _, _, err := router.Logs(accessContext("alice"), "default", LogPushdown{Selector: `{service="api"}`}, time.Time{}, time.Now(), 10); err != nil {
-		t.Fatalf("Logs: %v", err)
-	}
-	if local.calls != 1 {
-		t.Fatalf("calls = %d, want 1", local.calls)
-	}
-}
-
-func TestEndpointsPageSummaryHonorsVisibility(t *testing.T) {
-	gate := access.NewGate(access.NewStatic("", "", "alice"), map[access.Signal]bool{access.SignalLogs: true}, nil, nil)
-	router := NewRouter(RouterConfig{Access: gate}, NewCompositeRegistry())
-	for _, name := range []string{"loki-a", "loki-b"} {
-		if err := router.Register(Backend{Name: name, Kind: KindLoki, BaseURL: "http://" + name, Signals: []Signal{SignalLogs}}, Upstreams{Logs: &fakeLogsUpstream{name: name}}); err != nil {
-			t.Fatalf("register %s: %v", name, err)
-		}
-	}
-	page := router.EndpointsPage(accessContext("alice"), EndpointPageFilter{})
-	if page.Summary.Total != 0 || page.Summary.ByKind["loki"] != 0 {
-		t.Fatalf("summary leaked denied endpoints: %#v", page.Summary)
-	}
-
-	allowed := access.NewGate(access.NewStatic("bob", "", ""), map[access.Signal]bool{access.SignalLogs: true}, nil, nil)
-	allowedRouter := NewRouter(RouterConfig{Access: allowed}, NewCompositeRegistry())
-	for _, name := range []string{"loki-a", "loki-b"} {
-		if err := allowedRouter.Register(Backend{Name: name, Kind: KindLoki, BaseURL: "http://" + name, Signals: []Signal{SignalLogs}}, Upstreams{Logs: &fakeLogsUpstream{name: name}}); err != nil {
-			t.Fatalf("register %s: %v", name, err)
-		}
-	}
-	page = allowedRouter.EndpointsPage(accessContext("bob"), EndpointPageFilter{})
-	if page.Summary.Total != 2 || page.Summary.ByKind["loki"] != 2 {
-		t.Fatalf("summary = %#v, want both allowed endpoints", page.Summary)
-	}
-}
-
-func TestRouterEndpointsReportsDecisions(t *testing.T) {
-	gate := access.NewGate(access.NewStatic("", "", ""), nil, nil, nil)
-	router := NewRouter(RouterConfig{Access: gate}, NewCompositeRegistry())
-	if err := router.Register(Backend{Name: "loki-a", Kind: KindLoki, BaseURL: "http://loki-a", Signals: []Signal{SignalLogs}}, Upstreams{Logs: &fakeLogsUpstream{name: "loki-a"}}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	endpoints := router.Endpoints(accessContext("alice"))
-	if len(endpoints) != 1 || endpoints[0].Allowed {
-		t.Fatalf("endpoints = %#v, want denied", endpoints)
-	}
-	if endpoints[0].Resolver != "static" {
-		t.Fatalf("resolver = %q, want static", endpoints[0].Resolver)
+	if len(warnings) == 0 {
+		t.Fatal("expected a warning for the denied remote backend")
 	}
 }

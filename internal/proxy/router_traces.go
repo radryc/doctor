@@ -541,7 +541,10 @@ func (r *Router) traceTargetsWithCriteria(ctx context.Context, criteria selector
 		}
 		entries = append(entries, traceTarget{upstreamEntry: entry})
 	}
-	if enforced > 0 && denied == enforced {
+	// Deny the request only when no backend is left to query. A denied remote
+	// backend must not suppress an allowed local backend (the common case for
+	// a user who can read their partition but not a federated AWS account).
+	if len(entries) == 0 && enforced > 0 && denied == enforced {
 		return nil, warnings, access.ErrAccessDenied
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
