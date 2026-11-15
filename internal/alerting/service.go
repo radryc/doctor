@@ -110,10 +110,6 @@ func (s *Service) Apply(ctx context.Context, incoming Alert) (*Alert, error) {
 	if incoming.ID == "" {
 		incoming.ID = incoming.Fingerprint
 	}
-	// A quota breach must never fan out as a critical alert for the partition
-	// that triggered it. Apply the cap after fingerprinting so the dedupe key
-	// stays stable across severity normalization.
-	incoming = capQuotaBreachSeverity(incoming)
 
 	// The notification decision depends on the previous state, so the write
 	// must be conditional on the version that was read. Without this, two

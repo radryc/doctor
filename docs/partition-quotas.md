@@ -79,16 +79,6 @@ partitions from the service list. The budget is
 `maxDiscoveryRecordsPerPartition` (1000 records) per partition; callers without
 a policy catalog fall back to the legacy single scan.
 
-## Alerting
-
-A quota breach is a capacity signal, not an availability incident. Sentinel
-caps every quota-related alert at `warning`: a critical alert is never created
-for the partition that triggered the breach. The alert still appears in the
-Alerts view and can be routed to receivers, but it cannot page as critical.
-This applies to every producer (Guardian partition alerts, Sentinel intake,
-rules, subspace events, and cloud sources) because the cap runs in the central
-alert transition path.
-
 ## Enforcement points
 
 | Limit | Enforced by |
