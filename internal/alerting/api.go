@@ -1,6 +1,7 @@
 package alerting
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,6 +31,12 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/v1/alerts", a.handleAlerts)
 	mux.HandleFunc("/v1/alerts/", a.handleAlertRoute)
+	// Alertmanager v2 compatibility for the Grafana Alertmanager data source.
+	mux.HandleFunc("/api/v2/status", a.handleAlertmanagerStatus)
+	mux.HandleFunc("/api/v2/alerts", a.handleAlertmanagerAlerts)
+	mux.HandleFunc("/api/v2/alerts/groups", a.handleAlertmanagerAlertGroups)
+	mux.HandleFunc("/api/v2/silences", a.handleAlertmanagerSilences)
+	mux.HandleFunc("/api/v2/silence/", a.handleAlertmanagerSilence)
 	return mux
 }
 
@@ -58,6 +65,7 @@ func (a *API) handleAlerts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	a.decorateAlertStatuses(r.Context(), alerts)
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	severity := strings.TrimSpace(r.URL.Query().Get("severity"))
 	source := strings.TrimSpace(r.URL.Query().Get("source"))
@@ -157,7 +165,9 @@ func (a *API) handleAlertDetail(w http.ResponseWriter, r *http.Request, path str
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, alert)
+		alerts := []Alert{*alert}
+		a.decorateAlertStatuses(r.Context(), alerts)
+		writeJSON(w, http.StatusOK, alerts[0])
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -173,7 +183,9 @@ func (a *API) handleAlertDetail(w http.ResponseWriter, r *http.Request, path str
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, alert)
+	alerts := []Alert{*alert}
+	a.decorateAlertStatuses(r.Context(), alerts)
+	writeJSON(w, http.StatusOK, alerts[0])
 }
 
 func (a *API) handleGuardianIntake(w http.ResponseWriter, r *http.Request) {
@@ -928,6 +940,31 @@ func (a *API) handleRuleTest(w http.ResponseWriter, r *http.Request) {
 		results = append(results, a.Service.EvaluateRuleGroup(r.Context(), spec)...)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// decorateAlertStatuses projects active silences onto the API view. Stored
+// alert state stays firing so delivery/reconciliation logic remains correct;
+// operators see "silenced" while a matching silence is active and the alert
+// automatically returns to "firing" when the silence expires or is deleted.
+func (a *API) decorateAlertStatuses(ctx context.Context, alerts []Alert) {
+	now := a.now()
+	silencesByPartition := make(map[string][]Silence)
+	for i := range alerts {
+		alert := &alerts[i]
+		if alert.Status != StatusFiring && alert.Status != StatusPending {
+			continue
+		}
+		silences, ok := silencesByPartition[alert.Partition]
+		if !ok {
+			silences, _ = a.Store.ListSilences(ctx, alert.Tenant, alert.Partition)
+			silencesByPartition[alert.Partition] = silences
+		}
+		ids := matchSilences(silences, *alert, now)
+		alert.SilenceIDs = ids
+		if len(ids) > 0 && alert.Status == StatusFiring {
+			alert.Status = StatusSilenced
+		}
+	}
 }
 
 func (a *API) now() time.Time {

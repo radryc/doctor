@@ -30,6 +30,7 @@ spec:
           DOCTOR_SENTINEL_GUARDIAN_ENABLED: "true"
           DOCTOR_SENTINEL_GUARDIAN_POLL_INTERVAL: 30s
           DOCTOR_SENTINEL_GUARDIAN_URL: http://guardian-ui:8090
+          DOCTOR_GUARDIAN_UI_URL: http://localhost:8090
           DOCTOR_SENTINEL_GUARDIAN_TOKEN: dev-guardian-token
           DOCTOR_SENTINEL_SERVICE_TOKEN: dev-sentinel-service-token
           DOCTOR_SENTINEL_STORE_ROOT: /doctor/v1/alerts

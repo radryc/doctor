@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -90,6 +91,70 @@ func TestGCPSourceSelectionAndNormalization(t *testing.T) {
 	}
 	if alert.Annotations["console_url"] == "" {
 		t.Fatalf("annotations = %#v", alert.Annotations)
+	}
+}
+
+func TestGCPSourceAuthFailureAlert(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	service := &Service{Store: store, DefaultTenant: "default", DeliveryEnabled: false}
+
+	failing := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if failing {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(gcpAlertEnvelope{Alerts: []GCPAlert{}})
+	}))
+	defer server.Close()
+
+	source := &GCPSource{
+		BaseURL: server.URL,
+		Tenant:  "default",
+		Service: service,
+		Store:   store,
+		Now:     func() time.Time { return time.Date(2026, 10, 30, 10, 0, 0, 0, time.UTC) },
+	}
+	if _, err := source.PollOnce(ctx); err == nil {
+		t.Fatal("expected an auth error")
+	}
+
+	alerts, err := store.ListAlerts(ctx, "default", "doctor")
+	if err != nil {
+		t.Fatalf("ListAlerts: %v", err)
+	}
+	if len(alerts) != 1 || alerts[0].Labels["alertname"] != "GCPBackendAuthFailure" {
+		t.Fatalf("alerts = %+v", alerts)
+	}
+	alert := alerts[0]
+	if alert.Status != StatusFiring || alert.Partition != "doctor" || alert.Severity != "critical" {
+		t.Fatalf("alert = %+v", alert)
+	}
+	if !strings.Contains(alert.Annotations["action"], "prepare --skip-aws") ||
+		!strings.Contains(alert.Annotations["action"], "token drift") {
+		t.Fatalf("action annotation = %q", alert.Annotations["action"])
+	}
+
+	failing = false
+	// A Sentinel restart creates a fresh source with no in-memory failure
+	// state; a successful poll must still resolve the existing alert.
+	recovered := &GCPSource{
+		BaseURL: server.URL,
+		Tenant:  "default",
+		Service: service,
+		Store:   store,
+		Now:     func() time.Time { return time.Date(2026, 10, 30, 10, 1, 0, 0, time.UTC) },
+	}
+	if _, err := recovered.PollOnce(ctx); err != nil {
+		t.Fatalf("recovery PollOnce: %v", err)
+	}
+	alerts, err = store.ListAlerts(ctx, "default", "doctor")
+	if err != nil || len(alerts) != 1 {
+		t.Fatalf("alerts after recovery = %+v err=%v", alerts, err)
+	}
+	if alerts[0].Status != StatusResolved || alerts[0].EndsAt == nil {
+		t.Fatalf("alert after recovery = %+v", alerts[0])
 	}
 }
 

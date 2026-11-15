@@ -15,7 +15,8 @@ alert state, receiver config, and the delivery outbox in MonoFS.
   does not raise `GuardianPartitionAttention`; real errors and failing assets
   still raise `GuardianPartitionError`. Nightwatch reads these through the
   Sentinel API, so Guardian errors and attentions become Nightwatch incidents
-  without any Nightwatch-side change.
+  without any Nightwatch-side change. Both alerts include a `guardian.url`
+  annotation that deep-links to the partition in the Guardian UI.
 - AWS CloudWatch alarms pulled through `guardian-pusher-aws`
   (`GET /v1/aws/alarms`).
 - Alertmanager-compatible webhooks via
@@ -29,6 +30,26 @@ is not already forwarding `partition.failing` events to Sentinel; otherwise the
 same incident appears under both alert names. The pull source is the recommended
 default because it also covers partitions whose Guardian notification state is
 missing or stale.
+
+## Alertmanager-compatible API
+
+Sentinel exposes a read-only subset of the Alertmanager v2 API so Grafana's
+**Alertmanager** data source can display Doctor alerts, alert groups, and
+silences alongside metrics, logs, and traces:
+
+```text
+GET /api/v2/status
+GET /api/v2/alerts
+GET /api/v2/alerts/groups
+GET /api/v2/silences
+GET /api/v2/silence/{id}
+```
+
+The endpoints are proxied by `doctor-query`, which applies the caller's
+identity and partition access before forwarding to Sentinel. Configure the
+Grafana data source with `implementation: prometheus`, OAuth pass-through, and
+the `X-Doctor-Tenant` header. Alertmanager-managed silences are not writable
+through this API yet; phase 1 is read-only.
 
 ## Delivery
 
@@ -258,8 +279,10 @@ Excluded alarms are never stored as Sentinel alerts and never notify.
 
 ## Silences
 
-A silence is label matchers plus a time window. It suppresses notifications
-only; alert state continues updating.
+A silence is label matchers plus a time window. It suppresses notifications,
+and while it is active the API/UI projects a firing alert as `silenced` (the
+stored state continues updating underneath, so the alert returns to `firing`
+when the silence expires or is deleted).
 
 Scopes, narrowest first:
 
@@ -271,6 +294,14 @@ Scopes, narrowest first:
 The UI defaults to the alert instance. Entire-partition silences require the
 `alerts.silence.partition` capability. Partition silences do not suppress
 subspace alerts.
+
+## Alert triage
+
+Firing alerts expose a **Triage** action in the Doctor Alerts UI. It opens a
+new Agent chat session with the alert fingerprint, labels, annotations, and
+partition, then runs the Agent's deterministic triage flow. The alert itself is
+not modified; the investigation is a separate Agent session titled
+`Triage: <alertname> · <partition>`.
 
 ## Subspace alerts
 
@@ -344,6 +375,7 @@ DOCTOR_SENTINEL_LEASE_RENEW=10s
 DOCTOR_SENTINEL_GUARDIAN_HMAC_SECRET=...
 DOCTOR_SENTINEL_GUARDIAN_ENABLED=true
 DOCTOR_SENTINEL_GUARDIAN_URL=http://guardian-ui:8090
+DOCTOR_GUARDIAN_UI_URL=http://localhost:8090
 DOCTOR_SENTINEL_GUARDIAN_TOKEN=...
 DOCTOR_SENTINEL_GUARDIAN_POLL_INTERVAL=30s
 DOCTOR_SENTINEL_SERVICE_TOKEN=...

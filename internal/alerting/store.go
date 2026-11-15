@@ -329,15 +329,22 @@ func (s *Store) ListAlertSummaries(ctx context.Context, tenant string) ([]Partit
 		if err != nil {
 			continue
 		}
+		silences, _ := s.ListSilences(ctx, tenant, entry.Name)
+		now := time.Now().UTC()
 		summary := PartitionAlertSummary{Tenant: tenant, Partition: entry.Name, Total: len(alerts)}
 		for _, alert := range alerts {
+			silenced := alert.Status == StatusFiring && len(matchSilences(silences, alert, now)) > 0
 			switch alert.Status {
 			case StatusFiring:
-				summary.Firing++
+				if silenced {
+					summary.Silenced++
+				} else {
+					summary.Firing++
+				}
 			case StatusPending:
 				summary.Pending++
 			}
-			if alert.Severity == "critical" && alert.Status != StatusResolved {
+			if alert.Severity == "critical" && alert.Status != StatusResolved && !silenced {
 				summary.Critical++
 			}
 		}
@@ -464,6 +471,58 @@ func (s *Store) ListSilences(ctx context.Context, tenant, partition string) ([]S
 			continue
 		}
 		out = append(out, silence)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+// ListTenantSilences returns every silence for a tenant across partitions. It
+// backs the Alertmanager-compatible API, which has no partition path segment.
+func (s *Store) ListTenantSilences(ctx context.Context, tenant string) ([]Silence, error) {
+	if tenant == "" {
+		tenant = "default"
+	}
+	root := fmt.Sprintf("%s/silences/%s", s.Root, tenant)
+	entries, err := s.Files.ListDir(ctx, root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]Silence, 0)
+	for _, partitionEntry := range entries {
+		if !partitionEntry.IsDir {
+			continue
+		}
+		dir := root + "/" + partitionEntry.Name
+		files, err := s.Files.ListDir(ctx, dir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, err
+		}
+		for _, file := range files {
+			if file.IsDir || !strings.HasSuffix(file.Name, ".yaml") {
+				continue
+			}
+			data, err := s.Files.ReadFile(ctx, dir+"/"+file.Name)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, err
+			}
+			var silence Silence
+			if err := yaml.Unmarshal(data, &silence); err != nil {
+				continue
+			}
+			if silence.Partition == "" {
+				silence.Partition = partitionEntry.Name
+			}
+			out = append(out, silence)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil

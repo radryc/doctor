@@ -3,6 +3,7 @@ package alerting
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -195,7 +196,20 @@ func (s *GCPSource) PollOnce(ctx context.Context) (SourceSummary, error) {
 	}
 	alerts, err := s.fetchAlerts(ctx)
 	if err != nil {
+		var authErr *gcpReadAuthError
+		if errors.As(err, &authErr) {
+			if applyErr := s.applyAuthFailure(ctx, authErr); applyErr != nil {
+				return summary, applyErr
+			}
+			summary.Imported = 1
+		}
 		return summary, err
+	}
+	// Resolve on every successful poll, not only after observing a failure in
+	// this process: Sentinel restarts are common, and an existing firing
+	// GCPBackendAuthFailure must clear even when the in-memory state is fresh.
+	if resolveErr := s.resolveAuthFailure(ctx); resolveErr != nil {
+		return summary, resolveErr
 	}
 	summary.Discovered = len(alerts)
 	for _, alert := range alerts {
@@ -248,6 +262,9 @@ func (s *GCPSource) fetchAlerts(ctx context.Context) ([]GCPAlert, error) {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, &gcpReadAuthError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
+		}
 		return nil, fmt.Errorf("gcp read API HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var envelope gcpAlertEnvelope
@@ -255,6 +272,113 @@ func (s *GCPSource) fetchAlerts(ctx context.Context) ([]GCPAlert, error) {
 		return nil, fmt.Errorf("decode gcp alerts: %w", err)
 	}
 	return envelope.Alerts, nil
+}
+
+// gcpReadAuthError marks a bearer-token/scope rejection from the GCP read
+// API. Unlike a transient network or upstream error, this is actionable and
+// should become an alert in Sentinel even though the source poll failed.
+type gcpReadAuthError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *gcpReadAuthError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("gcp read API HTTP %d: %s", e.StatusCode, strings.TrimSpace(e.Body))
+}
+
+func (s *GCPSource) applyAuthFailure(ctx context.Context, authErr *gcpReadAuthError) error {
+	if s.Service == nil {
+		return nil
+	}
+	_, err := s.Service.Apply(ctx, s.authFailureAlert(StatusFiring, authErr))
+	return err
+}
+
+func (s *GCPSource) resolveAuthFailure(ctx context.Context) error {
+	if s.Service == nil || s.Store == nil {
+		return nil
+	}
+	alert := s.authFailureAlert(StatusResolved, nil)
+	alerts, err := s.Store.ListAlerts(ctx, alert.Tenant, alert.Partition)
+	if err != nil {
+		return err
+	}
+	firing := false
+	for i := range alerts {
+		if alerts[i].Fingerprint == alert.Fingerprint && alerts[i].Status == StatusFiring {
+			firing = true
+			break
+		}
+	}
+	if !firing {
+		return nil
+	}
+	_, err = s.Service.Apply(ctx, alert)
+	return err
+}
+
+func (s *GCPSource) authFailureAlert(status string, authErr *gcpReadAuthError) Alert {
+	tenant := s.Tenant
+	if tenant == "" && s.Service != nil {
+		tenant = s.Service.DefaultTenant
+	}
+	if tenant == "" {
+		tenant = "default"
+	}
+	partition := firstNonEmpty(s.Partition, "doctor")
+	labels := map[string]string{
+		"alertname": "GCPBackendAuthFailure",
+		"source":    "gcp",
+		"provider":  "gcp",
+		"component": "doctor",
+		"partition": partition,
+		"severity":  "critical",
+	}
+	summary := "Doctor cannot authenticate to the GCP read API."
+	description := "Sentinel received an authentication failure while polling the GCP read API. Doctor's GCP backend token does not match guardian-pusher-gcp's read token, or its scope is insufficient. GCP metrics, logs, and traces are unavailable until the token is re-synced."
+	if authErr != nil {
+		description = fmt.Sprintf("Sentinel received HTTP %d from %s while polling /v1/gcp/alerts. Doctor's GCP backend token does not match guardian-pusher-gcp's read token, or its scope is insufficient. GCP metrics, logs, and traces are unavailable until the token is re-synced.", authErr.StatusCode, s.BaseURL)
+	}
+	action := `1. Compare Doctor's token with the platform secret:
+   TOKEN=$(kubectl -n doctor get deploy -o name | grep query | head -1 | xargs -I{} kubectl -n doctor get {} -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="DOCTOR_GCP_BACKEND_TOKEN")].value}')
+   SECRET=$(cat stratatools/partitions/shared/secrets/gcp-pusher-token)
+   test "$TOKEN" = "$SECRET" || echo "token drift: Doctor != shared secret"
+2. Re-sync the pusher and Doctor/Sentinel wiring:
+   FORCE_GCP_PUSHER_BUILD=true ./demo.sh prepare --skip-aws
+3. Clear the query circuit breaker:
+   kubectl -n doctor rollout restart deploy/$(kubectl -n doctor get deploy -o name | grep -m1 query | sed 's|.*/||')
+4. Verify:
+   curl -fsS -H "Authorization: Bearer $SECRET" http://172.18.0.1:19091/healthz`
+	if status == StatusResolved {
+		summary = "Doctor's GCP read API authentication recovered."
+	}
+	annotations := map[string]string{
+		"summary":     summary,
+		"description": description,
+		"action":      action,
+		"runbook":     "https://strata.local/runbooks/doctor-gcp-token-mismatch",
+	}
+	alert := Alert{
+		Source:      "gcp",
+		Tenant:      tenant,
+		Partition:   partition,
+		Status:      status,
+		Severity:    "critical",
+		Labels:      labels,
+		Annotations: annotations,
+		StartsAt:    s.now(),
+		Delivery:    DeliverySentinel,
+	}
+	alert.Fingerprint = Fingerprint("gcp", tenant, partition, labels)
+	alert.ID = alert.Fingerprint
+	if status == StatusResolved {
+		now := s.now()
+		alert.EndsAt = &now
+	}
+	return alert
 }
 
 func (s *GCPSource) normalize(alert GCPAlert) (Alert, bool) {

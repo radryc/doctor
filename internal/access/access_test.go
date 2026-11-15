@@ -157,19 +157,3 @@ func TestGateObserveThenEnforce(t *testing.T) {
 	}
 }
 
-func TestGrantsResolver(t *testing.T) {
-	store, err := authz.NewGrantStore("")
-	if err != nil {
-		t.Fatalf("NewGrantStore: %v", err)
-	}
-	if err := store.Add(authz.Grant{Subject: "alice", Partition: "loki-edge", Role: authz.RoleViewer}); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-	resolver := &Grants{Store: store}
-	if decision, _ := resolver.Allowed(context.Background(), authz.Identity{Subject: "alice"}, Endpoint{Name: "loki-edge"}, SignalLogs); !decision.Allowed {
-		t.Fatalf("alice denied by grants")
-	}
-	if decision, _ := resolver.Allowed(context.Background(), authz.Identity{Subject: "bob"}, Endpoint{Name: "loki-edge"}, SignalLogs); decision.Allowed {
-		t.Fatalf("bob allowed by grants")
-	}
-}

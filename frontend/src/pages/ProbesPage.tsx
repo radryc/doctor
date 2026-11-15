@@ -28,6 +28,7 @@ export default function ProbesPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [partitionFilter, setPartitionFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState("");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -77,6 +78,7 @@ export default function ProbesPage() {
   const filtered = probes.filter((probe) => {
     if (partitionFilter && probe.partition !== partitionFilter) return false;
     if (typeFilter && probe.type !== typeFilter) return false;
+    if (kindFilter && probeKind(probe) !== kindFilter) return false;
     if (statusFilter && probeStatus(probe) !== statusFilter) return false;
     if (search) {
       const q = search.toLowerCase();
@@ -94,6 +96,8 @@ export default function ProbesPage() {
   const passing = probes.filter((p) => probeStatus(p) === "passing").length;
   const failing = probes.filter((p) => probeStatus(p) === "failing").length;
   const stale = probes.filter((p) => probeStatus(p) === "stale").length;
+  const journeys = probes.filter((p) => probeKind(p) === "journey").length;
+  const shallow = probes.length - journeys;
   const pusherStats = pusherSummary ?? {
     total: pusherTotal,
     available: Math.max(0, pusherTotal - downPushers.size),
@@ -112,7 +116,7 @@ export default function ProbesPage() {
           <p>
             {loading
               ? "Loading…"
-              : `${probes.length} probe${probes.length === 1 ? "" : "s"} · ${passing} passing · ${failing} failing · ${stale} stale`}
+              : `${probes.length} probe${probes.length === 1 ? "" : "s"} · ${journeys} journey${journeys === 1 ? "" : "s"} · ${shallow} shallow · ${passing} passing · ${failing} failing · ${stale} stale`}
           </p>
         </div>
         <div className="xp-toolbar">
@@ -123,6 +127,14 @@ export default function ProbesPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+          <label className="filter-label">
+            Kind
+            <select className="xp-select" value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}>
+              <option value="">All</option>
+              <option value="journey">Journeys</option>
+              <option value="shallow">Shallow checks</option>
+            </select>
+          </label>
           <label className="filter-label">
             Partition
             <select className="xp-select" value={partitionFilter} onChange={(e) => setPartitionFilter(e.target.value)}>
@@ -164,6 +176,20 @@ export default function ProbesPage() {
       <div className="panel-body probes-body">
         <div className="probe-stats">
           <ProbeStat icon={<Activity size={14} />} label="Total probes" value={probes.length} />
+          <ProbeStat
+            icon={<Activity size={14} />}
+            label="Journeys"
+            value={journeys}
+            tone="journey"
+            title="Multi-step synthetic journeys defined as Probe assets"
+          />
+          <ProbeStat
+            icon={<Activity size={14} />}
+            label="Shallow checks"
+            value={shallow}
+            tone="shallow"
+            title="Single-request checks, including automatically discovered probes"
+          />
           <ProbeStat icon={<CheckCircle2 size={14} />} label="Passing" value={passing} tone="ok" />
           <ProbeStat icon={<XCircle size={14} />} label="Failing" value={failing} tone="err" />
           <ProbeStat icon={<TriangleAlert size={14} />} label="Stale" value={stale} tone="warn" />
@@ -211,12 +237,15 @@ export default function ProbesPage() {
             </div>
             {filtered.map((probe) => {
               const status = probeStatus(probe);
+              const kind = probeKind(probe);
+              const auto = isAutoProbe(probe);
+              const stepCount = probe.steps?.length ?? 0;
               const pusherDown =
                 status === "stale" && downPushers.has(probe.pusher || "unknown");
               const statusLabel =
                 status === "passing" ? "Up" : status === "failing" ? "Down" : pusherDown ? "Not connected" : "Stale";
               return (
-                <div key={probe.probeID} className={`probe-row probe-row--${status}`}>
+                <div key={probe.probeID} className={`probe-row probe-row--${status} probe-row--${kind}`}>
                   <span
                     className="probe-row__status"
                     title={
@@ -235,7 +264,24 @@ export default function ProbesPage() {
                     <small>{probe.service}{probe.fullName && probe.fullName !== probe.service ? ` · ${probe.fullName}` : ""}</small>
                   </span>
                   <span className="probe-row__target" title={probe.target}>
-                    <span className="probe-kind">{probe.type?.toUpperCase() || "HTTP"}</span>
+                    {kind === "journey" ? (
+                      <span
+                        className="probe-kind probe-kind--journey"
+                        title="Multi-step synthetic journey"
+                      >
+                        JOURNEY{stepCount > 0 ? ` · ${stepCount} steps` : ""}
+                      </span>
+                    ) : (
+                      <>
+                        <span
+                          className="probe-kind probe-kind--shallow"
+                          title={auto ? "Automatically discovered shallow check" : "Explicit shallow check"}
+                        >
+                          SHALLOW{auto ? " · AUTO" : ""}
+                        </span>
+                        <span className="probe-kind probe-kind--type">{probe.type?.toUpperCase() || "HTTP"}</span>
+                      </>
+                    )}
                     {probe.target}
                   </span>
                   <span className="probe-row__placement">
@@ -280,6 +326,7 @@ export default function ProbesPage() {
                   </span>
                   {probe.error && (
                     <div className="probe-row__error" title={probe.error}>
+                      {probe.failedStep ? <strong>{probe.failedStep}: </strong> : null}
                       {probe.error}
                     </div>
                   )}
@@ -303,7 +350,7 @@ function ProbeStat({
   icon: React.ReactNode;
   label: string;
   value: number | string;
-  tone?: "ok" | "err" | "warn";
+  tone?: "ok" | "err" | "warn" | "journey" | "shallow";
   title?: string;
 }) {
   return (
@@ -313,6 +360,21 @@ function ProbeStat({
       <span className="probe-stat__label">{label}</span>
     </div>
   );
+}
+
+type ProbeKind = "journey" | "shallow";
+
+/** Journey probes run an ordered multi-step script; everything else is a
+ * single-request shallow check (most of which are auto-discovered). */
+function probeKind(probe: ProbeResult): ProbeKind {
+  if ((probe.type ?? "").toLowerCase() === "journey" || (probe.steps?.length ?? 0) > 0) {
+    return "journey";
+  }
+  return "shallow";
+}
+
+function isAutoProbe(probe: ProbeResult): boolean {
+  return (probe.mode ?? "").toLowerCase() === "auto";
 }
 
 function probeStatus(probe: ProbeResult): "passing" | "failing" | "stale" {

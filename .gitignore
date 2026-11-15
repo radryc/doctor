@@ -3,6 +3,7 @@
 /doctor-query
 /doctor-rules
 /doctor-sentinel
+/doctor-loadgen
 
 # Runtime data directory (WAL, local catalog, local object store)
 /.doctor/
@@ -12,6 +13,10 @@
 /frontend/tsconfig.tsbuildinfo
 
 # Do NOT ignore internal/query/ui/dist/ — it is embedded via //go:embed
+
+# Local agent skills/config
+.agent/
+.agents/
 
 # Internal notes, duplicates, and generated backups (not public docs)
 docs/internal/

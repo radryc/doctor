@@ -51,6 +51,23 @@ func (b *targetBreaker) allow(now time.Time, probeTimeout time.Duration) bool {
 	return true
 }
 
+// needsProbe reports whether a background health check should run. Healthy
+// targets (no failures, no open circuit) are skipped.
+func (b *targetBreaker) needsProbe(now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.failures == 0 && b.openUntil.IsZero() && !b.halfOpen {
+		return false
+	}
+	if b.halfOpen && now.Before(b.probeUntil) {
+		return false
+	}
+	if !b.openUntil.IsZero() && now.Before(b.openUntil) {
+		return false
+	}
+	return true
+}
+
 func (b *targetBreaker) recordSuccess() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -153,10 +170,14 @@ func (m *Manager) noteTargetSuccess(targetID string) {
 }
 
 func (m *Manager) noteTargetFailure(targetID string, err error) {
-	if err == nil || isClientSideFailure(err) || isUnauthorized(err) {
+	if err == nil || isClientSideFailure(err) {
+		// A bad query or a too-long range says nothing about backend health.
 		m.breakerFor(targetID).abortProbe()
 		return
 	}
+	// Unauthorized is a hard failure for queryability: skip the target until
+	// the token is fixed. The background probe will close the circuit once the
+	// pusher accepts the credential again.
 	m.breakerFor(targetID).recordFailure(time.Now().UTC(), m.breakerThreshold, m.breakerCooldown, err)
 }
 
@@ -198,15 +219,37 @@ func (m *Manager) circuitStatus() (int, []breakerSnapshot) {
 }
 
 func isClientSideFailure(err error) bool {
-	return errors.Is(err, proxy.ErrScopeRequired) ||
+	if errors.Is(err, proxy.ErrScopeRequired) ||
 		errors.Is(err, proxy.ErrTooBroad) ||
 		errors.Is(err, proxy.ErrNoTargets) ||
-		errors.Is(err, context.Canceled)
+		errors.Is(err, context.Canceled) {
+		return true
+	}
+	status := httpStatus(err)
+	return status == 400 || status == 422
 }
 
-func isUnauthorized(err error) bool {
+func rangeLimitReason(err error) (string, bool) {
 	var httpErr *awsstore.HTTPError
-	return errors.As(err, &httpErr) && httpErr.StatusCode == 401
+	if !errors.As(err, &httpErr) {
+		return "", false
+	}
+	if httpErr.StatusCode != 400 && httpErr.StatusCode != 422 {
+		return "", false
+	}
+	body := strings.ToLower(httpErr.Body)
+	if strings.Contains(body, "exceed") && strings.Contains(body, "limit") {
+		return "range_too_long", true
+	}
+	return "bad_request", true
+}
+
+func httpStatus(err error) int {
+	var httpErr *awsstore.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode
+	}
+	return 0
 }
 
 func isRetryableFanoutError(err error) bool {

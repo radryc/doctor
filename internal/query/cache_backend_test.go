@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -106,5 +107,30 @@ func TestCachingBackendSkipsVeryLargeQueries(t *testing.T) {
 	}
 	if got := inner.logQueries.Load(); got != 2 {
 		t.Fatalf("backend QueryLogs calls = %d, want 2 for an uncached large query", got)
+	}
+}
+
+func TestResultCacheCancellationPropagates(t *testing.T) {
+	cache := newResultCache(15 * time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := cache.getOrLoad(ctx, "cancel-key", func(loadCtx context.Context) (any, error) {
+			close(started)
+			<-loadCtx.Done()
+			return nil, loadCtx.Err()
+		})
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cache load did not observe cancellation")
 	}
 }

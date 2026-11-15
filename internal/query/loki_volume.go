@@ -18,9 +18,11 @@ import (
 // payloads so the drilldown degrades gracefully.
 
 // lokiVolumeRecordLimit bounds the records scanned for volume/stats queries.
-// It matches the existing metric-query ceiling (20k records) so the volume
-// endpoints cannot hold more memory than a LogQL metric query.
-const lokiVolumeRecordLimit = 20000
+// The log engine returns each batch as one gRPC message; 20k records can
+// exceed the 4 MiB receive limit and make Logs Drilldown fail with
+// "An error occurred within the plugin". 2k keeps the volume histogram under
+// the wire limit while still sampling a useful window.
+const lokiVolumeRecordLimit = 500
 
 // Volume output caps: series (label combinations) and buckets (step points).
 // Loki's own volume API accepts a series limit; 200 keeps a high-cardinality

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -46,7 +47,11 @@ type guardianPartitionEnvelope struct {
 // Sentinel API that Nightwatch polls, so Guardian errors and attentions show up
 // as alarms without relying on Guardian's own webhook configuration.
 type GuardianSource struct {
-	BaseURL  string
+	BaseURL string
+	// UIURL is the browser-facing Guardian URL used to deep-link alerts to the
+	// partition view. BaseURL is often a cluster-internal service address, so
+	// it is only used as a fallback when UIURL is unset.
+	UIURL    string
 	Token    string
 	Tenant   string
 	Service  *Service
@@ -429,6 +434,7 @@ func (s *GuardianSource) normalizePartitionAlert(partition GuardianPartitionSumm
 	setAnnotation(annotations, "guardian.failing_assets", intString(partition.FailingAssets))
 	setAnnotation(annotations, "guardian.failed_intents", intString(partition.FailedIntents))
 	setAnnotation(annotations, "guardian.drifted_intents", intString(partition.DriftedIntents))
+	setAnnotation(annotations, "guardian.url", s.partitionURL(partition.Name))
 	alert := Alert{
 		Fingerprint: s.fingerprint(partition.Name, alertName),
 		Source:      "guardian",
@@ -487,6 +493,31 @@ func setAnnotation(annotations map[string]string, key, value string) {
 	if strings.TrimSpace(value) != "" {
 		annotations[key] = value
 	}
+}
+
+// partitionURL builds a Guardian UI deep link that opens a partition. Guardian
+// reads the partition from the query string on load, so operators can jump
+// from an alert straight to the deployment state that triggered it.
+func (s *GuardianSource) partitionURL(partition string) string {
+	base := strings.TrimSpace(s.UIURL)
+	if base == "" {
+		base = strings.TrimSpace(s.BaseURL)
+	}
+	if base == "" || strings.TrimSpace(partition) == "" {
+		return ""
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		separator := "?"
+		if strings.Contains(base, "?") {
+			separator = "&"
+		}
+		return base + separator + "partition=" + url.QueryEscape(partition)
+	}
+	query := parsed.Query()
+	query.Set("partition", partition)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func intString(value int) string {

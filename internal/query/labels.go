@@ -106,6 +106,7 @@ func canonicalServiceName(partition, intent, asset string) string {
 // log body / line filters but do not fragment streams.
 var lokiLabelAllowlist = map[string]struct{}{
 	labelService:                 {},
+	labelServiceName:             {},
 	labelServiceFull:             {},
 	labelServiceAlias:            {},
 	labelTenant:                  {},

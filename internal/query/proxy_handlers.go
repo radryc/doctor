@@ -1,7 +1,9 @@
 package query
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,8 +16,47 @@ import (
 
 // handlePrometheusQueryViaRouter executes an instant query through the
 // multi-backend router, surfacing partial failures as a response header.
+type proxyQueryResult struct {
+	data     map[string]any
+	warnings []proxy.Warning
+}
+
+// metricsInstantViaRouter coalesces identical in-flight instant queries. The
+// key includes the identity filters because the result is filtered in place
+// per request. A one-second bucket lets concurrent clients asking for "now"
+// share a single backend fan-out without making the result visibly stale.
+func (s *Service) metricsInstantViaRouter(ctx context.Context, tenant, query string, at time.Time, identity signalIdentity) (map[string]any, []proxy.Warning, error) {
+	key := fmt.Sprintf("instant|%s|%s|%s|%s|%s|%d", tenant, identity.Partition, identity.Intent, identity.Asset, query, at.Unix())
+	result, err := s.queryFlight.Do(ctx, key, func(callCtx context.Context) (proxyQueryResult, error) {
+		data, warnings, err := s.proxyRouter.MetricsInstantForPartition(callCtx, tenant, query, at, identity.Partition)
+		if err != nil {
+			return proxyQueryResult{}, err
+		}
+		return proxyQueryResult{data: data, warnings: warnings}, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return result.data, result.warnings, nil
+}
+
+func (s *Service) metricsRangeViaRouter(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, identity signalIdentity) (map[string]any, []proxy.Warning, error) {
+	key := fmt.Sprintf("range|%s|%s|%s|%s|%s|%d|%d|%d", tenant, identity.Partition, identity.Intent, identity.Asset, query, start.Unix(), end.Unix(), step.Nanoseconds())
+	result, err := s.queryFlight.Do(ctx, key, func(callCtx context.Context) (proxyQueryResult, error) {
+		data, warnings, err := s.proxyRouter.MetricsRangeForPartition(callCtx, tenant, query, start, end, step, identity.Partition)
+		if err != nil {
+			return proxyQueryResult{}, err
+		}
+		return proxyQueryResult{data: data, warnings: warnings}, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return result.data, result.warnings, nil
+}
+
 func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.Request, query string, at time.Time) {
-	data, warnings, err := s.proxyRouter.MetricsInstantForPartition(r.Context(), s.tenantFromRequest(r), query, at, partitionFromRequest(r))
+	data, warnings, err := s.metricsInstantViaRouter(r.Context(), s.tenantFromRequest(r), query, at, identityFromRequest(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, proxy.ErrScopeRequired), errors.Is(err, proxy.ErrTooBroad):
@@ -38,7 +79,7 @@ func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.
 // handlePrometheusQueryRangeViaRouter executes a range query through the
 // multi-backend router.
 func (s *Service) handlePrometheusQueryRangeViaRouter(w http.ResponseWriter, r *http.Request, query string, start, end time.Time, step time.Duration) {
-	data, warnings, err := s.proxyRouter.MetricsRangeForPartition(r.Context(), s.tenantFromRequest(r), query, start, end, step, partitionFromRequest(r))
+	data, warnings, err := s.metricsRangeViaRouter(r.Context(), s.tenantFromRequest(r), query, start, end, step, identityFromRequest(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, proxy.ErrScopeRequired), errors.Is(err, proxy.ErrTooBroad):
@@ -67,6 +108,25 @@ func (s *Service) handleProxyEndpoints(w http.ResponseWriter, r *http.Request) {
 	if s.awsReady() {
 		if prober, ok := s.aws.(awsHealthProber); ok {
 			s.proxyRouter.ReportBackendHealth("aws", prober.Health(r.Context()))
+		}
+	}
+	if s.gcp != nil {
+		if prober, ok := s.gcp.(interface{ Health(context.Context) error }); ok {
+			s.proxyRouter.ReportBackendHealth("gcp", prober.Health(r.Context()))
+		}
+	}
+	federation := map[string]any{}
+	if s.federationHealth != nil {
+		federation = s.federationHealth()
+		for provider, raw := range federation {
+			summary, _ := raw.(map[string]any)
+			total, _ := summary["total"].(int)
+			open, _ := summary["open"].(int)
+			if total > 0 && open >= total {
+				s.proxyRouter.ReportBackendHealth(provider, fmt.Errorf("all %d federation targets are circuit-open", total))
+			} else {
+				s.proxyRouter.ReportBackendHealth(provider, nil)
+			}
 		}
 	}
 	q := r.URL.Query()
@@ -122,7 +182,7 @@ func (s *Service) handleProxyEndpoints(w http.ResponseWriter, r *http.Request) {
 	}
 
 	endpoints := s.proxyRouter.Endpoints(r.Context())
-	resp := map[string]any{"endpoints": endpoints}
+	resp := map[string]any{"endpoints": endpoints, "federation": federation}
 	if summaryParam {
 		resp["summary"] = s.proxyRouter.SummarizeEndpoints()
 	}

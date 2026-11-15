@@ -14,7 +14,7 @@ func TestRequestPrometheusContext(t *testing.T) {
 		min       time.Duration
 		max       time.Duration
 	}{
-		{name: "default has no extra deadline", min: 0, max: 0},
+		{name: "default deadline", min: 10 * time.Second, max: 30 * time.Second},
 		{name: "long query", timeout: "2m", min: 90 * time.Second, max: 2 * time.Minute},
 		{name: "clamped to maximum", timeout: "10m", min: 4 * time.Minute, max: maxPrometheusQueryTimeout},
 		{name: "invalid duration", timeout: "soon", wantError: true},
