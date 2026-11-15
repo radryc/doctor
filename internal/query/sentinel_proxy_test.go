@@ -42,3 +42,26 @@ func TestSentinelProxyUnconfigured(t *testing.T) {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 }
+
+func TestSentinelProxyRoutesAlertmanagerAPI(t *testing.T) {
+	var gotPath string
+	sentinel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer sentinel.Close()
+
+	svc := &Service{}
+	svc.SetSentinelURL(sentinel.URL)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/alerts", nil)
+	svc.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/api/v2/alerts" {
+		t.Fatalf("path = %q", gotPath)
+	}
+}

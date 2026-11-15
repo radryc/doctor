@@ -39,7 +39,17 @@ const (
 	// keep the router's short backend timeout; callers that know a query is
 	// expensive can request up to this limit for one request.
 	maxPrometheusQueryTimeout = 5 * time.Minute
-	doctorDiscoveryWindow     = 24 * time.Hour
+	// defaultPrometheusQueryTimeout bounds requests that do not send ?timeout=.
+	// Grafana's Prometheus datasource does not always send one, and without a
+	// deadline a slow federation backend can hold the request open for the
+	// proxy's full backend timeout.
+	defaultPrometheusQueryTimeout = 20 * time.Second
+	// maxPrometheusRangePoints mirrors Prometheus' practical limit. Long
+	// ranges with tiny steps are rejected before they allocate a huge matrix.
+	maxPrometheusRangePoints = 11000
+	// maxPrometheusSeries bounds the metric-picker /api/v1/series response.
+	maxPrometheusSeries   = 10000
+	doctorDiscoveryWindow = 24 * time.Hour
 	// doctorDiscoveryScanWindow caps how far back label/series discovery scans.
 	// The label vocabulary is stable, so a short recent window yields the same
 	// names while keeping the scan (and its memory) small even when Grafana asks
@@ -1309,10 +1319,20 @@ func hasPromMatchers(matchers []*promlabels.Matcher) bool {
 // requestPrometheusContext applies the optional Prometheus-compatible
 // ?timeout= duration. The default remains the router's short backend timeout;
 // callers opt into a longer context explicitly for expensive queries.
+func prometheusDefaultTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("DOCTOR_QUERY_DEFAULT_TIMEOUT")); raw != "" {
+		if timeout, err := time.ParseDuration(raw); err == nil && timeout > 0 {
+			return timeout
+		}
+	}
+	return defaultPrometheusQueryTimeout
+}
+
 func requestPrometheusContext(r *http.Request) (context.Context, context.CancelFunc, error) {
 	raw := strings.TrimSpace(r.URL.Query().Get("timeout"))
 	if raw == "" {
-		return r.Context(), func() {}, nil
+		ctx, cancel := context.WithTimeout(r.Context(), prometheusDefaultTimeout())
+		return ctx, cancel, nil
 	}
 	timeout, err := time.ParseDuration(raw)
 	if err != nil || timeout <= 0 {
@@ -1427,6 +1447,15 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 	if !end.After(start) {
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", "end must be after start")
 		return
+	}
+	if step > 0 {
+		points := int64(end.Sub(start)/step) + 1
+		if points > maxPrometheusRangePoints {
+			writePrometheusError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf(
+				"query range would return %d points; maximum is %d (increase step or narrow the range)",
+				points, maxPrometheusRangePoints))
+			return
+		}
 	}
 
 	if s.proxyRouter != nil {
@@ -1884,6 +1913,11 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 	out := make([]map[string]string, 0, len(seen))
 	for _, labels := range seen {
 		out = append(out, labels)
+	}
+	if len(out) > maxPrometheusSeries {
+		writePrometheusError(w, http.StatusUnprocessableEntity, "execution", fmt.Sprintf(
+			"series result exceeds %d; narrow the selector or time range", maxPrometheusSeries))
+		return
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return metricLabelMapString(out[i]) < metricLabelMapString(out[j])

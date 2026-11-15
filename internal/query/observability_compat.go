@@ -157,7 +157,7 @@ func (s *Service) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if plan.metric != nil {
-		limit := parseLimit(r.URL.Query().Get("limit"), 5000, 20000)
+		limit := parseLimit(r.URL.Query().Get("limit"), 500, 500)
 		records, fetchErr := s.fetchLokiRecords(r.Context(), tenant, plan, start, end, limit)
 		if fetchErr != nil {
 			writeLokiQueryError(w, fetchErr)
@@ -180,7 +180,7 @@ func (s *Service) handleLokiQueryRange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := parseLimit(r.URL.Query().Get("limit"), 1000, 5000)
+	limit := parseLimit(r.URL.Query().Get("limit"), 500, 500)
 	logs, err := s.fetchLokiRecords(r.Context(), tenant, plan, start, end, limit)
 	if err != nil {
 		writeLokiQueryError(w, err)
@@ -212,7 +212,7 @@ func (s *Service) handleLokiLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), strings.TrimSpace(r.URL.Query().Get("query")), start, end, 5000)
+	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), strings.TrimSpace(r.URL.Query().Get("query")), start, end, 500)
 	if err != nil {
 		writeLokiQueryError(w, err)
 		return
@@ -250,7 +250,7 @@ func (s *Service) handleLokiLabelValues(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), strings.TrimSpace(r.URL.Query().Get("query")), start, end, 5000)
+	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), strings.TrimSpace(r.URL.Query().Get("query")), start, end, 500)
 	if err != nil {
 		writeLokiQueryError(w, err)
 		return
@@ -298,7 +298,7 @@ func (s *Service) handleLokiSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), query, start, end, 5000)
+	logs, err := s.queryLogsForLoki(r.Context(), s.tenantFromRequest(r), query, start, end, 500)
 	if err != nil {
 		writeLokiQueryError(w, err)
 		return
@@ -339,10 +339,11 @@ func (s *Service) fetchLokiRecords(ctx context.Context, tenant string, plan loki
 		if err != nil {
 			return records, err
 		}
-		// The proxy router serves native storage and the single logical AWS
-		// federated backend. Only use the direct fallback when the router does
-		// not own AWS, otherwise the same query is sent twice.
-		if !s.awsViaRouter {
+		// The proxy router serves native storage and, for federated installs,
+		// metrics/traces. It can return no AWS log records even when AWS
+		// federation is healthy, so query the AWS log manager directly unless
+		// the router already supplied AWS records.
+		if s.aws != nil && (!s.awsViaRouter || !hasLogSource(records, proxy.SourceAWS)) {
 			if awsLogs := s.queryAWSLogsForLoki(ctx, tenant, plan, from, to, limit); len(awsLogs) > 0 {
 				records = proxy.MergeLogs(records, proxy.LogRemote{Source: proxy.SourceAWS, Records: awsLogs})
 			}
@@ -408,6 +409,12 @@ func lokiLabelsFromRecord(record segment.LogRecord) map[string]string {
 	}
 	if record.SpanID != "" {
 		labels["span_id"] = record.SpanID
+	}
+	// Grafana Logs Drilldown defaults its primary label to Loki's conventional
+	// service_name. Doctor's canonical label is service; expose the alias so
+	// the Drilldown app and hand-written LogQL both work.
+	if service := labels["service"]; service != "" {
+		labels["service_name"] = service
 	}
 	return filterLokiLabels(labels)
 }
@@ -478,4 +485,16 @@ func parseLokiTime(value string, fallback time.Time) (time.Time, error) {
 
 func isLokiGrafanaHealthcheck(query string) bool {
 	return strings.Join(strings.Fields(strings.ToLower(query)), "") == "vector(1)+vector(1)"
+}
+
+// hasLogSource reports whether any record already came from source (for
+// example "aws"). It prevents the direct AWS log fallback from duplicating
+// records the proxy router already returned.
+func hasLogSource(records []segment.LogRecord, source string) bool {
+	for _, record := range records {
+		if record.Attributes["source"] == source {
+			return true
+		}
+	}
+	return false
 }

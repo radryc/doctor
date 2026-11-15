@@ -22,6 +22,9 @@ const (
 	queryCacheMaxRows          = 500
 	queryCacheMaxDiscoveryRows = 10000
 	queryDiscoveryCacheEntries = 32
+	// queryLoadTimeout is a ceiling for one cached backend load. It does not
+	// detach from the caller: client cancellation still aborts the load.
+	queryLoadTimeout = 15 * time.Second
 )
 
 // cachingBackend wraps the raw MonoFS backend, below the access-policy
@@ -276,9 +279,10 @@ func (c *resultCache) getOrLoad(ctx context.Context, key string, load func(conte
 		}
 		c.mu.Unlock()
 
-		// The load is shared by every waiter. Deriving it from the leader's
-		// request context would make one client disconnect fail all of them.
-		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		// Honor the caller's cancellation. A dashboard that is closed or
+		// navigated away must not leave a backend query running for the full
+		// cache TTL. The timeout is only a ceiling, not a reason to detach.
+		loadCtx, cancel := context.WithTimeout(ctx, queryLoadTimeout)
 		defer cancel()
 		value, loadErr := load(loadCtx)
 		if loadErr != nil {

@@ -13,6 +13,7 @@ import (
 const (
 	StatusPending  = "pending"
 	StatusFiring   = "firing"
+	StatusSilenced = "silenced"
 	StatusResolved = "resolved"
 	StatusNoData   = "no_data"
 	StatusError    = "error"
@@ -372,6 +373,7 @@ type PartitionAlertSummary struct {
 	Partition string `json:"partition"`
 	Firing    int    `json:"firing"`
 	Pending   int    `json:"pending"`
+	Silenced  int    `json:"silenced"`
 	Critical  int    `json:"critical"`
 	Total     int    `json:"total"`
 }

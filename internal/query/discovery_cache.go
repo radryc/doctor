@@ -66,14 +66,15 @@ func (c *discoveryCache) getOrLoad(ctx context.Context, key string, timeout time
 		}
 		c.mu.Unlock()
 
-		// The load is shared by every waiter. Deriving it from the leader's
-		// request context would make one client disconnect fail all of them.
-		loadCtx := context.WithoutCancel(ctx)
-		var cancel context.CancelFunc
-		if timeout > 0 {
-			loadCtx, cancel = context.WithTimeout(loadCtx, timeout)
-			defer cancel()
+		// Honor the caller's cancellation. Discovery requests are user-facing
+		// (Grafana's metric picker), so a closed browser must abort the scan.
+		loadCtx := ctx
+		if timeout <= 0 {
+			timeout = 5 * time.Second
 		}
+		var cancel context.CancelFunc
+		loadCtx, cancel = context.WithTimeout(loadCtx, timeout)
+		defer cancel()
 		body, loadErr := load(loadCtx)
 		if loadErr != nil {
 			return nil, loadErr

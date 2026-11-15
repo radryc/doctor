@@ -2,16 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ExternalLink, Sparkles, X } from "lucide-react";
 import { useLocation } from "react-router-dom";
-
-function agentBase(): string {
-  const runtime = (window as unknown as { STRATA_AGENT_URL?: string })
-    .STRATA_AGENT_URL;
-  const configured =
-    runtime || (import.meta.env.VITE_AGENT_URL as string | undefined);
-  const host = window.location.hostname || "localhost";
-  const proto = window.location.protocol === "https:" ? "https:" : "http:";
-  return (configured || `${proto}//${host}:9191`).replace(/\/$/, "");
-}
+import { agentBase } from "../../lib/agent";
 
 export default function AskDrawer() {
   const [open, setOpen] = useState(false);

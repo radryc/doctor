@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/radryc/doctor/internal/access"
@@ -59,6 +60,13 @@ type RouterConfig struct {
 	Logger *log.Logger
 	// Access applies endpoint authorization. Nil allows everything.
 	Access *access.Gate
+	// LocalPolicyScoped reports that the local storage backend is already
+	// filtered by the partition access policy (doctor-query's policyBackend).
+	// When true, the OWNERS endpoint gate is not applied to local storage:
+	// it is the wrong resolver for local data and denies callers who are
+	// legitimately granted the partition. When false, local storage stays
+	// behind the endpoint gate (fail closed).
+	LocalPolicyScoped bool
 }
 
 // Upstreams groups the adapters registered for one backend.
@@ -78,10 +86,11 @@ type upstreamEntry struct {
 // one dataspace. The registry may change between requests; upstreams for
 // discovered backends are built lazily and cached until the backend changes.
 type Router struct {
-	cfg      RouterConfig
-	registry Registry
-	logger   *log.Logger
-	access   *access.Gate
+	cfg               RouterConfig
+	registry          Registry
+	logger            *log.Logger
+	access            *access.Gate
+	localPolicyScoped atomic.Bool
 
 	mu                sync.RWMutex
 	explicit          map[string]upstreamEntry
@@ -109,13 +118,14 @@ func NewRouter(cfg RouterConfig, registry Registry) *Router {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	return &Router{
+	router := &Router{
 		cfg: RouterConfig{
 			MaxInflight:       maxInflight,
 			MaxFanoutBackends: maxFanout,
 			BackendTimeout:    timeout,
 			Logger:            cfg.Logger,
 			Access:            cfg.Access,
+			LocalPolicyScoped: cfg.LocalPolicyScoped,
 		},
 		registry: registry,
 		logger:   cfg.Logger,
@@ -124,6 +134,18 @@ func NewRouter(cfg RouterConfig, registry Registry) *Router {
 		built:    make(map[string]upstreamEntry),
 		breakers: make(map[string]*breaker),
 	}
+	router.localPolicyScoped.Store(cfg.LocalPolicyScoped)
+	return router
+}
+
+// SetLocalPolicyScoped records whether local storage reads are already filtered
+// by the partition access policy. When true, accessDecision skips the endpoint
+// OWNERS gate for the local backend (see RouterConfig.LocalPolicyScoped).
+func (r *Router) SetLocalPolicyScoped(scoped bool) {
+	if r == nil {
+		return
+	}
+	r.localPolicyScoped.Store(scoped)
 }
 
 // EndpointFor converts a backend into its access-control endpoint.
@@ -142,6 +164,17 @@ func EndpointFor(backend Backend) access.Endpoint {
 
 // accessDecision evaluates the gate for a backend and signal.
 func (r *Router) accessDecision(ctx context.Context, backend Backend, signal access.Signal) (bool, access.Decision, bool) {
+	// Local storage is already scoped by the partition access policy inside the
+	// query backend (policyBackend -> FilterLogs/FilterSpans). Running it
+	// through the endpoint OWNERS resolver as well is wrong: the resolver looks
+	// for OWNERS at the backend name ("monofs"), not at the partition that owns
+	// the records, so it denies every non-admin caller and the UI shows
+	// "access denied" even though the list (which uses the policy gate) works.
+	// Only skip the endpoint gate when the partition policy is actually in
+	// charge; otherwise fall through so local storage stays fail-closed.
+	if isLocalBackend(backend) && strings.EqualFold(strings.TrimSpace(backend.Origin), "local") && r.localPolicyScoped.Load() {
+		return true, access.Decision{Endpoint: backend.Name, Signal: signal, Allowed: true, Resolver: "local-policy"}, false
+	}
 	if r.access == nil {
 		return true, access.Decision{Endpoint: backend.Name, Signal: signal, Allowed: true, Resolver: "none"}, false
 	}
@@ -443,6 +476,11 @@ func (r *Router) endpointInfoFor(ctx context.Context, backend Backend, now time.
 		Status:        backend.Status,
 		LastHeartbeat: backend.LastHeartbeat,
 	}
+	if !info.Healthy {
+		// The catalog may still say "healthy"; the live breaker is authoritative
+		// for the endpoint table.
+		info.Status = "unhealthy"
+	}
 	info.Health = endpointHealthLabel(info.Healthy, backend.Status)
 	if r.access != nil {
 		identity, _ := authz.IdentityFromContext(ctx)
@@ -642,7 +680,8 @@ func (r *Router) logTargets(ctx context.Context, criteria selectorCriteria) ([]l
 		}
 		targets = append(targets, logTarget{backend: backend, upstream: upstream})
 	}
-	if enforced > 0 && denied == enforced {
+	// A denied remote backend must not suppress an allowed local backend.
+	if len(targets) == 0 && enforced > 0 && denied == enforced {
 		return nil, warnings, access.ErrAccessDenied
 	}
 	return targets, warnings, nil
@@ -1245,7 +1284,40 @@ func (r *Router) noteBackendFailure(backend Backend, err error) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
+	if fastFailBackendError(err) {
+		// A dead federation endpoint should be skipped immediately. Waiting
+		// for the failure threshold multiplies one bad target across every
+		// dashboard query.
+		r.breakerFor(backend.Name).forceOpen(time.Now())
+		return
+	}
 	r.recordFailure(backend.Name, time.Now())
+}
+
+func fastFailBackendError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"connection refused",
+		"no such host",
+		"context deadline exceeded",
+		"i/o timeout",
+		"eof",
+		"http 401",
+		"http 502",
+		"http 503",
+		"http 504",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // backendHealthy reports circuit-breaker health for the endpoint UI. The local
@@ -1380,8 +1452,8 @@ func backendFingerprint(backend Backend) string {
 }
 
 const (
-	breakerThreshold = 5
-	breakerCooldown  = 30 * time.Second
+	breakerThreshold = 2
+	breakerCooldown  = 15 * time.Second
 )
 
 type breaker struct {

@@ -137,6 +137,7 @@ func main() {
 	if cfg.GuardianEnabled && cfg.GuardianURL != "" {
 		source := &alerting.GuardianSource{
 			BaseURL:  cfg.GuardianURL,
+			UIURL:    cfg.GuardianUIURL,
 			Token:    cfg.GuardianToken,
 			Tenant:   cfg.DefaultTenant,
 			Service:  service,

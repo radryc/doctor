@@ -29,6 +29,7 @@ type CatalogMetrics struct {
 	tokenResolves   metricapi.Int64Counter
 	tokenErrors     metricapi.Int64Counter
 	tokenInvalidate metricapi.Int64Counter
+	rangeRejected   metricapi.Int64Counter
 }
 
 var activeCatalogMetrics atomic.Pointer[CatalogMetrics]
@@ -196,6 +197,13 @@ func RegisterCatalogMetrics(manager *Manager) (*CatalogMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
+	rangeRejected, err := meter.Int64Counter(
+		"doctor.federation.query.range_rejected",
+		metricapi.WithDescription("Federation queries rejected by a backend range limit."),
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	registration, err := meter.RegisterCallback(func(_ context.Context, observer metricapi.Observer) error {
 		state := manager.current()
@@ -253,6 +261,7 @@ func RegisterCatalogMetrics(manager *Manager) (*CatalogMetrics, error) {
 		tokenResolves:   tokenResolves,
 		tokenErrors:     tokenErrors,
 		tokenInvalidate: tokenInvalidate,
+		rangeRejected:   rangeRejected,
 	}
 	SetActiveMetrics(metrics)
 	return metrics, nil
@@ -309,6 +318,17 @@ func (m *CatalogMetrics) RecordFanout(signal, result string, elapsed time.Durati
 	if result != "success" && result != "canceled" && m.fanoutErrors != nil {
 		m.fanoutErrors.Add(ctx, 1, attrs)
 	}
+}
+
+// RecordRangeRejected records a backend range-limit rejection.
+func (m *CatalogMetrics) RecordRangeRejected(target, reason string) {
+	if m == nil || m.rangeRejected == nil {
+		return
+	}
+	m.rangeRejected.Add(context.Background(), 1, metricapi.WithAttributes(
+		attribute.String("target", target),
+		attribute.String("reason", reason),
+	))
 }
 
 // RecordPartial records a response that contains partial target failures.

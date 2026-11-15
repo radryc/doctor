@@ -73,6 +73,9 @@ func fanoutTargets[T any](
 				m.noteTargetAbort(target.ID)
 				m.metrics.RecordFanout(string(signal), "canceled", elapsed)
 			default:
+				if reason, ok := rangeLimitReason(err); ok && m.metrics != nil {
+					m.metrics.RecordRangeRejected(target.ID, reason)
+				}
 				m.noteTargetFailure(target.ID, err)
 				m.metrics.RecordFanout(string(signal), "error", elapsed)
 				m.metrics.RecordPartial()

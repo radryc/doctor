@@ -13,7 +13,7 @@ export interface Alert {
   };
   dedupeKey?: string;
   expiresAt?: string | null;
-  status: "pending" | "firing" | "resolved" | "no_data" | "error" | string;
+  status: "pending" | "firing" | "silenced" | "resolved" | "no_data" | "error" | string;
   severity: string;
   labels: Record<string, string>;
   annotations?: Record<string, string>;
@@ -299,6 +299,7 @@ export interface PartitionAlertSummary {
   partition: string;
   firing: number;
   pending: number;
+  silenced?: number;
   critical: number;
   total: number;
 }

@@ -176,12 +176,22 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	healthInterval := m.breakerCooldown / 2
+	if healthInterval <= 0 || healthInterval > 15*time.Second {
+		healthInterval = 15 * time.Second
+	}
+	healthTicker := time.NewTicker(healthInterval)
+	defer healthTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			m.pool.prune(func(Target) bool { return true })
+		case <-healthTicker.C:
+			m.probeFailedTargets(ctx)
 		}
 	}
 }

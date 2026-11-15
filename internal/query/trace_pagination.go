@@ -20,7 +20,7 @@ import (
 const (
 	// tracePageSpanBatch bounds each storage read. A page is assembled from one
 	// or more batches, never from an unbounded scan of the requested window.
-	tracePageSpanBatch = 5000
+	tracePageSpanBatch = 2000
 	// tracePageMaxBatches bounds the work spent filling one page when a
 	// selective partition filter matches only a small fraction of spans.
 	tracePageMaxBatches = 8

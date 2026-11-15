@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
-	pb "github.com/radryc/monofs/api/proto"
 	"github.com/radryc/doctor/internal/segment"
+	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -17,17 +18,28 @@ import (
 type logEngineRouterStreamStub struct {
 	pb.UnimplementedMonoFSRouterServer
 
+	mu          sync.Mutex
+	metricReq   *pb.QueryMetricsRequest
 	metricItems [][]byte
 	traceItems  [][]byte
 }
 
-func (s *logEngineRouterStreamStub) StreamQueryMetrics(_ *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+func (s *logEngineRouterStreamStub) StreamQueryMetrics(req *pb.QueryMetricsRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
+	s.mu.Lock()
+	s.metricReq = req
+	s.mu.Unlock()
 	for _, item := range s.metricItems {
 		if err := stream.Send(&pb.QueryResultItem{ItemJson: append([]byte(nil), item...)}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *logEngineRouterStreamStub) lastMetricRequest() *pb.QueryMetricsRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.metricReq
 }
 
 func (s *logEngineRouterStreamStub) StreamQueryTraces(_ *pb.QueryTracesRequest, stream grpc.ServerStreamingServer[pb.QueryResultItem]) error {
@@ -150,5 +162,37 @@ func TestLogEngineClientQueryTracesUsesStreamedRouterResults(t *testing.T) {
 	}
 	if records[0].SpanID != "span-a" || records[1].SpanID != "span-b" {
 		t.Fatalf("span ids = %#v, want span-a/span-b", records)
+	}
+}
+
+func TestLogEngineClientStreamMetricsForwardsPartitionScope(t *testing.T) {
+	t.Parallel()
+
+	stub := &logEngineRouterStreamStub{}
+	client := newLogEngineClientForTest(t, stub)
+
+	err := client.StreamMetrics(
+		context.Background(),
+		"tenant-a",
+		segment.MetricQuery{
+			VisiblePartitions:    []string{"memebank"},
+			VisiblePartitionsSet: true,
+		},
+		time.Time{}, time.Time{},
+		func(segment.MetricPointRecord) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("StreamMetrics() error = %v", err)
+	}
+
+	req := stub.lastMetricRequest()
+	if req == nil {
+		t.Fatal("router did not receive a metrics request")
+	}
+	if !req.GetVisiblePartitionsSet() {
+		t.Fatal("VisiblePartitionsSet was not forwarded")
+	}
+	if got := req.GetVisiblePartitions(); len(got) != 1 || got[0] != "memebank" {
+		t.Fatalf("VisiblePartitions = %#v, want [memebank]", got)
 	}
 }

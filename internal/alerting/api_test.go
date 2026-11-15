@@ -210,3 +210,47 @@ func mustCompile(t *testing.T, spec *AlertSpec) string {
 	}
 	return expr
 }
+
+func TestAlertsAPIShowsSilencedStatus(t *testing.T) {
+	ctx := context.Background()
+	api, _ := testAPI(t)
+	now := time.Date(2026, 11, 11, 10, 30, 0, 0, time.UTC)
+	api.Now = func() time.Time { return now }
+	api.Service.Now = api.Now
+
+	if _, err := api.Service.IngestGuardian(ctx, "default", GuardianAlert{
+		Event: "partition.failing", Partition: "payments", Status: "firing",
+		Severity: "critical", Summary: "2 failing intents", FiredAt: now,
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Service.CreateSilence(ctx, Silence{
+		Tenant: "default", Partition: "payments",
+		Matchers: []Matcher{{Name: "alertname", Operator: "=", Value: "partition.failing"}},
+		StartsAt: now, EndsAt: now.Add(time.Hour), Scope: "rule",
+	}, "tester"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/alerts?tenant=default&partition=payments", nil)
+	rec := httptest.NewRecorder()
+	api.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Alerts []Alert `json:"alerts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Alerts) != 1 {
+		t.Fatalf("alerts = %#v", response.Alerts)
+	}
+	if response.Alerts[0].Status != StatusSilenced {
+		t.Fatalf("status = %q, want %q", response.Alerts[0].Status, StatusSilenced)
+	}
+	if len(response.Alerts[0].SilenceIDs) != 1 {
+		t.Fatalf("silence ids = %#v", response.Alerts[0].SilenceIDs)
+	}
+}

@@ -7,6 +7,7 @@ import {
   Clock3,
   RefreshCw,
   Send,
+  Sparkles,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import AlertRulesTab from "../components/alerts/AlertRulesTab";
 import RoutingBoard from "../components/alerts/RoutingBoard";
 import Tabs from "../components/ui/Tabs";
 import { useConfig } from "../context/ConfigContext";
+import { openAgentChat } from "../lib/agent";
 import { isPartitionDenied, pickDefaultPartition } from "../lib/partitionAccess";
 import type {
   Alert,
@@ -66,6 +68,8 @@ function statusClass(status: string): string {
       return "border-rose-500/40 bg-rose-500/10 text-rose-300";
     case "pending":
       return "border-amber-500/40 bg-amber-500/10 text-amber-300";
+    case "silenced":
+      return "border-violet-500/40 bg-violet-500/10 text-violet-300";
     case "resolved":
       return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
     case "no_data":
@@ -73,6 +77,13 @@ function statusClass(status: string): string {
     default:
       return "border-slate-500/40 bg-slate-500/10 text-slate-300";
   }
+}
+
+function encodeTriage(payload: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function age(value: string): string {
@@ -376,6 +387,45 @@ export default function AlertsPage() {
     setSilenceComment("");
   };
 
+  const startTriage = (alert: Alert) => {
+    const name = alert.labels.alertname || alert.fingerprint.slice(0, 12);
+    const prompt = [
+      "Triage this firing alert and run an initial investigation.",
+      "",
+      `Alert: ${name}`,
+      `Partition: ${alert.partition}`,
+      `Tenant: ${alert.tenant}`,
+      `Severity: ${alert.severity}`,
+      `Status: ${alert.status}`,
+      `Fingerprint: ${alert.fingerprint}`,
+      `Started: ${alert.startsAt}`,
+      `Labels: ${JSON.stringify(alert.labels)}`,
+      `Annotations: ${JSON.stringify(alert.annotations || {})}`,
+      "",
+      "Correlate logs, traces, metrics, and Guardian intent health for this partition.",
+      "Report likely cause, evidence, confidence, and the recommended next action.",
+      "Do not mutate infrastructure.",
+    ].join("\n");
+    const payload = {
+      title: `Triage: ${name} · ${alert.partition}`,
+      prompt,
+      alert: {
+        id: alert.id,
+        fingerprint: alert.fingerprint,
+        partition: alert.partition,
+        tenant: alert.tenant,
+        status: alert.status,
+        severity: alert.severity,
+        labels: alert.labels,
+        annotations: alert.annotations,
+        startsAt: alert.startsAt,
+        silenceIds: alert.silenceIds,
+      },
+    };
+    openAgentChat(`/chat?triage=${encodeTriage(payload)}`);
+    setNotice("Triage session opened in Agent");
+  };
+
   const createSilence = async () => {
     if (!silenceFor) return;
     setSaving(true);
@@ -638,6 +688,7 @@ export default function AlertsPage() {
                   <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs">
                     <option value="all">All states</option>
                     <option value="firing">Firing</option>
+                    <option value="silenced">Silenced</option>
                     <option value="pending">Pending</option>
                     <option value="resolved">Resolved</option>
                     <option value="no_data">No data</option>
@@ -693,9 +744,22 @@ export default function AlertsPage() {
                           <td className="px-3 py-2 text-slate-400">{alert.source}</td>
                           <td className="px-3 py-2 text-slate-400">{age(alert.startsAt)}</td>
                           <td className="px-3 py-2">
-                            <div className="flex gap-1">
+                            <div className="flex items-center gap-1">
                               {alert.acked && <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1 text-[10px] text-emerald-300">ack</span>}
                               {alert.silenceIds?.length ? <span className="rounded border border-amber-500/30 bg-amber-500/10 px-1 text-[10px] text-amber-300">silenced</span> : null}
+                              {alert.status === "firing" && (
+                                <button
+                                  type="button"
+                                  title="Triage this alert in Agent"
+                                  className="rounded border border-violet-500/30 bg-violet-500/10 p-1 text-violet-300 hover:bg-violet-500/20"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    startTriage(alert);
+                                  }}
+                                >
+                                  <Sparkles size={11} />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -723,6 +787,11 @@ export default function AlertsPage() {
                       </div>
                       <p className="mt-3 text-xs text-slate-300">{selected.annotations?.summary || "No summary"}</p>
                       <div className="mt-3 flex flex-wrap gap-2">
+                        {selected.status === "firing" && (
+                          <button type="button" onClick={() => startTriage(selected)} className="btn text-xs">
+                            <Sparkles size={12} /> Triage
+                          </button>
+                        )}
                         {can(caps, "alerts.ack") && (
                           <button type="button" onClick={() => void acknowledge(selected)} className="btn text-xs">
                             {selected.acked ? "Unack" : "Ack"}

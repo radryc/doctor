@@ -2,6 +2,14 @@
   color: var(--ui-amber);
 }
 
+.probe-stat--journey .probe-stat__icon {
+  color: var(--ui-secondary);
+}
+
+.probe-stat--shallow .probe-stat__icon {
+  color: var(--ui-accent-text);
+}
+
 .probe-row--stale {
   border-left: 2px solid var(--ui-amber);
 }
@@ -12,4 +20,40 @@
 
 .probe-row--stale .probe-row__status {
   color: var(--ui-amber);
+}
+
+/* Probe kinds get separate colors: journeys are violet, shallow checks cyan. */
+.probe-row--journey {
+  background: color-mix(in oklab, var(--ui-secondary) 7%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--ui-secondary) 75%, transparent);
+}
+
+.probe-row--journey:hover {
+  background: color-mix(in oklab, var(--ui-secondary) 13%, var(--ui-hover));
+}
+
+.probe-row--shallow {
+  background: color-mix(in oklab, var(--ui-accent) 3%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--ui-accent) 55%, transparent);
+}
+
+.probe-row--shallow:hover {
+  background: color-mix(in oklab, var(--ui-accent) 8%, var(--ui-hover));
+}
+
+.probe-kind--journey {
+  border: 1px solid color-mix(in oklab, var(--ui-secondary) 55%, transparent);
+  background: color-mix(in oklab, var(--ui-secondary) 22%, transparent);
+  color: var(--ui-secondary);
+}
+
+.probe-kind--shallow {
+  border: 1px solid color-mix(in oklab, var(--ui-accent) 45%, transparent);
+  background: color-mix(in oklab, var(--ui-accent) 16%, transparent);
+  color: var(--ui-accent-text);
+}
+
+.probe-kind--type {
+  background: var(--ui-hover);
+  color: var(--ui-muted);
 }

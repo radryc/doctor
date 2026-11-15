@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -152,13 +153,22 @@ type Client struct {
 }
 
 // NewClient builds a client for the given base URL.
+func newFederationHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   2 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.ResponseHeaderTimeout = 5 * time.Second
+	transport.TLSHandshakeTimeout = 3 * time.Second
+	return &http.Client{Timeout: 10 * time.Second, Transport: transport}
+}
+
 func NewClient(baseURL, token string) *Client {
 	return &Client{
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		token:   strings.TrimSpace(token),
-		httpClient: &http.Client{
-			Timeout: 45 * time.Second,
-		},
+		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		token:      strings.TrimSpace(token),
+		httpClient: newFederationHTTPClient(),
 	}
 }
 

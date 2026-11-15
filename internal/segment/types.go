@@ -149,6 +149,12 @@ type MetricQuery struct {
 	MetricName    string               `json:"metric_name,omitempty"`
 	Service       string               `json:"service,omitempty"`
 	LabelMatchers []MetricLabelMatcher `json:"label_matchers,omitempty"`
+	// VisiblePartitions restricts a metric scan to these storage partitions
+	// when VisiblePartitionsSet is true. Discovery uses it to scan one
+	// partition at a time so a loud partition cannot consume the shared scan
+	// budget and hide quieter ones. Empty with Set=false means "no filter".
+	VisiblePartitions    []string `json:"visible_partitions,omitempty"`
+	VisiblePartitionsSet bool     `json:"visible_partitions_set,omitempty"`
 }
 
 func NewID() string {

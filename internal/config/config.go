@@ -241,7 +241,6 @@ type QueryConfig struct {
 	AccessEnforceLogs       bool
 	AccessEnforceTraces     bool
 	AccessTeamMapping       string
-	AccessGrantsPath        string
 	AccessOwnersRoot        string
 	AccessCacheTTL          time.Duration
 	AccessStaticAllow       string
@@ -334,6 +333,7 @@ type SentinelConfig struct {
 	GuardianHMACSecret   string
 	GuardianEnabled      bool
 	GuardianURL          string
+	GuardianUIURL        string
 	GuardianToken        string
 	GuardianPollInterval time.Duration
 	ServiceToken         string
@@ -386,6 +386,7 @@ func LoadSentinel(service string) SentinelConfig {
 		GuardianHMACSecret:   envString("DOCTOR_SENTINEL_GUARDIAN_HMAC_SECRET", ""),
 		GuardianEnabled:      envBool("DOCTOR_SENTINEL_GUARDIAN_ENABLED", false),
 		GuardianURL:          envString("DOCTOR_SENTINEL_GUARDIAN_URL", envString("DOCTOR_GUARDIAN_API_URL", "")),
+		GuardianUIURL:        envString("DOCTOR_GUARDIAN_UI_URL", envString("DOCTOR_SENTINEL_GUARDIAN_URL", envString("DOCTOR_GUARDIAN_API_URL", ""))),
 		GuardianToken:        envString("DOCTOR_SENTINEL_GUARDIAN_TOKEN", envString("DOCTOR_GUARDIAN_TOKEN", "")),
 		GuardianPollInterval: envDuration("DOCTOR_SENTINEL_GUARDIAN_POLL_INTERVAL", 30*time.Second),
 		ServiceToken:         envString("DOCTOR_SENTINEL_SERVICE_TOKEN", ""),
@@ -529,8 +530,8 @@ func LoadQuery(service string) QueryConfig {
 		FederationMaxAttempts:          int(envInt64("DOCTOR_FEDERATION_MAX_ATTEMPTS", 2)),
 		FederationClientPoolMax:        int(envInt64("DOCTOR_FEDERATION_CLIENT_POOL_MAX", 10000)),
 		FederationClientIdleTTL:        envDuration("DOCTOR_FEDERATION_CLIENT_IDLE_TTL", 15*time.Minute),
-		FederationBreakerThreshold:     int(envInt64("DOCTOR_FEDERATION_BREAKER_THRESHOLD", 5)),
-		FederationBreakerCooldown:      envDuration("DOCTOR_FEDERATION_BREAKER_COOLDOWN", 30*time.Second),
+		FederationBreakerThreshold:     int(envInt64("DOCTOR_FEDERATION_BREAKER_THRESHOLD", 2)),
+		FederationBreakerCooldown:      envDuration("DOCTOR_FEDERATION_BREAKER_COOLDOWN", 15*time.Second),
 		FederationMetadataTTL:          envDuration("DOCTOR_FEDERATION_METADATA_TTL", time.Hour),
 		FederationTimeout:              envDuration("DOCTOR_FEDERATION_TIMEOUT", 5*time.Second),
 		TraceDiscoveryCacheTTL:         envDuration("DOCTOR_TRACE_DISCOVERY_CACHE_TTL", 30*time.Second),
@@ -571,7 +572,6 @@ func LoadQuery(service string) QueryConfig {
 		AccessEnforceLogs:       envBool("DOCTOR_ACCESS_ENFORCE_LOGS", false),
 		AccessEnforceTraces:     envBool("DOCTOR_ACCESS_ENFORCE_TRACES", false),
 		AccessTeamMapping:       envString("DOCTOR_ACCESS_TEAM_MAPPING", ""),
-		AccessGrantsPath:        envString("DOCTOR_ACCESS_GRANTS_PATH", ""),
 		AccessOwnersRoot:        envString("DOCTOR_ACCESS_OWNERS_ROOT", "/doctor/v1/endpoints"),
 		AccessCacheTTL:          envDuration("DOCTOR_ACCESS_CACHE_TTL", 60*time.Second),
 		AccessStaticAllow:       envString("DOCTOR_ACCESS_STATIC_ALLOW", ""),

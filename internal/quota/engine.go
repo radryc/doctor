@@ -142,7 +142,12 @@ func (e *Engine) CheckIngest(ctx context.Context, batch IngestBatch) error {
 		default:
 			continue
 		}
-		if limit.maxBatchBytes > 0 && requestBytes > limit.maxBatchBytes {
+		// Charge the batch limit against this partition's share of the
+		// request, not the whole request. A single OTLP export can batch spans
+		// or samples from several partitions; attributing the aggregate size
+		// to each of them would flag (and, in enforce mode, reject) every
+		// partition in a mixed batch because of a noisy neighbour's bytes.
+		if limit.maxBatchBytes > 0 && bytes > limit.maxBatchBytes {
 			if err := e.reject(enforce, "partition:"+partition, signal+".batch", float64(limit.maxBatchBytes)); err != nil {
 				return err
 			}

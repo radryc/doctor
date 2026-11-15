@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+func TestGuardianSourcePartitionURL(t *testing.T) {
+	source := &GuardianSource{BaseURL: "http://guardian-api:8090", UIURL: "http://guardian.local/?panel=topologyPanel"}
+	if got, want := source.partitionURL("team a/b"), "http://guardian.local/?panel=topologyPanel&partition=team+a%2Fb"; got != want {
+		t.Fatalf("partitionURL = %q, want %q", got, want)
+	}
+	source.UIURL = ""
+	if got, want := source.partitionURL("payments"), "http://guardian-api:8090?partition=payments"; got != want {
+		t.Fatalf("partitionURL fallback = %q, want %q", got, want)
+	}
+}
+
 func TestGuardianSourceEmitsErrorAndAttentionAlerts(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
@@ -48,6 +59,9 @@ func TestGuardianSourceEmitsErrorAndAttentionAlerts(t *testing.T) {
 	}
 	if payments[0].Annotations["guardian.failed_intents"] != "2" {
 		t.Fatalf("payments annotations = %#v", payments[0].Annotations)
+	}
+	if got, want := payments[0].Annotations["guardian.url"], server.URL+"?partition=payments"; got != want {
+		t.Fatalf("payments guardian.url = %q, want %q", got, want)
 	}
 
 	billing, err := store.ListAlerts(ctx, "default", "billing")

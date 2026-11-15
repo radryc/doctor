@@ -356,7 +356,7 @@ func (s *Service) handleTempoSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := s.tenantFromRequest(r)
-	spss := parseLimit(r.URL.Query().Get("spss"), 0, 1000)
+	spss := parseLimit(r.URL.Query().Get("spss"), 0, 200)
 
 	var (
 		summaries []proxy.TraceSummary
@@ -404,14 +404,24 @@ func (s *Service) handleTempoSearch(w http.ResponseWriter, r *http.Request) {
 
 	var spanSets map[string]tempo.SpanSet
 	if spss > 0 {
-		spanSets, err = s.searchSpanSets(r.Context(), tenant, search, spss)
-		if err != nil {
-			if isAccessDenied(err) {
-				writeTempoError(w, http.StatusForbidden, err.Error())
-				return
+		// Span sets are an optional enrichment. For broad queries (no service
+		// or tag filter) the trace list is already useful and the extra scan is
+		// too expensive to run inside Grafana's query timeout. Skip it and let
+		// the client render the trace list/waterfall without span columns.
+		broad := search.To.Sub(search.From) > 2*time.Minute &&
+			search.Service == "" && len(search.Tags) == 0 && len(search.NotTags) == 0 &&
+			len(search.Exists) == 0 && len(search.Absent) == 0
+		if !broad {
+			spanCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			spanSets, err = s.searchSpanSets(spanCtx, tenant, search, spss)
+			cancel()
+			if err != nil {
+				if isAccessDenied(err) {
+					writeTempoError(w, http.StatusForbidden, err.Error())
+					return
+				}
+				spanSets = nil
 			}
-			// Span sets are an enrichment; a failure must not fail the search.
-			spanSets = nil
 		}
 	}
 

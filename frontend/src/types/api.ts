@@ -447,7 +447,23 @@ export interface ProbeResult {
   lastFailureAt?: string;
   consecutiveFailures: number;
   path?: string;
+  failedStep?: string;
+  steps?: ProbeStepResult[];
   labels?: Record<string, string>;
+}
+
+export interface ProbeStepResult {
+  name: string;
+  type?: string;
+  method?: string;
+  target?: string;
+  path?: string;
+  status: string;
+  success: boolean;
+  durationMs: number;
+  statusCode?: number;
+  error?: string;
+  captured?: string[];
 }
 
 export interface ProbesResponse {
