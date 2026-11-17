@@ -45,6 +45,7 @@ func (e *LimitError) Is(target error) bool { return target == ErrQuotaExceeded }
 type Usage struct {
 	Key       string  `json:"key"`
 	Scope     string  `json:"scope"`
+	Tenant    string  `json:"tenant,omitempty"`
 	Resource  string  `json:"resource"`
 	Limit     float64 `json:"limit"`
 	Used      float64 `json:"used"`

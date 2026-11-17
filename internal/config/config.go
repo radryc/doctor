@@ -20,6 +20,15 @@ type QuotaConfig struct {
 	Replicas    int
 	Enforce     bool
 	Defaults    policy.Quota
+
+	// Durable storage admission state (doctor-ingest).
+	StateMode          string
+	StateDir           string
+	StateReplicaID     string
+	StateFlushInterval time.Duration
+	StateSharedRoot    string
+	StateReserveBytes  int64
+	StateFailMode      string
 }
 
 // LoadQuota builds the quota configuration for one service. fallbackURL and
@@ -37,7 +46,22 @@ func LoadQuota(service, fallbackURL, fallbackToken string) QuotaConfig {
 		Replicas:    int(envInt64("DOCTOR_QUOTA_REPLICAS", 1)),
 		Enforce:     envBool("DOCTOR_QUOTA_ENFORCE", false),
 		Defaults:    loadQuotaDefaults(),
+
+		StateMode:          envString("DOCTOR_QUOTA_STATE_MODE", "memory"),
+		StateDir:           envString("DOCTOR_QUOTA_STATE_DIR", ".doctor/quota"),
+		StateReplicaID:     envString("DOCTOR_QUOTA_STATE_REPLICA_ID", defaultReplicaID()),
+		StateFlushInterval: envDuration("DOCTOR_QUOTA_STATE_FLUSH_INTERVAL", 10*time.Second),
+		StateSharedRoot:    envString("DOCTOR_QUOTA_STATE_SHARED_ROOT", "/doctor/v1/quota/state"),
+		StateReserveBytes:  envInt64("DOCTOR_QUOTA_STATE_RESERVE_BYTES", 1<<20),
+		StateFailMode:      envString("DOCTOR_QUOTA_STATE_FAIL_MODE", "closed"),
 	}
+}
+
+func defaultReplicaID() string {
+	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
+		return hostname
+	}
+	return "replica"
 }
 
 func loadQuotaDefaults() policy.Quota {

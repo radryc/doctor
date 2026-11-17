@@ -145,7 +145,7 @@ func (s *Service) ingestTraces(ctx context.Context, tenant string, req *coltrace
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenTraces(req, tenant, s.privacy)
-	if err := s.checkIngestQuota(ctx, "traces", tracePartitionCounts(records), nil); err != nil {
+	if err := s.checkIngestQuota(ctx, tenant, "traces", tracePartitionCounts(records), nil); err != nil {
 		return err
 	}
 	if s.pipeline != nil {
@@ -174,7 +174,7 @@ func (s *Service) ingestLogs(ctx context.Context, tenant string, req *collogspb.
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenLogs(req, tenant, s.privacy)
-	if err := s.checkIngestQuota(ctx, "logs", logPartitionCounts(records), nil); err != nil {
+	if err := s.checkIngestQuota(ctx, tenant, "logs", logPartitionCounts(records), nil); err != nil {
 		return err
 	}
 	if s.pipeline != nil {
@@ -203,7 +203,7 @@ func (s *Service) ingestMetrics(ctx context.Context, tenant string, req *colmetr
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenMetrics(req, tenant, s.privacy)
-	if err := s.checkIngestQuota(ctx, "metrics", metricPartitionCounts(records), records); err != nil {
+	if err := s.checkIngestQuota(ctx, tenant, "metrics", metricPartitionCounts(records), records); err != nil {
 		return err
 	}
 	if s.pipeline != nil {
@@ -528,11 +528,12 @@ func (s *metricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetr
 }
 
 // checkIngestQuota enforces the partition envelope for a flattened batch.
-func (s *Service) checkIngestQuota(ctx context.Context, signal string, records map[string]int64, metrics []segment.MetricPointRecord) error {
+func (s *Service) checkIngestQuota(ctx context.Context, tenant, signal string, records map[string]int64, metrics []segment.MetricPointRecord) error {
 	if s == nil || s.quota == nil {
 		return nil
 	}
 	return s.quota.CheckIngest(ctx, quota.IngestBatch{
+		Tenant:  tenant,
 		Signal:  signal,
 		Bytes:   quota.RequestBytes(ctx),
 		Records: records,

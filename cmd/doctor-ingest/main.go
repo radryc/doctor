@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -205,9 +207,16 @@ func main() {
 			Logger:      log.Default(),
 		})
 		go provider.Run(ctx)
-		service.SetQuotaEngine(quota.NewEngine(provider, cfg.Quota.Replicas, log.Default()))
-		log.Printf("partition quota enabled (policy=%q replicas=%d enforce=%v observe-first=%v)",
-			cfg.Quota.PolicyURL, cfg.Quota.Replicas, cfg.Quota.Enforce, !cfg.Quota.Enforce)
+		engine := quota.NewEngine(provider, cfg.Quota.Replicas, log.Default())
+		tracker, err := buildStorageTracker(ctx, cfg)
+		if err != nil {
+			log.Fatalf("configure storage quota state: %v", err)
+		}
+		engine.SetStorageTracker(tracker)
+		go tracker.Run(ctx, cfg.Quota.StateFlushInterval)
+		service.SetQuotaEngine(engine)
+		log.Printf("partition quota enabled (policy=%q replicas=%d enforce=%v observe-first=%v storage-state=%s)",
+			cfg.Quota.PolicyURL, cfg.Quota.Replicas, cfg.Quota.Enforce, !cfg.Quota.Enforce, tracker.Mode())
 	} else {
 		log.Printf("partition quota disabled: set DOCTOR_QUOTA_POLICY_URL or DOCTOR_QUOTA_ENABLED=true")
 	}
@@ -283,6 +292,25 @@ func main() {
 
 	grpcServer.GracefulStop()
 	_ = httpServer.Shutdown(context.Background())
+}
+
+func buildStorageTracker(ctx context.Context, cfg config.IngestConfig) (*quota.StorageTracker, error) {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Quota.StateMode))
+	switch mode {
+	case "", "memory":
+		return quota.NewStorageTracker(), nil
+	case "file":
+		tracker, err := quota.NewFileStorageTracker(ctx, cfg.Quota.StateDir, cfg.Quota.StateReplicaID)
+		if err != nil {
+			return nil, err
+		}
+		tracker.SetLogger(log.Default())
+		return tracker, nil
+	case "shared":
+		return nil, errors.New("DOCTOR_QUOTA_STATE_MODE=shared is not available in this build")
+	default:
+		return nil, fmt.Errorf("unknown DOCTOR_QUOTA_STATE_MODE %q (want memory, file, or shared)", mode)
+	}
 }
 
 func logMemStats(label string) {

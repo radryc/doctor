@@ -11,8 +11,8 @@ This document explains what each package and binary owns.
 Startup sequence (`cmd/doctor-ingest/main.go`):
 
 1. set `GOMEMLIMIT` to a hard-coded 858 MiB and start an optional pprof server;
-2. load `config.IngestConfig` and require `DOCTOR_PRIVACY_HMAC_KEY` and
-   `DOCTOR_INGEST_AUTH_TOKEN`;
+2. load `config.IngestConfig` and require `DOCTOR_PRIVACY_HMAC_KEY` plus either
+   `DOCTOR_INGEST_AUTH_TOKEN` or `DOCTOR_INGEST_TOKENS_FILE`;
 3. initialize OTel telemetry and the `doctor.component.up` heartbeat;
 4. build `privacy.Engine`, `MonoFSWriter`, optional trace/log/metric buffers, optional pipeline;
 5. build `ingest.Service` and register the three OTLP gRPC services plus the HTTP collector;
@@ -67,10 +67,11 @@ Startup sequence:
    and `LeaseManager`;
 4. serve the rules API and run the lease/scheduler loop.
 
-The rules API requires `DOCTOR_RULES_API_TOKEN`; a static bearer middleware protects every route
-except `/healthz` and `/metrics`. `ruler.API.Authorizer` is set to `AuthenticatedAuthorizer`, so
-mutations are allowed only after the bearer check succeeds. This is still all-or-nothing: there is no
-per-tenant rule ownership.
+The rules API requires a bearer credential; a static bearer middleware protects every route except
+`/healthz` and `/metrics`. `DOCTOR_RULES_TOKENS_FILE` binds tokens to partitions and roles
+(`admin`/`maintainer`/`viewer`), and `ruler.API.Authorizer` is `ScopedRulesAuthorizer`.
+`DOCTOR_RULES_API_TOKEN` remains a legacy admin credential. Proxied requests from doctor-query carry
+a signed caller identity (`DOCTOR_INTERNAL_IDENTITY_SECRET`).
 
 ### Federation CLIs
 
@@ -227,7 +228,6 @@ Flattening and identity normalization:
 - `MonoFSWriter`: `Flusher` implementation using `LogEngineClient`; chunk IDs are timestamp-based.
 - `buffer_metrics.go`: OTel gauges/counters for pending batches/bytes/records and flush count.
 - `service_metrics.go`: accepted request/record counters, primed per signal.
-- `cost.go`: `CostController` limits; **not instantiated anywhere**.
 - `errors.go`: `ErrBufferFull` shared by buffers and pipeline mapping.
 
 Signal routing detail:
@@ -359,8 +359,8 @@ Recording rules:
 - `writer.go`: writes derived metrics through `LogEngineClient`.
 - `lease.go`: CAS leader lease at `/doctor/v1/rules/.lease/leader.json`.
 - `api.go`: `GET /v1/rules`, `GET /v1/rules/status`, `POST /v1/rules/evaluate`,
-  `GET/PUT/DELETE /v1/rules/{tenant}/{group}`. Mutations use `AuthenticatedAuthorizer`, backed by the
-  required `DOCTOR_RULES_API_TOKEN` middleware.
+  `POST /v1/rules/backfill`, `GET/PUT/DELETE /v1/rules/{tenant}/{group}`. Mutations use
+  `ScopedRulesAuthorizer` and the per-partition token groups.
 
 ## 5. Federation components
 
@@ -472,15 +472,27 @@ Recording rules:
 |---|---|---|
 | `DOCTOR_DEFAULT_TENANT` | `default` | fallback tenant and default allowlist |
 | `DOCTOR_TENANT_HEADER` | `X-Doctor-Tenant` | HTTP/gRPC tenant header |
-| `DOCTOR_INGEST_AUTH_TOKEN` | — | required bearer token for OTLP gRPC/HTTP |
-| `DOCTOR_INGEST_ALLOWED_TENANTS` | default tenant | CSV; limits accepted tenant headers |
+| `DOCTOR_INGEST_AUTH_TOKEN` | — | legacy shared bearer token; scoped to allowed tenants |
+| `DOCTOR_INGEST_TOKENS_FILE` | — | preferred per-collector token file with tenant scopes |
+| `DOCTOR_INGEST_ALLOWED_TENANTS` | default tenant | CSV; deployment-wide tenant allowlist |
 | `DOCTOR_MEMORY_LIMIT_BYTES` | `899678208` (858 MiB) | soft `GOMEMLIMIT` |
 | `DOCTOR_TLS_CERT_FILE` / `DOCTOR_TLS_KEY_FILE` | — | HTTPS for OTLP/HTTP |
 | `DOCTOR_GRPC_TLS_CERT_FILE` / `DOCTOR_GRPC_TLS_KEY_FILE` | — | TLS for OTLP gRPC |
+| `DOCTOR_INGEST_MTLS_MODE` | `off` | shared collector mTLS mode (`off`, `optional`, `require`) |
+| `DOCTOR_INGEST_MTLS_CA_FILE` | — | client CA bundle for optional/require |
+| `DOCTOR_GRPC_MTLS_MODE` / `DOCTOR_GRPC_MTLS_CA_FILE` | shared values | gRPC overrides |
+| `DOCTOR_HTTP_MTLS_MODE` / `DOCTOR_HTTP_MTLS_CA_FILE` | shared values | HTTP overrides |
 | `DOCTOR_GRPC_ADDR` | `:4317` | OTLP gRPC |
 | `DOCTOR_HTTP_ADDR` | `:4318` | OTLP HTTP |
 | `DOCTOR_DEBUG_ADDR` | `127.0.0.1:6060` | pprof; empty disables |
 | `DOCTOR_MONOFS_LOGENGINE_ADDR` | — | required |
+| `DOCTOR_MONOFS_ROUTER_ADDR` | — | file-store router (shared quota state, rules) |
+| `DOCTOR_MONOFS_TOKEN` | — | file-store token (shared quota state) |
+| `DOCTOR_MONOFS_CLIENT_ID` | `doctor-ingest` | file-store client id |
+| `DOCTOR_QUOTA_STATE_MODE` | `memory` | `memory` or `file` (durable local journal) |
+| `DOCTOR_QUOTA_STATE_DIR` | `.doctor/quota` | journal/snapshot directory |
+| `DOCTOR_QUOTA_STATE_REPLICA_ID` | hostname | journal identity |
+| `DOCTOR_QUOTA_STATE_FLUSH_INTERVAL` | `10s` | group commit / snapshot cadence |
 | `DOCTOR_TRACE_BUFFER_ENABLED` | `true` | |
 | `DOCTOR_TRACE_BUFFER_WAL_DIR` | `.doctor/trace-buffer` | |
 | `DOCTOR_TRACE_BUFFER_FLUSH_INTERVAL` | `5s` | |
@@ -500,10 +512,13 @@ Recording rules:
 | `DOCTOR_PRIVACY_HMAC_KEY` | — | required |
 | `DOCTOR_WAL_ENABLED` | `false` | read but unused |
 | `DOCTOR_WAL_DIR` | `.doctor/wal` | read but unused |
-| `DOCTOR_PIPELINE_ENABLED` | `true` | takes precedence over buffers |
+| `DOCTOR_PIPELINE_ENABLED` | `true` | pipeline stages records in the WAL buffers |
+| `DOCTOR_INGEST_REQUIRE_DURABLE` | `false` | fail startup when the pipeline has no WAL buffers |
 | `DOCTOR_PIPELINE_QUEUE_SIZE` | `1000` | |
 | `DOCTOR_PIPELINE_WORKERS` | `4` | |
-| `DOCTOR_COST_*` | `0` | read but unused |
+
+`DOCTOR_COST_*` was removed with the unused `CostController`; per-partition storage admission uses
+`internal/quota` (`storage.max_bytes`).
 
 ### Query (`internal/config.LoadQuery`)
 
@@ -518,7 +533,8 @@ Recording rules:
 | `DOCTOR_DEFAULT_PARTITION` | — | UI default |
 | `DOCTOR_MONOFS_LOGENGINE_ADDR` | — | required |
 | `DOCTOR_RULES_URL` | — | enables UI proxy |
-| `DOCTOR_RULES_API_TOKEN` | — | forwarded to the rules API |
+| `DOCTOR_RULES_API_TOKEN` | — | forwarded service credential |
+| `DOCTOR_INTERNAL_IDENTITY_SECRET` | — | HMAC secret for signed caller identity to doctor-rules |
 | `DOCTOR_AWS_ENABLED` | `true` | |
 | `DOCTOR_AWS_BACKEND_URL` / `_TOKEN` | — | legacy single pusher |
 | `DOCTOR_FEDERATION_ENABLED` | `false` | |
@@ -536,6 +552,7 @@ Recording rules:
 | `DOCTOR_FEDERATION_RELOAD_INTERVAL` | `30s` | `0` disables reload |
 | `DOCTOR_FEDERATION_STALE_AFTER` | `0` | disables stale metric |
 | `DOCTOR_FEDERATION_MAX_FANOUT` | `32` | |
+| `DOCTOR_FEDERATION_DISCOVERY_LIMIT` | `10000` | caps metric descriptor discovery |
 | `DOCTOR_FEDERATION_MAX_INFLIGHT` | `64` | |
 | `DOCTOR_FEDERATION_MAX_CONCURRENT_TARGETS` | `8` | |
 | `DOCTOR_FEDERATION_MAX_ATTEMPTS` | `2` | |
@@ -555,8 +572,8 @@ Recording rules:
 | `DOCTOR_GUARDIAN_DISCOVERY_ENABLED` | `false` | |
 | `DOCTOR_GUARDIAN_DISCOVERY_INTERVAL` | `30s` | |
 | `DOCTOR_GUARDIAN_TOKEN` | — | discovery/token resolver |
-| `DOCTOR_AUTH_REQUIRE` | `false` | |
-| `DOCTOR_AUTH_EXEMPT_PATHS` | — | CSV; overrides defaults |
+| `DOCTOR_AUTH_REQUIRE` | `true` | verifier-backed auth rejects anonymous callers |
+| `DOCTOR_AUTH_EXEMPT_PATHS` | `/healthz,/ready,/api/echo,/metrics,/api/v1/status/buildinfo` | CSV; telemetry APIs are not exempt |
 | `DOCTOR_OIDC_ISSUER` / `_AUDIENCE` | — | both needed for OIDC |
 | `DOCTOR_OIDC_JWKS_URL` | — | discovery if empty |
 | `DOCTOR_OIDC_CLIENT_ID` / `_SECRET` | — | browser login |
@@ -589,7 +606,11 @@ Recording rules:
 | `DOCTOR_RULES_ENABLED` | `true` |
 | `DOCTOR_RULES_HTTP_ADDR` | `:18081` |
 | `DOCTOR_TLS_CERT_FILE` / `DOCTOR_TLS_KEY_FILE` | — |
-| `DOCTOR_RULES_API_TOKEN` | — (required by the binary) |
+| `DOCTOR_RULES_API_TOKEN` | — | legacy admin credential |
+| `DOCTOR_RULES_TOKENS_FILE` | — | per-partition scoped token file |
+| `DOCTOR_INTERNAL_IDENTITY_SECRET` | — | verifies signed identities from doctor-query |
+| `DOCTOR_RULES_MAX_CATCHUP` | `0` | in-process missed-tick replay window |
+| `DOCTOR_RULES_MAX_CATCHUP_TICKS` | `60` | per-cycle replay cap |
 | `DOCTOR_RULES_QUERY_URL` | — |
 | `DOCTOR_RULES_QUERY_TOKEN` | — |
 | `DOCTOR_RULES_WORKERS` | `8` |

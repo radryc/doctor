@@ -105,19 +105,24 @@ flowchart TD
   G -- no --> F
 ```
 
-With the default `DOCTOR_PIPELINE_ENABLED=true`, the pipeline branch always wins. The buffers are
-constructed in `main` and start their WAL replay/background loops, but no new records reach them.
-This is an important operational detail: buffer metrics stay at zero and WAL files do not grow under
-normal traffic.
+With the default `DOCTOR_PIPELINE_ENABLED=true`, the pipeline writes into a `BufferedWriter` that
+routes each signal to its WAL buffer (`DOCTOR_TRACE_BUFFER_ENABLED`, `DOCTOR_LOG_BUFFER_ENABLED`,
+`DOCTOR_METRIC_BUFFER_ENABLED`, all default true). `Submit*` therefore returns once the batch is
+durably staged in the WAL, and the buffer's background loop retries the MonoFS write. If every
+buffer is disabled the pipeline writes to MonoFS directly; set
+`DOCTOR_INGEST_REQUIRE_DURABLE=true` to refuse that configuration.
 
 ### Pipeline semantics
 
 - `Submit*` sends a `work` item to a buffered channel and then **blocks** waiting for the worker's
   result on a private channel.
 - If the queue is full, the submit is rejected with `ErrQueueFull` (mapped to 429/ResourceExhausted).
-- Workers call the `Flusher`; a writer error is returned to the caller.
-- `Stop` cancels the context, then workers drain remaining items using the canceled context. There is
-  no retry or WAL for pipeline items; a failed write is lost from the caller's perspective.
+- Workers call the `Flusher`; when buffers are enabled that call only appends to the WAL, so a
+  transient MonoFS outage does not fail the request.
+- `Stop` cancels the context, then workers drain remaining items. Buffers stop after the pipeline and
+  flush pending batches with a bounded timeout.
+- Without buffers, writer errors are returned to the caller and no retry/WAL exists; the
+  `DOCTOR_INGEST_REQUIRE_DURABLE` guard exists to prevent that in production.
 
 ### Buffer semantics
 
@@ -189,9 +194,38 @@ helpers are still unused. This endpoint is not a working Guardian event sink.
 
 ## 10. What is not done
 
-- No mTLS or per-collector authorization beyond a shared bearer token.
-- No per-tenant credential mapping (one token can write any allowlisted tenant).
-- No retry/backoff or durable queue for pipeline writes.
-- No storage-byte/retention enforcement (`CostController` is still unused); partition ingest, cardinality, query, and rule quotas are enforced by `internal/quota`.
+- Collector mTLS is available as an option: set `DOCTOR_INGEST_MTLS_MODE` (`off`, `optional`, or
+  `require`) and `DOCTOR_INGEST_MTLS_CA_FILE`, or override per listener with
+  `DOCTOR_GRPC_MTLS_*` / `DOCTOR_HTTP_MTLS_*`. mTLS is transport authentication in addition to the
+  bearer token; it does not replace tenant scoping.
+- Per-collector tokens (`DOCTOR_INGEST_TOKENS_FILE`) and the legacy shared token are both supported.
+  The legacy token is scoped to `DOCTOR_INGEST_ALLOWED_TENANTS`.
+- Pipeline writes are WAL-backed by the trace/log/metric buffers. Direct writes remain possible when
+  every buffer is disabled; `DOCTOR_INGEST_REQUIRE_DURABLE=true` rejects that configuration.
+- Per-partition storage bytes are enforced by `internal/quota` when the policy sets
+  `storage.max_bytes`. `DOCTOR_QUOTA_STATE_MODE=file` persists accepted bytes in a per-replica
+  journal + snapshot; `memory` (the default) still resets on restart. The shared-reservation phase is
+  described in [`docs/internal/durable-quota-state.md`](../internal/durable-quota-state.md). Actual
+  chunk deletion and retention are owned by MonoFS and are not enforced by Doctor.
 - No legacy segment WAL (`internal/wal.WAL` is unused).
 - No request IDs, structured access logs, or audit trail for accepted telemetry.
+
+### Collector mTLS
+
+```bash
+DOCTOR_INGEST_MTLS_MODE=require
+DOCTOR_INGEST_MTLS_CA_FILE=/etc/doctor/collectors-ca.pem
+DOCTOR_GRPC_TLS_CERT_FILE=/etc/doctor/server.crt
+DOCTOR_GRPC_TLS_KEY_FILE=/etc/doctor/server.key
+DOCTOR_TLS_CERT_FILE=/etc/doctor/server.crt
+DOCTOR_TLS_KEY_FILE=/etc/doctor/server.key
+```
+
+- `optional` requests a client certificate and verifies it when present;
+- `require` rejects collectors without a certificate signed by the configured CA;
+- `off` (default) keeps the previous token-only behavior;
+- per-listener variables (`DOCTOR_GRPC_MTLS_MODE`, `DOCTOR_HTTP_MTLS_MODE`) override the shared
+  values. An mTLS mode other than `off` requires TLS certificate/key files for that listener; set the
+  other listener's mode to `off` if it is intentionally plaintext.
+- The collector must present a certificate; for example an OpenTelemetry Collector exporter uses
+  `tls.cert_file` / `tls.key_file` and `tls.ca_file`.

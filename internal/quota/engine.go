@@ -16,6 +16,7 @@ import (
 
 // IngestBatch is the quota view of one OTLP export after flattening.
 type IngestBatch struct {
+	Tenant  string // tenant that owns the batch; scopes storage counters
 	Signal  string // traces | logs | metrics
 	Bytes   int64
 	Records map[string]int64 // partition -> record count
@@ -66,6 +67,15 @@ func NewEngine(provider *Provider, replicas int, logger *log.Logger) *Engine {
 		stats:    map[string]*stat{},
 		now:      func() time.Time { return time.Now().UTC() },
 	}
+}
+
+// SetStorageTracker replaces the default in-memory storage tracker. It lets
+// doctor-ingest install a durable or shared tracker before serving traffic.
+func (e *Engine) SetStorageTracker(tracker *StorageTracker) {
+	if e == nil {
+		return
+	}
+	e.storage = tracker
 }
 
 // Provider returns the underlying provider (used by the dashboard and rules).
@@ -191,7 +201,7 @@ func (e *Engine) CheckIngest(ctx context.Context, batch IngestBatch) error {
 		}
 		if e.storage != nil {
 			if storageQuota := e.provider.StorageQuota(partition); storageQuota.MaxBytes > 0 {
-				if err := e.storage.Check(partition, bytes, storageQuota); err != nil {
+				if err := e.storage.Check(ctx, batch.Tenant, partition, bytes, storageQuota); err != nil {
 					if err := e.reject(enforce, "partition:"+partition, "storage.bytes", float64(storageQuota.MaxBytes)); err != nil {
 						return err
 					}
@@ -513,17 +523,21 @@ func (e *Engine) Snapshot(prefix string) []Usage {
 		out = append(out, usage)
 	}
 	if e.storage != nil {
-		for _, partition := range e.storage.Partitions() {
-			key := "partition:" + partition + ":storage:bytes"
+		for _, partitionKey := range e.storage.Partitions() {
+			key := "partition:" + partitionKey.Partition + ":storage:bytes"
+			if partitionKey.Tenant != "" && partitionKey.Tenant != "default" {
+				key = "partition:" + partitionKey.Tenant + "/" + partitionKey.Partition + ":storage:bytes"
+			}
 			if prefix != "" && !strings.HasPrefix(key, prefix) {
 				continue
 			}
-			q := e.provider.StorageQuota(partition)
-			used := e.storage.Used(partition, q)
+			q := e.provider.StorageQuota(partitionKey.Partition)
+			used := e.storage.Used(partitionKey, q)
 			out = append(out, Usage{
 				Key:       key,
 				Scope:     "partition",
 				Resource:  "storage.bytes",
+				Tenant:    partitionKey.Tenant,
 				Limit:     float64(q.MaxBytes),
 				Used:      float64(used),
 				Remaining: float64(q.MaxBytes - used),
