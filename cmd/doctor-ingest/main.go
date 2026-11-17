@@ -307,7 +307,19 @@ func buildStorageTracker(ctx context.Context, cfg config.IngestConfig) (*quota.S
 		tracker.SetLogger(log.Default())
 		return tracker, nil
 	case "shared":
-		return nil, errors.New("DOCTOR_QUOTA_STATE_MODE=shared is not available in this build")
+		tracker, err := quota.NewMonoFSStorageTracker(ctx,
+			cfg.MonoFSRouterAddr,
+			cfg.MonoFSToken,
+			cfg.MonoFSClientID,
+			cfg.Quota.StateSharedRoot,
+			cfg.Quota.StateReserveBytes,
+			cfg.Quota.StateFailMode,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tracker.SetLogger(log.Default())
+		return tracker, nil
 	default:
 		return nil, fmt.Errorf("unknown DOCTOR_QUOTA_STATE_MODE %q (want memory, file, or shared)", mode)
 	}

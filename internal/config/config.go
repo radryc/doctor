@@ -170,6 +170,9 @@ type IngestConfig struct {
 	HTTPAddr            string
 	DebugAddr           string
 	MonoFSLogEngineAddr string
+	MonoFSRouterAddr    string
+	MonoFSToken         string
+	MonoFSClientID      string
 	TraceBuffer         TraceBufferConfig
 	LogBuffer           LogBufferConfig
 	MetricBuffer        MetricBufferConfig
@@ -456,6 +459,9 @@ func LoadIngest(service string) (IngestConfig, error) {
 		HTTPAddr:            envString("DOCTOR_HTTP_ADDR", ":4318"),
 		DebugAddr:           envString("DOCTOR_DEBUG_ADDR", "127.0.0.1:6060"),
 		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
+		MonoFSRouterAddr:    envString("DOCTOR_MONOFS_ROUTER_ADDR", ""),
+		MonoFSToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
+		MonoFSClientID:      envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-ingest"),
 		TraceBuffer: TraceBufferConfig{
 			Enabled:         envBool("DOCTOR_TRACE_BUFFER_ENABLED", true),
 			WALDir:          envString("DOCTOR_TRACE_BUFFER_WAL_DIR", ".doctor/trace-buffer"),

@@ -489,10 +489,13 @@ Recording rules:
 | `DOCTOR_MONOFS_ROUTER_ADDR` | — | file-store router (shared quota state, rules) |
 | `DOCTOR_MONOFS_TOKEN` | — | file-store token (shared quota state) |
 | `DOCTOR_MONOFS_CLIENT_ID` | `doctor-ingest` | file-store client id |
-| `DOCTOR_QUOTA_STATE_MODE` | `memory` | `memory` or `file` (durable local journal) |
-| `DOCTOR_QUOTA_STATE_DIR` | `.doctor/quota` | journal/snapshot directory |
+| `DOCTOR_QUOTA_STATE_MODE` | `memory` | `memory`, `file`, or `shared` |
+| `DOCTOR_QUOTA_STATE_DIR` | `.doctor/quota` | journal/snapshot directory (`file`) |
 | `DOCTOR_QUOTA_STATE_REPLICA_ID` | hostname | journal identity |
 | `DOCTOR_QUOTA_STATE_FLUSH_INTERVAL` | `10s` | group commit / snapshot cadence |
+| `DOCTOR_QUOTA_STATE_SHARED_ROOT` | `/doctor/v1/quota/state` | MonoFS CAS prefix (`shared`) |
+| `DOCTOR_QUOTA_STATE_RESERVE_BYTES` | `1048576` | block reservation size (`shared`) |
+| `DOCTOR_QUOTA_STATE_FAIL_MODE` | `closed` | startup load behavior: `closed` or `open` |
 | `DOCTOR_TRACE_BUFFER_ENABLED` | `true` | |
 | `DOCTOR_TRACE_BUFFER_WAL_DIR` | `.doctor/trace-buffer` | |
 | `DOCTOR_TRACE_BUFFER_FLUSH_INTERVAL` | `5s` | |
