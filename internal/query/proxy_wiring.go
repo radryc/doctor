@@ -17,6 +17,13 @@ import (
 
 // SetProxyRouter installs the multi-backend router. When nil, handlers use the
 // legacy single-backend plus AWS path.
+// TracePolicyScoped reports whether an enforced repo-managed policy filters
+// trace spans and summaries per partition. The proxy router uses it to skip
+// the legacy endpoint OWNERS gate for remote trace backends.
+func (s *Service) TracePolicyScoped() bool {
+	return s != nil && s.policyGate != nil && s.policyGate.Enforced()
+}
+
 func (s *Service) SetProxyRouter(router *proxy.Router) {
 	s.proxyRouter = router
 	if router != nil {
@@ -24,6 +31,10 @@ func (s *Service) SetProxyRouter(router *proxy.Router) {
 		// policy is installed; tell the router not to apply the OWNERS gate on
 		// top. Without a policy gate this stays false (fail closed).
 		router.SetLocalPolicyScoped(s.PolicyScoped())
+		// Remote trace adapters apply the same partition policy to spans and
+		// summaries. An enforced trace policy therefore supersedes the legacy
+		// endpoint OWNERS gate for trace fan-out.
+		router.SetTracePolicyScoped(s.TracePolicyScoped())
 	}
 }
 

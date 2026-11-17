@@ -67,6 +67,13 @@ type RouterConfig struct {
 	// legitimately granted the partition. When false, local storage stays
 	// behind the endpoint gate (fail closed).
 	LocalPolicyScoped bool
+	// TracePolicyScoped reports that an enforced repo-managed access policy
+	// filters remote trace spans and summaries per partition. When true, trace
+	// targets are not rejected by the legacy endpoint OWNERS gate: that gate
+	// resolves an endpoint name (aws/gcp), not the partition that owns each
+	// trace, and would hide every federated trace from a caller who is granted
+	// the partition. Logs keep the endpoint gate.
+	TracePolicyScoped bool
 }
 
 // Upstreams groups the adapters registered for one backend.
@@ -91,6 +98,7 @@ type Router struct {
 	logger            *log.Logger
 	access            *access.Gate
 	localPolicyScoped atomic.Bool
+	tracePolicyScoped atomic.Bool
 
 	mu                sync.RWMutex
 	explicit          map[string]upstreamEntry
@@ -126,6 +134,7 @@ func NewRouter(cfg RouterConfig, registry Registry) *Router {
 			Logger:            cfg.Logger,
 			Access:            cfg.Access,
 			LocalPolicyScoped: cfg.LocalPolicyScoped,
+			TracePolicyScoped: cfg.TracePolicyScoped,
 		},
 		registry: registry,
 		logger:   cfg.Logger,
@@ -135,6 +144,7 @@ func NewRouter(cfg RouterConfig, registry Registry) *Router {
 		breakers: make(map[string]*breaker),
 	}
 	router.localPolicyScoped.Store(cfg.LocalPolicyScoped)
+	router.tracePolicyScoped.Store(cfg.TracePolicyScoped)
 	return router
 }
 
@@ -146,6 +156,16 @@ func (r *Router) SetLocalPolicyScoped(scoped bool) {
 		return
 	}
 	r.localPolicyScoped.Store(scoped)
+}
+
+// SetTracePolicyScoped records whether an enforced partition policy filters
+// remote trace spans/summaries. When true, trace fan-out no longer applies the
+// endpoint OWNERS gate to remote trace backends.
+func (r *Router) SetTracePolicyScoped(scoped bool) {
+	if r == nil {
+		return
+	}
+	r.tracePolicyScoped.Store(scoped)
 }
 
 // EndpointFor converts a backend into its access-control endpoint.
