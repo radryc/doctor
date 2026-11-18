@@ -66,6 +66,8 @@ type Service struct {
 	dashboardStore      DashboardStore
 	quotaEngine         *quota.Engine
 	quotaProvider       *quota.Provider
+	auditLogPath        string
+	auditReader         AuditReader
 	ingestURL           string
 	ingestToken         string
 	ingestClient        *http.Client
@@ -864,8 +866,9 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/ui/config", s.handleUIConfig)
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
 	mux.HandleFunc("/v1/quota", s.handleQuota)
+	mux.HandleFunc("/v1/audit/events", s.handleAuditEvents)
 	mux.HandleFunc("/", s.handleUI)
-	return withHTTPMetrics(withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLogging(withWarningHeaders(s.guardianTokenMiddleware(mux))))))))
+	return withHTTPMetrics(withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLoggingTo(withWarningHeaders(s.guardianTokenMiddleware(mux)), s.auditLogPath))))))
 }
 
 // guardianTokenKey carries the caller's OIDC token to server-side Guardian

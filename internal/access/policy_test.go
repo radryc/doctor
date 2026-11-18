@@ -356,3 +356,28 @@ func TestAccessiblePartitionsUsesPartitionScope(t *testing.T) {
 		t.Fatal("observe-only gate must not restrict the catalog")
 	}
 }
+
+func TestCanReadAudit(t *testing.T) {
+	gate := newTestGate(t, true)
+	if gate.CanReadAudit(authz.Identity{}) {
+		t.Fatal("anonymous caller must be denied under enforcement")
+	}
+	if gate.CanReadAudit(foo()) {
+		t.Fatal("non-audit/non-admin caller must be denied under enforcement")
+	}
+	if !gate.CanReadAudit(admin()) {
+		t.Fatal("admin caller must be allowed")
+	}
+	if !gate.CanReadAudit(authz.Identity{Subject: "break-glass-admin"}) {
+		t.Fatal("break-glass admin must be allowed")
+	}
+	auditor := authz.Identity{Subject: "auditor", Email: "auditor@example.com", Groups: []string{"audit"}}
+	if !gate.CanReadAudit(auditor) {
+		t.Fatal("audit group caller must be allowed")
+	}
+
+	observe := newTestGate(t, false)
+	if !observe.CanReadAudit(foo()) {
+		t.Fatal("observe-only gate must allow audit reads")
+	}
+}
