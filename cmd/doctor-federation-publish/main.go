@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -15,8 +16,8 @@ import (
 func main() {
 	var (
 		file         = flag.String("file", "", "input catalog snapshot YAML/JSON")
-		router       = flag.String("monofs-router", "", "MonoFS router address")
-		token        = flag.String("monofs-token", "", "MonoFS file-store token")
+		router       = flag.String("monofs-router", envOr("DOCTOR_MONOFS_ROUTER_ADDR", envOr("DOCTOR_MONOFS_ROUTER", "")), "MonoFS router address (env: DOCTOR_MONOFS_ROUTER_ADDR)")
+		token        = flag.String("monofs-token", os.Getenv("DOCTOR_MONOFS_TOKEN"), "MonoFS file-store token (env: DOCTOR_MONOFS_TOKEN; preferred over the flag)")
 		root         = flag.String("root", "/doctor/v1/federation", "snapshot root")
 		tenant       = flag.String("tenant", "default", "snapshot tenant")
 		shardTargets = flag.Int("shard-targets", 500, "targets per shard")
@@ -65,4 +66,11 @@ func main() {
 		}
 		log.Printf("verified federation catalog version=%s targets=%d", loaded.Version, len(loaded.Targets))
 	}
+}
+
+func envOr(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
 }

@@ -2,6 +2,8 @@
 #
 # These manifests are a starting point, not a turnkey production deployment.
 # Replace image names, the MonoFS address, and the Secret before applying.
+# Images are pinned to an immutable release tag; production deployments should
+# additionally pin by digest (image@sha256:...) once a registry publishes them.
 # They deliberately run every container as non-root with a read-only root
 # filesystem and no Linux capabilities.
 apiVersion: v1
@@ -51,7 +53,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: ingest
-          image: doctor-ingest:latest
+          image: doctor-ingest:v0.1.0
           envFrom:
             - configMapRef: { name: doctor-config }
             - secretRef: { name: doctor-secrets }
@@ -112,7 +114,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: query
-          image: doctor-query:latest
+          image: doctor-query:v0.1.0
           envFrom:
             - configMapRef: { name: doctor-config }
             - secretRef: { name: doctor-secrets }
@@ -173,7 +175,7 @@ spec:
         runAsGroup: 65532
       containers:
         - name: rules
-          image: doctor-rules:latest
+          image: doctor-rules:v0.1.0
           envFrom:
             - configMapRef: { name: doctor-config }
             - secretRef: { name: doctor-secrets }
@@ -227,7 +229,7 @@ spec:
         runAsGroup: 65532
       containers:
         - name: sentinel
-          image: doctor-sentinel:latest
+          image: doctor-sentinel:v0.1.0
           envFrom:
             - configMapRef: { name: doctor-config }
             - secretRef: { name: doctor-secrets }
@@ -329,9 +331,11 @@ spec:
         values: [doctor-query, doctor-rules, doctor-sentinel]
   policyTypes: [Ingress]
   ingress:
+    # Only ingress-controller pods in the ingress-nginx namespace may reach the
+    # UI/API ports. The podSelector is evaluated inside that namespace.
     - from:
-        - podSelector: {}
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: ingress-nginx } }
       ports:
         - { protocol: TCP, port: 18080 }
         - { protocol: TCP, port: 18081 }

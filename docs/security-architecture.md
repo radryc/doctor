@@ -177,9 +177,10 @@ Residual risk: there is no rule-mutation audit trail yet.
 - `doctor-federation-controller` authenticates to Guardian with
   `X-Guardian-Internal-Token` (`internal/federation/guardian_feed.go:141-160`) and to MonoFS with a
   bearer token.
-- `doctor-federation-publish`/`controller` accept `--monofs-token` and `--guardian-token` flags
-  (`cmd/doctor-federation-*/main.go`). Secrets on a command line are visible to other local users
-  and may be captured by process auditing. Use the env fallbacks.
+- `doctor-federation-publish`/`controller` still accept `--monofs-token` and `--guardian-token`
+  flags (`cmd/doctor-federation-*/main.go`), but both default to `DOCTOR_MONOFS_TOKEN` and
+  `DOCTOR_GUARDIAN_TOKEN`. Prefer the environment variables: secrets on a command line are visible
+  to other local users and may be captured by process auditing.
 - The controller encrypts token shards with AES-256-GCM when
   `DOCTOR_FEDERATION_TOKEN_KEY` is set and refuses to publish a non-empty token map without it
   (see §4). The key is still an environment/flag secret.

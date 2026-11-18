@@ -100,8 +100,10 @@ a signed caller identity (`DOCTOR_INTERNAL_IDENTITY_SECRET`).
 | `doctor-federation-publish` | loads a snapshot file, writes it through `MonoFSSnapshotStore.Save`, optionally verifies by reading it back |
 | `doctor-federation-controller` | connects to Guardian + MonoFS, acquires a leader lease, builds metadata and catalog, publishes token shards and snapshot on an interval |
 
-The controller and publish CLIs take secrets as command-line flags (`--monofs-token`,
-`--guardian-token`) as well as environment fallbacks; flags are visible in the process table.
+The controller and publish CLIs accept `--monofs-token` and `--guardian-token` flags for
+compatibility, but read `DOCTOR_MONOFS_TOKEN`, `DOCTOR_MONOFS_ROUTER_ADDR`/`DOCTOR_MONOFS_ROUTER`,
+and `DOCTOR_GUARDIAN_TOKEN` by default. Prefer the environment variables: flags are visible in the
+process table.
 
 ## 2. Configuration and shared primitives
 

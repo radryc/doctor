@@ -331,21 +331,22 @@ Potential issues:
 # Build a snapshot from an input document
 doctor-federation-build --input catalog-input.yaml --out snapshot.json
 
-# Publish a snapshot (optionally verify by reading it back)
+# Publish a snapshot (optionally verify by reading it back).
+# Tokens and the router come from the environment by default; flags remain
+# available for compatibility but leak secrets into the process table.
+export DOCTOR_MONOFS_ROUTER_ADDR=monofs-router:9000
+export DOCTOR_MONOFS_TOKEN=...
 doctor-federation-publish \
   --file snapshot.json \
-  --monofs-router monofs-router:9000 \
-  --monofs-token "$DOCTOR_MONOFS_TOKEN" \
   --root /doctor/v1/federation \
   --tenant default \
   --expected-version controller-... \
   --verify
 
 # Run one controller sync (CronJob/CI)
+export DOCTOR_GUARDIAN_TOKEN=...
 doctor-federation-controller --once --dry-run \
-  --guardian-url https://guardian.example \
-  --monofs-router monofs-router:9000 \
-  --monofs-token "$DOCTOR_MONOFS_TOKEN"
+  --guardian-url https://guardian.example
 ```
 
 `--expected-version` empty means “latest/absent” in `doctor-federation-publish`; the controller
