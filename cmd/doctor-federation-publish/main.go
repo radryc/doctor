@@ -28,7 +28,7 @@ func main() {
 	flag.Parse()
 
 	if strings.TrimSpace(*file) == "" || strings.TrimSpace(*router) == "" || strings.TrimSpace(*token) == "" {
-		log.Fatal("--file, --monofs-router and --monofs-token are required")
+		log.Fatal("--file is required; MonoFS router and token must be supplied via --monofs-router/--monofs-token or DOCTOR_MONOFS_ROUTER_ADDR/DOCTOR_MONOFS_TOKEN")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

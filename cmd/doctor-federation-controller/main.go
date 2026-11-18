@@ -38,7 +38,7 @@ func main() {
 	flag.Parse()
 
 	if strings.TrimSpace(*guardianURL) == "" || strings.TrimSpace(*monofsRouter) == "" || strings.TrimSpace(*monofsToken) == "" {
-		log.Fatal("--guardian-url, --monofs-router and --monofs-token are required")
+		log.Fatal("Guardian URL and MonoFS router/token are required (flags or DOCTOR_GUARDIAN_API_URL, DOCTOR_MONOFS_ROUTER, DOCTOR_MONOFS_TOKEN)")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
