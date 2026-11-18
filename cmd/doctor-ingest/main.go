@@ -92,9 +92,19 @@ func main() {
 			}
 		}()
 	}
-	privacyEngine, err := privacy.New(cfg.Privacy.HMACKey)
+	// LoadFromEnv honours DOCTOR_PRIVACY_KEY_ID and DOCTOR_PRIVACY_KEYS_JSON
+	// so rotated keys and historical token verification work. Fall back to the
+	// single configured HMAC key for local/dev deployments.
+	privacyEngine, err := privacy.LoadFromEnv()
 	if err != nil {
-		log.Fatal(err)
+		if strings.TrimSpace(cfg.Privacy.HMACKey) == "" {
+			log.Fatal(err)
+		}
+		log.Printf("privacy: falling back to DOCTOR_PRIVACY_HMAC_KEY: %v", err)
+		privacyEngine, err = privacy.New(cfg.Privacy.HMACKey)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	// Build the writer backend: logengine is the only supported path.

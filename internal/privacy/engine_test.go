@@ -267,3 +267,27 @@ func TestLoadFromEnv(t *testing.T) {
 		}
 	})
 }
+
+func TestSanitizeTextDetectsFinancialAndIdentityValues(t *testing.T) {
+	engine, err := New("test-secret")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	text := "iban GB82WEST12345698765432 cvv: 123 routing 021000021 dob: 1990-01-02 phone +14155550100"
+	got := engine.SanitizeText(text)
+	for _, raw := range []string{"GB82WEST12345698765432", "cvv: 123", "021000021", "1990-01-02", "+14155550100"} {
+		if strings.Contains(got, raw) {
+			t.Fatalf("sensitive value %q was not sanitized: %q", raw, got)
+		}
+	}
+	if !strings.Contains(got, "tok_v2_k1_") || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("expected tokenized and redacted values, got %q", got)
+	}
+
+	// Non-checksummed candidates stay intact to avoid destroying telemetry.
+	benign := "order 123456789 item 4111-1111-1111-1112"
+	if out := engine.SanitizeText(benign); out != benign {
+		t.Fatalf("benign values were modified: %q", out)
+	}
+}

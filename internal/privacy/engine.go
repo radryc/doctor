@@ -18,6 +18,11 @@ var (
 	ipv4Pattern           = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 	ssnPattern            = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
 	panPattern            = regexp.MustCompile(`\b(?:\d[ -]?){12,18}\d\b`)
+	ibanPattern           = regexp.MustCompile(`\b[A-Za-z]{2}\d{2}[A-Za-z0-9]{10,30}\b`)
+	routingPattern        = regexp.MustCompile(`\b\d{9}\b`)
+	phonePattern          = regexp.MustCompile(`(?:\+[1-9]\d{7,14}\b|\b(?:1[-. ]?)?\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}\b)`)
+	cvvPattern            = regexp.MustCompile(`(?i)\b(?:cvv2?|cvc2?|card[ _-]?verification(?:[ _-](?:code|value))?)\b\s*[:=#]?\s*\d{3,4}\b`)
+	dobPattern            = regexp.MustCompile(`(?i)\b(?:dob|d\.o\.b\.?|date[ _-]?of[ _-]?birth|birth[ _-]?(?:date|day))\b\s*[:=]?\s*(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b`)
 	bearerPattern         = regexp.MustCompile(`(?i)bearer\s+[a-z0-9\-_\.=]+`)
 	// A JWT always has a base64url header that starts with "eyJ" ({"...).
 	// Requiring it prevents canonical service names such as
@@ -197,6 +202,23 @@ func (e *Engine) SanitizeText(text string) string {
 	text = ssnPattern.ReplaceAllStringFunc(text, func(value string) string {
 		return e.Tokenize(value)
 	})
+	text = cvvPattern.ReplaceAllString(text, "[REDACTED]")
+	text = dobPattern.ReplaceAllString(text, "[REDACTED]")
+	text = phonePattern.ReplaceAllStringFunc(text, func(value string) string {
+		return e.Tokenize(value)
+	})
+	text = ibanPattern.ReplaceAllStringFunc(text, func(value string) string {
+		if isValidIBAN(value) {
+			return e.Tokenize(value)
+		}
+		return value
+	})
+	text = routingPattern.ReplaceAllStringFunc(text, func(value string) string {
+		if isValidABARouting(value) {
+			return e.Tokenize(value)
+		}
+		return value
+	})
 	return text
 }
 
@@ -299,4 +321,46 @@ func (e *Engine) sanitizeValue(key, value string) string {
 
 func looksSensitive(value string) bool {
 	return bearerPattern.MatchString(value) || jwtPattern.MatchString(value) || longSecretPattern.MatchString(value)
+}
+
+// isValidIBAN normalises a candidate IBAN and checks the ISO 13616 mod-97
+// checksum so ordinary identifiers are not tokenized by mistake.
+func isValidIBAN(value string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(value, " ", ""), "-", ""))
+	if len(normalized) < 15 || len(normalized) > 34 {
+		return false
+	}
+	for i := 0; i < len(normalized); i++ {
+		c := normalized[i]
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	rearranged := normalized[4:] + normalized[:4]
+	mod := 0
+	for i := 0; i < len(rearranged); i++ {
+		c := rearranged[i]
+		if c >= '0' && c <= '9' {
+			mod = (mod*10 + int(c-'0')) % 97
+			continue
+		}
+		mod = (mod*100 + int(c-'A') + 10) % 97
+	}
+	return mod == 1
+}
+
+// isValidABARouting checks the ABA routing-number checksum.
+func isValidABARouting(value string) bool {
+	if len(value) != 9 {
+		return false
+	}
+	digits := make([]int, 9)
+	for i := 0; i < 9; i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+		digits[i] = int(value[i] - '0')
+	}
+	sum := 3*(digits[0]+digits[3]+digits[6]) + 7*(digits[1]+digits[4]+digits[7]) + digits[2] + digits[5] + digits[8]
+	return sum%10 == 0
 }
