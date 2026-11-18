@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/radryc/doctor/internal/alerting"
+	"github.com/radryc/doctor/internal/auditlog"
 	"github.com/radryc/doctor/internal/config"
 	"github.com/radryc/doctor/internal/delivery"
 	"github.com/radryc/doctor/internal/incident"
@@ -254,8 +255,9 @@ func main() {
 	}
 	rootHandler.Handle("/", api.Handler())
 	server := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           rootHandler,
+		Addr: cfg.HTTPAddr,
+		Handler: auditlog.MutationMiddleware("doctor-sentinel",
+			"/v1/alerts", "/v1/alert-sets", "/v1/incidents", "/v1/incident-policy", "/api/v2/")(rootHandler),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

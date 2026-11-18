@@ -85,6 +85,12 @@ func TestAuditLogsTelemetryReadQueries(t *testing.T) {
 		{http.MethodPost, "/v1/sql/query"},
 		{http.MethodGet, "/loki/api/v1/query"},
 		{http.MethodGet, "/loki/api/v1/query_range"},
+		{http.MethodGet, "/api/v1/query"},
+		{http.MethodGet, "/api/v1/query_range"},
+		{http.MethodGet, "/v1/metrics/range"},
+		{http.MethodGet, "/api/metrics/series"},
+		{http.MethodGet, "/api/v2/traces/search"},
+		{http.MethodGet, "/api/search"},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
 		req.Header.Set("X-Request-ID", "read-"+tc.path)
@@ -102,7 +108,7 @@ func TestAuditLogsTelemetryReadQueries(t *testing.T) {
 		t.Fatalf("read audit log: %v", err)
 	}
 	lines := string(content)
-	for _, wantPath := range []string{"/v1/logs", "/v1/traces", "/v1/sql/query", "/loki/api/v1/query", "/loki/api/v1/query_range"} {
+	for _, wantPath := range []string{"/v1/logs", "/v1/traces", "/v1/sql/query", "/loki/api/v1/query", "/loki/api/v1/query_range", "/api/v1/query", "/api/v1/query_range", "/v1/metrics/range", "/api/metrics/series", "/api/v2/traces/search", "/api/search"} {
 		if !strings.Contains(lines, `"path":"`+wantPath+`"`) {
 			t.Fatalf("missing audit entry for %s in:\n%s", wantPath, lines)
 		}

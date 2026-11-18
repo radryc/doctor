@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/radryc/doctor/internal/auditlog"
 	"github.com/radryc/doctor/internal/auth"
 	"github.com/radryc/doctor/internal/config"
 	"github.com/radryc/doctor/internal/quota"
@@ -152,6 +153,7 @@ func main() {
 	// identity with the signed caller identity when doctor-query forwarded one.
 	apiHandler := auth.InternalIdentityMiddleware(cfg.InternalIdentitySecret, log.Default())(api.Handler())
 	apiHandler = auth.NewMiddleware(verifier, true, []string{"/healthz", "/metrics"}, log.Default()).Wrap(apiHandler)
+	apiHandler = auditlog.MutationMiddleware("doctor-rules", "/v1/rules")(apiHandler)
 	if strings.TrimSpace(cfg.InternalIdentitySecret) == "" {
 		log.Printf("DOCTOR_INTERNAL_IDENTITY_SECRET is unset: proxied user identities will fall back to the rules service credential")
 	}

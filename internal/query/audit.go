@@ -7,13 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/radryc/doctor/internal/auditlog"
 	"github.com/radryc/monofs/pkg/authz"
 )
 
@@ -46,13 +45,6 @@ type auditEventsResponse struct {
 }
 
 type requestIDKey struct{}
-
-var (
-	auditMu       sync.Mutex
-	auditFile     *os.File
-	auditFileMu   sync.Mutex
-	auditFilePath string
-)
 
 func requestIDFromContext(r *http.Request) string {
 	if r == nil {
@@ -138,7 +130,9 @@ func withAuditLoggingTo(next http.Handler, logPath string) http.Handler {
 		} else if isReadQuery {
 			event["action"] = "read"
 		}
-		writeAuditTo(logPath, event)
+		if err := writeAuditTo(logPath, event); err != nil {
+			auditlog.IncrementWriteError("doctor-query")
+		}
 	})
 }
 
@@ -146,6 +140,8 @@ func auditReadPath(path string) bool {
 	for _, prefix := range []string{
 		"/v1/logs", "/v1/traces", "/v1/sql/query",
 		"/loki/api/v1/query", "/loki/api/v1/query_range",
+		"/api/v1/query", "/v1/metrics/range", "/api/metrics/",
+		"/api/v2/traces", "/api/search",
 	} {
 		if strings.HasPrefix(path, prefix) {
 			return true
@@ -168,42 +164,13 @@ func auditPath(path string) bool {
 }
 
 func writeAudit(event map[string]any) {
-	writeAuditTo("", event)
+	if err := writeAuditTo("", event); err != nil {
+		auditlog.IncrementWriteError("doctor-query")
+	}
 }
 
-func writeAuditTo(explicitPath string, event map[string]any) {
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return
-	}
-	auditMu.Lock()
-	defer auditMu.Unlock()
-	path := strings.TrimSpace(explicitPath)
-	if path == "" {
-		path = strings.TrimSpace(os.Getenv("DOCTOR_AUDIT_LOG"))
-	}
-	if path != "" {
-		auditFileMu.Lock()
-		defer auditFileMu.Unlock()
-		if auditFile == nil || auditFilePath != path {
-			if auditFile != nil {
-				_ = auditFile.Close()
-			}
-			file, openErr := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-			if openErr != nil {
-				log.Printf("audit_log_open_error path=%q err=%v audit=%s", path, openErr, payload)
-				return
-			}
-			auditFile = file
-			auditFilePath = path
-		}
-		_, _ = auditFile.Write(append(payload, '\n'))
-		return
-	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("DOCTOR_AUDIT_ENABLED")), "false") {
-		return
-	}
-	log.Printf("audit %s", payload)
+func writeAuditTo(explicitPath string, event map[string]any) error {
+	return auditlog.WriteTo(explicitPath, event)
 }
 
 func (s *Service) effectiveAuditLogPath() string {

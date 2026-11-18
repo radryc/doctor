@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/radryc/doctor/internal/auditlog"
 	"github.com/radryc/doctor/internal/buildinfo"
 	"github.com/radryc/doctor/internal/otlp"
 	"github.com/radryc/doctor/internal/privacy"
@@ -144,7 +145,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/metrics", s.handleHTTPMetrics)
 	mux.HandleFunc("/v1/guardian/events", s.handleGuardianEvents)
 	mux.HandleFunc("/v1/quota/usage", s.handleQuotaUsage)
-	return mux
+	return auditlog.MutationMiddleware("doctor-ingest", "/v1/guardian/events")(mux)
 }
 
 func (s *Service) handleQuotaUsage(w http.ResponseWriter, _ *http.Request) {
