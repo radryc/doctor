@@ -21,6 +21,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/doctor/internal/access"
+	"github.com/radryc/doctor/internal/alerting"
 	"github.com/radryc/doctor/internal/auth"
 	"github.com/radryc/doctor/internal/federation"
 	"github.com/radryc/doctor/internal/proxy"
@@ -46,31 +47,33 @@ type LogEngineBackend interface {
 }
 
 type Service struct {
-	defaultTenant       string
-	tenantHeader        string
-	guardianURL         string
-	guardianAPIURL      string
-	defaultPartition    string
-	logEngine           LogEngineBackend
-	aws                 proxy.AWSClient
-	awsViaRouter        bool
-	gcp                 proxy.GCPClient
-	gcpViaRouter        bool
-	proxyRouter         *proxy.Router
-	guardianClient      *http.Client
-	rulesProxy          *httputil.ReverseProxy
-	sentinelProxy       *httputil.ReverseProxy
-	rulesToken          string
-	rulesIdentitySecret string
-	policyGate          *access.PolicyGate
-	dashboardStore      DashboardStore
-	quotaEngine         *quota.Engine
-	quotaProvider       *quota.Provider
-	auditLogPath        string
-	auditReader         AuditReader
-	ingestURL           string
-	ingestToken         string
-	ingestClient        *http.Client
+	defaultTenant          string
+	tenantHeader           string
+	guardianURL            string
+	guardianAPIURL         string
+	defaultPartition       string
+	logEngine              LogEngineBackend
+	aws                    proxy.AWSClient
+	awsViaRouter           bool
+	gcp                    proxy.GCPClient
+	gcpViaRouter           bool
+	proxyRouter            *proxy.Router
+	guardianClient         *http.Client
+	rulesProxy             *httputil.ReverseProxy
+	sentinelProxy          *httputil.ReverseProxy
+	rulesToken             string
+	rulesIdentitySecret    string
+	sentinelToken          string
+	sentinelIdentitySecret string
+	policyGate             *access.PolicyGate
+	dashboardStore         DashboardStore
+	quotaEngine            *quota.Engine
+	quotaProvider          *quota.Provider
+	auditLogPath           string
+	auditReader            AuditReader
+	ingestURL              string
+	ingestToken            string
+	ingestClient           *http.Client
 
 	traceDiscoveryMu       sync.Mutex
 	traceDiscoveryCacheTTL time.Duration
@@ -407,10 +410,49 @@ func (s *Service) SetSentinelURL(raw string) {
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	director := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		director(req)
+		if token := strings.TrimSpace(s.sentinelToken); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		// Sentinel trusts the forwarded identity only when it is signed over
+		// exactly the headers we send, including partition scope.
+		if secret := strings.TrimSpace(s.sentinelIdentitySecret); secret != "" {
+			req.Header.Set("X-Doctor-Identity-Sig", alerting.SignIdentityWithPartitions(
+				secret,
+				req.Header.Get("X-Doctor-User"),
+				req.Header.Get("X-Doctor-Admin"),
+				req.Header.Get("X-Doctor-Groups"),
+				req.Header.Get("X-Doctor-Partition-Access"),
+			))
+		} else {
+			// Never forward an unsigned identity alongside a service token:
+			// sentinel would treat it as authoritative.
+			req.Header.Del("X-Doctor-User")
+			req.Header.Del("X-Doctor-Admin")
+			req.Header.Del("X-Doctor-Groups")
+			req.Header.Del("X-Doctor-Partition-Access")
+			req.Header.Del("X-Doctor-Identity-Sig")
+		}
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "sentinel service unavailable: " + err.Error()})
 	}
 	s.sentinelProxy = proxy
+}
+
+// SetSentinelToken configures the service credential the query proxy presents
+// to doctor-sentinel. Sentinel requires it once DOCTOR_SENTINEL_SERVICE_TOKEN
+// is set on the sentinel side.
+func (s *Service) SetSentinelToken(token string) {
+	s.sentinelToken = strings.TrimSpace(token)
+}
+
+// SetSentinelIdentitySecret configures the HMAC secret used to sign the
+// caller identity (including partition scope) forwarded to doctor-sentinel.
+func (s *Service) SetSentinelIdentitySecret(secret string) {
+	s.sentinelIdentitySecret = strings.TrimSpace(secret)
 }
 
 // SetRulesIdentitySecret configures the HMAC secret used to forward the

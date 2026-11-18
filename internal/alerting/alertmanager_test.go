@@ -174,7 +174,7 @@ func TestAlertmanagerRespectsPartitionAccess(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/alerts", nil)
 	req.Header.Set("X-Doctor-User", "operator@example.com")
 	req.Header.Set("X-Doctor-Partition-Access", "payments")
-	req.Header.Set("X-Doctor-Identity-Sig", SignIdentity("test-secret", "operator@example.com", "", ""))
+	req.Header.Set("X-Doctor-Identity-Sig", SignIdentityWithPartitions("test-secret", "operator@example.com", "", "", "payments"))
 	rec := httptest.NewRecorder()
 	api.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

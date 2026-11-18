@@ -88,3 +88,56 @@ func TestAPIRejectsUnsignedAdminWhenAllowAllFalse(t *testing.T) {
 		t.Fatalf("signed admin status = %d, want 200 body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestIdentitySignatureBindsPartitionAccess(t *testing.T) {
+	secret := "sentinel-secret"
+	req := httptest.NewRequest(http.MethodGet, "/v1/alerts", nil)
+	req.Header.Set("X-Doctor-User", "alice@example.com")
+	req.Header.Set("X-Doctor-Groups", "oncall")
+	req.Header.Set("X-Doctor-Partition-Access", "payments")
+	req.Header.Set("X-Doctor-Identity-Sig", SignIdentityWithPartitions(secret, "alice@example.com", "", "oncall", "payments"))
+
+	id := IdentityFromRequestWithAuth(req, false, secret, "")
+	if id.User != "alice@example.com" || !id.Partitions["payments"] {
+		t.Fatalf("signed identity = %+v", id)
+	}
+	if id.Can(CapAlertsRead, "default", "billing") {
+		t.Fatal("signed scope was widened")
+	}
+
+	// Replaying the signature with a wider scope must fail.
+	req.Header.Set("X-Doctor-Partition-Access", "*")
+	id = IdentityFromRequestWithAuth(req, false, secret, "")
+	if id.User != "" || id.Admin {
+		t.Fatalf("widened partition scope was trusted: %+v", id)
+	}
+
+	// Legacy signatures do not cover partition access and must be rejected
+	// when a partition header is present.
+	req.Header.Set("X-Doctor-Partition-Access", "payments")
+	req.Header.Set("X-Doctor-Identity-Sig", SignIdentity(secret, "alice@example.com", "", "oncall"))
+	id = IdentityFromRequestWithAuth(req, false, secret, "")
+	if id.User != "" {
+		t.Fatalf("legacy signature accepted alongside partition scope: %+v", id)
+	}
+}
+
+func TestServiceTokenCannotForgeUnsignedIdentity(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/alerts", nil)
+	req.Header.Set("Authorization", "Bearer svc-secret-token")
+	req.Header.Set("X-Doctor-User", "attacker")
+	req.Header.Set("X-Doctor-Admin", "true")
+	req.Header.Set("X-Doctor-Partition-Access", "*")
+
+	id := IdentityFromRequestWithAuth(req, false, "sentinel-secret", "svc-secret-token")
+	if id.Admin || id.User != "" || len(id.Partitions) != 0 {
+		t.Fatalf("unsigned identity was trusted with service token: %+v", id)
+	}
+
+	// A signed identity alongside the service token is accepted.
+	req.Header.Set("X-Doctor-Identity-Sig", SignIdentityWithPartitions("sentinel-secret", "attacker", "true", "", "*"))
+	id = IdentityFromRequestWithAuth(req, false, "sentinel-secret", "svc-secret-token")
+	if !id.Admin || id.User != "attacker" {
+		t.Fatalf("signed service identity = %+v", id)
+	}
+}

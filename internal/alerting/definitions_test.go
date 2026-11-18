@@ -122,7 +122,7 @@ func TestAlertDefinitionsEnforcesPartitionAccess(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/v1/alerts/inventory?tenant=default&partition=payments", nil)
 	req.Header.Set("X-Doctor-User", "usera")
 	req.Header.Set("X-Doctor-Partition-Access", "payments")
-	req.Header.Set("X-Doctor-Identity-Sig", SignIdentity("test-secret", "usera", "", ""))
+	req.Header.Set("X-Doctor-Identity-Sig", SignIdentityWithPartitions("test-secret", "usera", "", "", "payments"))
 	rec = httptest.NewRecorder()
 	api.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

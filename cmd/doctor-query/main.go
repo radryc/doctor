@@ -102,8 +102,16 @@ func main() {
 		log.Printf("recording rules UI enabled via %s", cfg.RulesURL)
 	}
 	svc.SetSentinelURL(cfg.SentinelURL)
+	svc.SetSentinelToken(cfg.SentinelServiceToken)
+	svc.SetSentinelIdentitySecret(cfg.SentinelIdentitySecret)
 	if strings.TrimSpace(cfg.SentinelURL) != "" {
 		log.Printf("sentinel UI enabled via %s", cfg.SentinelURL)
+		if strings.TrimSpace(cfg.SentinelServiceToken) == "" {
+			log.Printf("sentinel proxy is configured without DOCTOR_SENTINEL_SERVICE_TOKEN; sentinel rejects unsigned callers when its service token is set")
+		}
+		if strings.TrimSpace(cfg.SentinelIdentitySecret) == "" {
+			log.Printf("sentinel proxy is configured without DOCTOR_SENTINEL_IDENTITY_SECRET; forwarding per-user identity is disabled")
+		}
 	}
 
 	// Shared CAS file store: MonoFS when a token is set, in-memory fallback for

@@ -197,6 +197,8 @@ type QueryConfig struct {
 	MonoFSToken            string
 	RulesURL               string
 	SentinelURL            string
+	SentinelServiceToken   string
+	SentinelIdentitySecret string
 	RulesAPIToken          string
 	InternalIdentitySecret string
 	AWSEnabled             bool
@@ -610,6 +612,8 @@ func LoadQuery(service string) QueryConfig {
 		MonoFSToken:            envString("DOCTOR_MONOFS_TOKEN", ""),
 		RulesURL:               envString("DOCTOR_RULES_URL", ""),
 		SentinelURL:            envString("DOCTOR_SENTINEL_URL", ""),
+		SentinelServiceToken:   envString("DOCTOR_SENTINEL_SERVICE_TOKEN", ""),
+		SentinelIdentitySecret: envString("DOCTOR_SENTINEL_IDENTITY_SECRET", ""),
 		RulesAPIToken:          envString("DOCTOR_RULES_API_TOKEN", ""),
 		InternalIdentitySecret: envString("DOCTOR_INTERNAL_IDENTITY_SECRET", ""),
 		AWSEnabled:             envBool("DOCTOR_AWS_ENABLED", true),
