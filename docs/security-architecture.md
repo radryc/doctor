@@ -415,7 +415,7 @@ Missing or weak controls:
 
 ### 8.1 Remote backend URLs
 
-- Static proxy backends and Guardian discovery validate URLs through `internal/netguard` (`DOCTOR_BACKEND_REQUIRE_HTTPS`, `DOCTOR_BACKEND_ALLOW_LOOPBACK`, `DOCTOR_BACKEND_ALLOW_PRIVATE`, `DOCTOR_BACKEND_ALLOWED_HOSTS`), rejecting loopback, link-local, metadata, and non-allowlisted hosts by default.
+- Static proxy backends and Guardian discovery validate URLs through `internal/netguard` (`DOCTOR_BACKEND_REQUIRE_HTTPS`, `DOCTOR_BACKEND_ALLOW_LOOPBACK`, `DOCTOR_BACKEND_ALLOW_PRIVATE`, `DOCTOR_BACKEND_ALLOWED_HOSTS`). The zero-value `netguard.Policy` requires HTTPS and rejects loopback, link-local, metadata, private, and non-allowlisted hosts; `AllowPrivate`, `AllowLoopback`, and `AllowedHosts` are explicit opt-ins.
 - The federation controller takes `ObservedAPIURL` from Guardian pushers
   (`internal/federation/guardian_feed.go`).
 - Doctor sends bearer tokens to configured backend URLs.

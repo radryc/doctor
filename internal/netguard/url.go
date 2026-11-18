@@ -12,7 +12,9 @@ import (
 
 // Policy controls which backend URLs are accepted.
 type Policy struct {
-	// RequireHTTPS rejects plain HTTP endpoints. Enable in production.
+	// RequireHTTPS rejects plain HTTP endpoints. It is implied by the
+	// zero-value policy and can be relaxed only through the explicit
+	// AllowLoopback, AllowPrivate, or AllowedHosts opt-ins.
 	RequireHTTPS bool
 	// AllowLoopback permits 127.0.0.0/8, ::1, and localhost.
 	AllowLoopback bool
@@ -39,9 +41,6 @@ func (p Policy) Validate(rawURL string) error {
 	if rawURL == "" {
 		return nil
 	}
-	if !p.enabled() {
-		return nil
-	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -49,7 +48,7 @@ func (p Policy) Validate(rawURL string) error {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return fmt.Errorf("URL scheme %q must be http or https", parsed.Scheme)
 	}
-	if p.RequireHTTPS && parsed.Scheme != "https" {
+	if p.requireHTTPS() && parsed.Scheme != "https" {
 		return fmt.Errorf("URL %q must use https", rawURL)
 	}
 	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
@@ -110,8 +109,14 @@ func (p Policy) validateIP(host string, ip net.IP) error {
 	return nil
 }
 
-func (p Policy) enabled() bool {
-	return p.RequireHTTPS || p.AllowLoopback || p.AllowPrivate || len(p.AllowedHosts) > 0
+// requireHTTPS reports whether HTTPS is mandatory. RequireHTTPS enables it
+// explicitly. A zero-value policy has no opt-ins, so it also defaults to
+// HTTPS-only rather than disabling validation.
+func (p Policy) requireHTTPS() bool {
+	if p.RequireHTTPS {
+		return true
+	}
+	return !p.AllowLoopback && !p.AllowPrivate && len(p.AllowedHosts) == 0
 }
 
 func (p Policy) hostAllowed(host string) bool {

@@ -132,3 +132,43 @@ func TestPolicyRejectsNonHTTPSchemesWhenEnabled(t *testing.T) {
 		}
 	}
 }
+
+func TestZeroValuePolicyRequiresHTTPS(t *testing.T) {
+	policy := Policy{
+		LookupIP: func(string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("93.184.216.34")}, nil
+		},
+	}
+	if err := policy.Validate("http://metrics.example.com"); err == nil {
+		t.Fatal("zero-value policy accepted plain HTTP")
+	}
+	if err := policy.Validate("https://metrics.example.com"); err != nil {
+		t.Fatalf("zero-value policy rejected HTTPS: %v", err)
+	}
+}
+
+func TestZeroValuePolicyStillBlocksInternalTargets(t *testing.T) {
+	policy := Policy{}
+	for _, raw := range []string{
+		"https://127.0.0.1:3100",
+		"https://[::1]:3100",
+		"https://10.0.0.12:3100",
+		"https://169.254.169.254/latest/meta-data",
+	} {
+		if err := policy.Validate(raw); err == nil {
+			t.Fatalf("zero-value policy accepted %q", raw)
+		}
+	}
+}
+
+func TestExplicitPrivateOptInAllowsHTTP(t *testing.T) {
+	policy := Policy{
+		AllowPrivate: true,
+		LookupIP: func(string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("10.0.0.12")}, nil
+		},
+	}
+	if err := policy.Validate("http://loki.monitoring.svc.cluster.local:3100"); err != nil {
+		t.Fatalf("explicit AllowPrivate rejected HTTP backend: %v", err)
+	}
+}

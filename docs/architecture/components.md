@@ -612,7 +612,7 @@ Recording rules:
 | `DOCTOR_SENTINEL_URL` | — | enables `/v1/alerts*`, `/v1/incidents*`, `/api/v2/*` proxy |
 | `DOCTOR_GCP_ENABLED` | `true` | |
 | `DOCTOR_GCP_BACKEND_URL` / `_TOKEN` | — | legacy single GCP pusher |
-| `DOCTOR_BACKEND_REQUIRE_HTTPS` / `_ALLOW_LOOPBACK` / `_ALLOW_PRIVATE` / `_ALLOWED_HOSTS` | `false` / `false` / `true` / — | `netguard` URL policy for proxy backends |
+| `DOCTOR_BACKEND_REQUIRE_HTTPS` / `_ALLOW_LOOPBACK` / `_ALLOW_PRIVATE` / `_ALLOWED_HOSTS` | `false` / `false` / `false` / — | `netguard` URL policy for proxy backends; the zero-value policy is HTTPS-only, and `AllowPrivate`/`AllowLoopback`/`AllowedHosts` are explicit opt-ins |
 | `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` | — | tenant guard allowlist / forced single tenant |
 
 ### Rules (`internal/config.LoadRules`)
