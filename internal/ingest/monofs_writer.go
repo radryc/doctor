@@ -16,11 +16,21 @@ type MonoFSWriter struct {
 }
 
 // NewMonoFSWriter creates a Flusher backed by the monofs logengine at routerAddr.
+// An empty token dials anonymously; production deployments should use
+// NewMonoFSWriterWithToken so the router can authorize the ingest partition.
 func NewMonoFSWriter(ctx context.Context, routerAddr string) (*MonoFSWriter, error) {
+	return NewMonoFSWriterWithToken(ctx, routerAddr, "")
+}
+
+// NewMonoFSWriterWithToken creates a Flusher backed by the monofs logengine at
+// routerAddr and attaches token as the Bearer credential on every ingest RPC.
+// The MonoFS router requires a service token by default, so callers must pass
+// the configured DOCTOR_MONOFS_TOKEN instead of relying on anonymous access.
+func NewMonoFSWriterWithToken(ctx context.Context, routerAddr, token string) (*MonoFSWriter, error) {
 	if routerAddr == "" {
 		return nil, fmt.Errorf("monofs router address must be configured (DOCTOR_MONOFS_LOGENGINE_ADDR)")
 	}
-	client, err := monofsstore.NewLogEngineClient(ctx, routerAddr)
+	client, err := monofsstore.NewLogEngineClientWithToken(ctx, routerAddr, token)
 	if err != nil {
 		return nil, fmt.Errorf("create logengine client: %w", err)
 	}

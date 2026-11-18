@@ -68,6 +68,13 @@ func NewLogEngineClient(ctx context.Context, routerAddr string) (*LogEngineClien
 // NewLogEngineClientWithToken dials the monofs router with a service bearer
 // token so the router can apply the caller's partition scope.
 func NewLogEngineClientWithToken(ctx context.Context, routerAddr, token string) (*LogEngineClient, error) {
+	return newLogEngineClientWithOptions(ctx, routerAddr, token)
+}
+
+// newLogEngineClientWithOptions is the internal dial path. Tests inject a
+// bufconn dialer through extraOpts to assert the bearer is attached without a
+// live router.
+func newLogEngineClientWithOptions(ctx context.Context, routerAddr, token string, extraOpts ...grpc.DialOption) (*LogEngineClient, error) {
 	if routerAddr == "" {
 		return nil, fmt.Errorf("monofs router address is required")
 	}
@@ -83,6 +90,7 @@ func NewLogEngineClientWithToken(ctx context.Context, routerAddr, token string) 
 			grpc.MaxCallSendMsgSize(256*1024*1024),
 		),
 	}
+	opts = append(opts, extraOpts...)
 	if strings.TrimSpace(token) != "" {
 		opts = append(opts, grpc.WithPerRPCCredentials(bearerToken{
 			token:      strings.TrimSpace(token),

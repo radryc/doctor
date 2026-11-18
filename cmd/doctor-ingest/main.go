@@ -101,7 +101,7 @@ func main() {
 	if cfg.MonoFSLogEngineAddr == "" {
 		log.Fatal("DOCTOR_MONOFS_LOGENGINE_ADDR is required (logengine is the only supported storage backend)")
 	}
-	mw, err := ingest.NewMonoFSWriter(ctx, cfg.MonoFSLogEngineAddr)
+	mw, err := ingest.NewMonoFSWriterWithToken(ctx, cfg.MonoFSLogEngineAddr, cfg.MonoFSToken)
 	if err != nil {
 		log.Fatalf("connect to monofs logengine at %s: %v", cfg.MonoFSLogEngineAddr, err)
 	}

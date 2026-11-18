@@ -70,7 +70,7 @@ func main() {
 	}
 	defer func() { _ = files.Close() }()
 
-	logEngine, err := monofsstore.NewLogEngineClient(ctx, cfg.MonoFSLogEngineAddr)
+	logEngine, err := monofsstore.NewLogEngineClientWithToken(ctx, cfg.MonoFSLogEngineAddr, cfg.MonoFSToken)
 	if err != nil {
 		log.Fatalf("connect to monofs logengine: %v", err)
 	}

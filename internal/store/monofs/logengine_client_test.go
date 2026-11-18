@@ -12,6 +12,7 @@ import (
 	pb "github.com/radryc/monofs/api/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -49,6 +50,84 @@ func (s *logEngineRouterStreamStub) StreamQueryTraces(_ *pb.QueryTracesRequest, 
 		}
 	}
 	return nil
+}
+
+type authCaptureRouter struct {
+	pb.UnimplementedMonoFSRouterServer
+	authz chan string
+}
+
+func (s *authCaptureRouter) IngestLogs(ctx context.Context, _ *pb.IngestLogsRequest) (*pb.IngestLogsResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	values := md.Get("authorization")
+	if len(values) > 0 {
+		s.authz <- values[0]
+	} else {
+		s.authz <- ""
+	}
+	return &pb.IngestLogsResponse{Ok: true}, nil
+}
+
+func TestLogEngineClientWithTokenAttachesBearer(t *testing.T) {
+	t.Setenv("DOCTOR_MONOFS_TLS_INSECURE", "true")
+	t.Setenv("DOCTOR_MONOFS_TLS_REQUIRE", "false")
+
+	capture := &authCaptureRouter{authz: make(chan string, 1)}
+	client := newLogEngineClientWithDialerForTest(t, capture, "secret-token")
+
+	if err := client.IngestLogs(context.Background(), "chunk-1", []segment.LogRecord{{
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+		Service:   "api",
+		Body:      "hello",
+	}}); err != nil {
+		t.Fatalf("IngestLogs() error = %v", err)
+	}
+	if got, want := <-capture.authz, "Bearer secret-token"; got != want {
+		t.Fatalf("authorization metadata = %q, want %q", got, want)
+	}
+}
+
+func TestLogEngineClientWithoutTokenOmitsBearer(t *testing.T) {
+	t.Setenv("DOCTOR_MONOFS_TLS_INSECURE", "true")
+	t.Setenv("DOCTOR_MONOFS_TLS_REQUIRE", "false")
+
+	capture := &authCaptureRouter{authz: make(chan string, 1)}
+	client := newLogEngineClientWithDialerForTest(t, capture, "")
+
+	if err := client.IngestLogs(context.Background(), "chunk-1", []segment.LogRecord{{
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+		Service:   "api",
+		Body:      "hello",
+	}}); err != nil {
+		t.Fatalf("IngestLogs() error = %v", err)
+	}
+	if got := <-capture.authz; got != "" {
+		t.Fatalf("authorization metadata = %q, want empty", got)
+	}
+}
+
+func newLogEngineClientWithDialerForTest(t *testing.T, server pb.MonoFSRouterServer, token string) *LogEngineClient {
+	t.Helper()
+
+	listener := bufconn.Listen(1 << 20)
+	grpcServer := grpc.NewServer()
+	pb.RegisterMonoFSRouterServer(grpcServer, server)
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(grpcServer.Stop)
+
+	dialer := func(context.Context, string) (net.Conn, error) {
+		return listener.Dial()
+	}
+	client, err := newLogEngineClientWithOptions(context.Background(), "passthrough:///bufnet", token, grpc.WithContextDialer(dialer))
+	if err != nil {
+		t.Fatalf("newLogEngineClientWithOptions() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+	return client
 }
 
 func newLogEngineClientForTest(t *testing.T, server pb.MonoFSRouterServer) *LogEngineClient {
