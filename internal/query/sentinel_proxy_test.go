@@ -130,7 +130,7 @@ func TestSentinelProxyStripsUnsignedIdentityWithoutSecret(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	for _, key := range []string{"X-Doctor-User", "X-Doctor-Admin", "X-Doctor-Groups", "X-Doctor-Partition-Access", "X-Doctor-Identity-Sig"} {
+	for _, key := range []string{"Authorization", "X-Doctor-User", "X-Doctor-Admin", "X-Doctor-Groups", "X-Doctor-Partition-Access", "X-Doctor-Identity-Sig"} {
 		if value := got.Get(key); value != "" {
 			t.Fatalf("%s leaked to sentinel without a signing secret: %q", key, value)
 		}

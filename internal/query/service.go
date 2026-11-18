@@ -413,9 +413,6 @@ func (s *Service) SetSentinelURL(raw string) {
 	director := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		director(req)
-		if token := strings.TrimSpace(s.sentinelToken); token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
 		// Sentinel trusts the forwarded identity only when it is signed over
 		// exactly the headers we send, including partition scope.
 		if secret := strings.TrimSpace(s.sentinelIdentitySecret); secret != "" {
@@ -426,9 +423,14 @@ func (s *Service) SetSentinelURL(raw string) {
 				req.Header.Get("X-Doctor-Groups"),
 				req.Header.Get("X-Doctor-Partition-Access"),
 			))
+			if token := strings.TrimSpace(s.sentinelToken); token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
 		} else {
-			// Never forward an unsigned identity alongside a service token:
-			// sentinel would treat it as authoritative.
+			// Without a signing secret the proxy cannot safely assert a caller
+			// identity. Fail closed: strip identity headers and do not present
+			// the service token, which sentinel would treat as a service admin.
+			req.Header.Del("Authorization")
 			req.Header.Del("X-Doctor-User")
 			req.Header.Del("X-Doctor-Admin")
 			req.Header.Del("X-Doctor-Groups")

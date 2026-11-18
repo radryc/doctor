@@ -110,7 +110,7 @@ func main() {
 			log.Printf("sentinel proxy is configured without DOCTOR_SENTINEL_SERVICE_TOKEN; sentinel rejects unsigned callers when its service token is set")
 		}
 		if strings.TrimSpace(cfg.SentinelIdentitySecret) == "" {
-			log.Printf("sentinel proxy is configured without DOCTOR_SENTINEL_IDENTITY_SECRET; forwarding per-user identity is disabled")
+			log.Printf("sentinel proxy is configured without DOCTOR_SENTINEL_IDENTITY_SECRET; per-user identity forwarding is disabled and unsigned requests will fail closed")
 		}
 	}
 
