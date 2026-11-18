@@ -43,6 +43,7 @@ spec:
     metadata:
       labels: { app: doctor-ingest }
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -70,6 +71,7 @@ spec:
             limits: { cpu: "2", memory: 1Gi }
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
@@ -102,6 +104,7 @@ spec:
     metadata:
       labels: { app: doctor-query }
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -131,6 +134,7 @@ spec:
             limits: { cpu: "2", memory: 2Gi }
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
@@ -162,6 +166,7 @@ spec:
     metadata:
       labels: { app: doctor-rules }
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -183,6 +188,7 @@ spec:
             limits: { cpu: "1", memory: 512Mi }
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
@@ -214,6 +220,7 @@ spec:
     metadata:
       labels: { app: doctor-sentinel }
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -235,6 +242,7 @@ spec:
             limits: { cpu: "1", memory: 512Mi }
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
@@ -321,7 +329,10 @@ spec:
         values: [doctor-query, doctor-rules, doctor-sentinel]
   policyTypes: [Ingress]
   ingress:
-    - ports:
+    - from:
+        - podSelector: {}
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+      ports:
         - { protocol: TCP, port: 18080 }
         - { protocol: TCP, port: 18081 }
         - { protocol: TCP, port: 18082 }
