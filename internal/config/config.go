@@ -686,7 +686,7 @@ func LoadQuery(service string) QueryConfig {
 		BreakGlassToken:   envString("DOCTOR_BREAK_GLASS_TOKEN", ""),
 
 		AccessResolver:          envString("DOCTOR_ACCESS_RESOLVER", "owners"),
-		AccessMode:              envString("DOCTOR_ACCESS_MODE", "observe"),
+		AccessMode:              envString("DOCTOR_ACCESS_MODE", "enforce"),
 		AccessEnforceLogs:       envBool("DOCTOR_ACCESS_ENFORCE_LOGS", false),
 		AccessEnforceTraces:     envBool("DOCTOR_ACCESS_ENFORCE_TRACES", false),
 		AccessTeamMapping:       envString("DOCTOR_ACCESS_TEAM_MAPPING", ""),

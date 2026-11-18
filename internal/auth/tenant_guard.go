@@ -12,8 +12,9 @@ import (
 type TenantGuard struct {
 	Header        string
 	DefaultTenant string
-	// AllowedTenants is an explicit allowlist. Empty means all names are
-	// accepted unless SingleTenant is set.
+	// AllowedTenants is an explicit allowlist. An entry of "*" accepts every
+	// tenant. When both this and SingleTenant are empty the guard fails closed
+	// and accepts only DefaultTenant.
 	AllowedTenants []string
 	// SingleTenant forces every request to this tenant. Empty disables the
 	// single-tenant constraint.
@@ -67,9 +68,16 @@ func (g *TenantGuard) Wrap(next http.Handler) http.Handler {
 			writeTenantError(w, "tenant is fixed to "+g.SingleTenant)
 			return
 		}
-		if len(g.AllowedTenants) > 0 {
+		allowedTenants := g.AllowedTenants
+		if len(allowedTenants) == 0 && g.SingleTenant == "" {
+			// Fail closed: with no explicit allowlist and no single-tenant pin,
+			// accept only the configured default tenant. Deployments that need
+			// multi-tenant access must list tenants explicitly (or "*").
+			allowedTenants = []string{g.DefaultTenant}
+		}
+		if len(allowedTenants) > 0 {
 			allowed := false
-			for _, candidate := range g.AllowedTenants {
+			for _, candidate := range allowedTenants {
 				if candidate == "*" || candidate == tenant {
 					allowed = true
 					break
