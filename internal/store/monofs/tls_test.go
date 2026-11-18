@@ -14,6 +14,7 @@ func TestTLSConfigDefaultsToPlaintext(t *testing.T) {
 		"DOCTOR_MONOFS_TLS_SERVER_NAME",
 		"DOCTOR_MONOFS_TLS_REQUIRE",
 		"DOCTOR_MONOFS_TLS_INSECURE",
+		"DOCTOR_MONOFS_TOKEN",
 	} {
 		t.Setenv(key, "")
 	}
@@ -70,5 +71,71 @@ func TestBearerTokenRequireTransportSecurity(t *testing.T) {
 	}
 	if !(bearerToken{token: "t", requireTLS: true}).RequireTransportSecurity() {
 		t.Fatal("RequireTransportSecurity() = false, want true when requireTLS=true")
+	}
+}
+
+func TestTLSConfigRequiresTLSWhenTokenConfigured(t *testing.T) {
+	for _, key := range []string{
+		"DOCTOR_MONOFS_TLS_CA",
+		"DOCTOR_MONOFS_TLS_CERT",
+		"DOCTOR_MONOFS_TLS_KEY",
+		"DOCTOR_MONOFS_TLS_SERVER_NAME",
+		"DOCTOR_MONOFS_TLS_REQUIRE",
+		"DOCTOR_MONOFS_TLS_INSECURE",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("DOCTOR_MONOFS_TOKEN", "service-token")
+
+	creds, err := TLSConfigFromEnv().Credentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := creds.Info().SecurityProtocol; got != "tls" {
+		t.Fatalf("protocol with token = %q, want tls", got)
+	}
+}
+
+func TestTLSConfigExplicitLocalOptOut(t *testing.T) {
+	t.Setenv("DOCTOR_MONOFS_TOKEN", "service-token")
+	t.Setenv("DOCTOR_MONOFS_TLS_REQUIRE", "false")
+	creds, err := TLSConfigFromEnv().Credentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := creds.Info().SecurityProtocol; got != "insecure" {
+		t.Fatalf("explicit local protocol = %q, want insecure", got)
+	}
+}
+
+func TestEnsureBearerTransportRejectsSilentPlaintext(t *testing.T) {
+	t.Setenv("DOCTOR_MONOFS_TOKEN", "")
+	t.Setenv("DOCTOR_MONOFS_TLS_REQUIRE", "")
+	t.Setenv("DOCTOR_MONOFS_TLS_INSECURE", "")
+	creds, err := TLSConfigFromEnv().Credentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBearerTransport("explicit-token", creds); err == nil {
+		t.Fatal("expected bearer over implicit plaintext to fail")
+	}
+
+	t.Setenv("DOCTOR_MONOFS_TLS_INSECURE", "true")
+	creds, err = TLSConfigFromEnv().Credentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBearerTransport("explicit-token", creds); err != nil {
+		t.Fatalf("explicit insecure opt-out rejected: %v", err)
+	}
+
+	t.Setenv("DOCTOR_MONOFS_TLS_INSECURE", "")
+	t.Setenv("DOCTOR_MONOFS_TLS_REQUIRE", "false")
+	creds, err = TLSConfigFromEnv().Credentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBearerTransport("explicit-token", creds); err != nil {
+		t.Fatalf("explicit local TLS opt-out rejected: %v", err)
 	}
 }

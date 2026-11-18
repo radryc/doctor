@@ -651,7 +651,7 @@ See [alerts.md](../alerts.md#configuration) and [incidents.md](../incidents.md) 
 | `DOCTOR_MONOFS_TLS_CA` | — | CA bundle path |
 | `DOCTOR_MONOFS_TLS_CERT` / `_KEY` | — | client certificate and key for mTLS |
 | `DOCTOR_MONOFS_TLS_SERVER_NAME` | — | TLS server name override |
-| `DOCTOR_MONOFS_TLS_REQUIRE` | `false` | reject plaintext even without cert files |
+| `DOCTOR_MONOFS_TLS_REQUIRE` | `true` when `DOCTOR_MONOFS_TOKEN` is set, otherwise `false` | reject plaintext even without cert files; local development may set `false` explicitly |
 | `DOCTOR_MONOFS_TLS_INSECURE` | `false` | explicit plaintext override |
 
 ### Doctor telemetry (`internal/telemetry.LoadConfig`)

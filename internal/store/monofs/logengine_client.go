@@ -82,6 +82,9 @@ func newLogEngineClientWithOptions(ctx context.Context, routerAddr, token string
 	if err != nil {
 		return nil, fmt.Errorf("configure monofs logengine TLS: %w", err)
 	}
+	if err := ensureBearerTransport(token, creds); err != nil {
+		return nil, err
+	}
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),

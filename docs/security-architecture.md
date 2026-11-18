@@ -189,7 +189,10 @@ Residual risk: there is no rule-mutation audit trail yet.
 - `internal/store/monofs/tls.go` (`TLSConfigFromEnv`) configures TLS and mTLS via
   `DOCTOR_MONOFS_TLS_CA`, `DOCTOR_MONOFS_TLS_CERT`, `DOCTOR_MONOFS_TLS_KEY`,
   `DOCTOR_MONOFS_TLS_SERVER_NAME`, `DOCTOR_MONOFS_TLS_REQUIRE`, and `DOCTOR_MONOFS_TLS_INSECURE`.
-  When none are set, clients fall back to `insecure.NewCredentials()` unless `DOCTOR_MONOFS_TLS_REQUIRE=true`.
+  TLS is required by default when `DOCTOR_MONOFS_TOKEN` is set; otherwise clients fall back to
+  `insecure.NewCredentials()` unless `DOCTOR_MONOFS_TLS_REQUIRE=true`. A bearer token is never
+  attached to an implicit plaintext connection: explicit local opt-outs are
+  `DOCTOR_MONOFS_TLS_REQUIRE=false` or `DOCTOR_MONOFS_TLS_INSECURE=true`.
 - The file-store client sends the MonoFS token as `x-monofs-internal` metadata for node reads.
 - `LogEngineClient` accepts a token via `NewLogEngineClientWithToken` (`DOCTOR_MONOFS_TOKEN`).
 
@@ -354,8 +357,10 @@ integration, rotation, or audit.
 
 - **HTTP/gRPC TLS is configurable** for ingest, query, and rules (`DOCTOR_TLS_*`,
   `DOCTOR_GRPC_TLS_*`). It is not enabled by default.
-- **MonoFS TLS/mTLS is configurable** via `DOCTOR_MONOFS_TLS_*` (`DOCTOR_MONOFS_TLS_REQUIRE=true`
-  rejects plaintext). When unconfigured, clients fall back to plaintext for local development.
+- **MonoFS TLS/mTLS is configurable** via `DOCTOR_MONOFS_TLS_*`. TLS is required by default when a
+  MonoFS token is configured, and bearer credentials are not attached to implicit plaintext
+  connections. Local development can opt out explicitly with `DOCTOR_MONOFS_TLS_REQUIRE=false` or
+  `DOCTOR_MONOFS_TLS_INSECURE=true`.
 - **Bearer tokens travel in plaintext** when endpoints use `http://`; HTTPS endpoints use TLS, and
   Doctor no longer silently downgrades an explicit `https://` self-telemetry endpoint. The code does
   not enforce `https`.

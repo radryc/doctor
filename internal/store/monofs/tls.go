@@ -28,15 +28,41 @@ type TLSConfig struct {
 }
 
 // TLSConfigFromEnv reads the shared MonoFS TLS settings.
+//
+// TLS is required by default whenever a service token is configured
+// (DOCTOR_MONOFS_TOKEN), because bearer credentials must never traverse a
+// plaintext connection without an explicit opt-out. Local development can set
+// DOCTOR_MONOFS_TLS_REQUIRE=false or DOCTOR_MONOFS_TLS_INSECURE=true.
 func TLSConfigFromEnv() TLSConfig {
+	tokenConfigured := strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TOKEN")) != ""
 	return TLSConfig{
 		CAFile:     strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TLS_CA")),
 		CertFile:   strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TLS_CERT")),
 		KeyFile:    strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TLS_KEY")),
 		ServerName: strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TLS_SERVER_NAME")),
-		Require:    envBool("DOCTOR_MONOFS_TLS_REQUIRE", false),
+		Require:    envBool("DOCTOR_MONOFS_TLS_REQUIRE", tokenConfigured),
 		Insecure:   envBool("DOCTOR_MONOFS_TLS_INSECURE", false),
 	}
+}
+
+// ensureBearerTransport refuses to attach a bearer token to a plaintext
+// connection unless the operator explicitly opted into insecure transport or
+// explicitly disabled TLS requirement for local development.
+func ensureBearerTransport(token string, creds credentials.TransportCredentials) error {
+	if strings.TrimSpace(token) == "" || creds == nil {
+		return nil
+	}
+	if creds.Info().SecurityProtocol == "tls" {
+		return nil
+	}
+	if envBool("DOCTOR_MONOFS_TLS_INSECURE", false) {
+		return nil
+	}
+	if value := strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TLS_REQUIRE")); value != "" && !envBool("DOCTOR_MONOFS_TLS_REQUIRE", true) {
+		log.Printf("monofs TLS: sending bearer token over plaintext because DOCTOR_MONOFS_TLS_REQUIRE=%s", value)
+		return nil
+	}
+	return fmt.Errorf("refusing to send MonoFS bearer token over plaintext: set DOCTOR_MONOFS_TLS_REQUIRE=true (recommended), or explicitly opt out with DOCTOR_MONOFS_TLS_INSECURE=true for local development")
 }
 
 // Credentials builds the gRPC transport credentials. Plaintext is returned

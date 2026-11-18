@@ -125,6 +125,9 @@ func NewGRPCClient(ctx context.Context, cfg ClientConfig) (*GRPCClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure monofs TLS: %w", err)
 	}
+	if err := ensureBearerTransport(cfg.Token, creds); err != nil {
+		return nil, err
+	}
 	conn, err := grpc.NewClient(
 		cfg.RouterAddr,
 		grpc.WithTransportCredentials(creds),
