@@ -22,6 +22,8 @@ type Policy struct {
 	// AllowedHosts is an exact-host or suffix allowlist (for example
 	// "loki.monitoring.svc.cluster.local" or "*.example.com").
 	AllowedHosts []string
+	// LookupIP optionally overrides net.LookupIP (for example in unit tests).
+	LookupIP func(host string) ([]net.IP, error)
 }
 
 var blockedHosts = map[string]struct{}{
@@ -70,11 +72,29 @@ func (p Policy) Validate(rawURL string) error {
 		return nil
 	}
 	ip := net.ParseIP(host)
-	if ip == nil {
-		// Hostnames are allowed because resolving them here would introduce a
-		// DNS-rebinding gap. The allowlist is the control for named services.
-		return nil
+	if ip != nil {
+		return p.validateIP(host, ip)
 	}
+	lookup := p.LookupIP
+	if lookup == nil {
+		lookup = net.LookupIP
+	}
+	ips, err := lookup(host)
+	if err != nil {
+		return fmt.Errorf("resolve URL host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("resolve URL host %q: no addresses returned", host)
+	}
+	for _, resolved := range ips {
+		if err := p.validateIP(host, resolved); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p Policy) validateIP(host string, ip net.IP) error {
 	if ip.IsUnspecified() || ip.IsMulticast() {
 		return fmt.Errorf("URL host %q is not a unicast address", host)
 	}

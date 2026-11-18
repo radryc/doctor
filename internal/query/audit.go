@@ -75,10 +75,14 @@ func withAuditLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		recorder := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(recorder, r)
-		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		if r.Method == http.MethodHead || r.Method == http.MethodOptions {
 			return
 		}
-		if !auditPath(r.URL.Path) {
+		isReadQuery := auditReadPath(r.URL.Path)
+		if r.Method == http.MethodGet && !isReadQuery {
+			return
+		}
+		if r.Method != http.MethodGet && !auditPath(r.URL.Path) && !isReadQuery {
 			return
 		}
 		identity, _ := authz.IdentityFromContext(r.Context())
@@ -94,13 +98,29 @@ func withAuditLogging(next http.Handler) http.Handler {
 			"tenant":    strings.TrimSpace(r.URL.Query().Get("tenant")),
 			"remote":    r.RemoteAddr,
 		}
+		if isReadQuery {
+			event["action"] = "read"
+		}
 		writeAudit(event)
 	})
+}
+
+func auditReadPath(path string) bool {
+	for _, prefix := range []string{
+		"/v1/logs", "/v1/traces", "/v1/sql/query",
+		"/loki/api/v1/query", "/loki/api/v1/query_range",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func auditPath(path string) bool {
 	for _, prefix := range []string{
 		"/v1/dashboards", "/v1/rules", "/v1/alerts", "/v1/federation",
+		"/v1/incidents", "/v1/alert-sets", "/v1/incident-policy", "/v1/postmortem-engines",
 		"/v1/guardian", "/v1/proxy", "/v1/services",
 	} {
 		if strings.HasPrefix(path, prefix) {
@@ -126,6 +146,7 @@ func writeAudit(event map[string]any) {
 			}
 			file, openErr := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 			if openErr != nil {
+				log.Printf("audit_log_open_error path=%q err=%v audit=%s", path, openErr, payload)
 				return
 			}
 			auditFile = file

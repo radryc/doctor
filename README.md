@@ -19,6 +19,9 @@ The current docs are derived from the source and updated with the code:
 - [Rules and dashboards](docs/logical-flows/rules-dashboards.md)
 - [UI flow](docs/logical-flows/ui.md)
 - [Alerts](docs/alerts.md)
+- [Incidents and postmortems](docs/incidents.md)
+- [Receiver plugins](docs/receiver-plugins.md)
+- [Sentinel receiver spec](docs/sentinel-receiver-spec.md)
 - [Partition quotas](docs/partition-quotas.md)
 - [SQL console syntax](docs/sql-console-syntax.md)
 - [Security architecture](docs/security-architecture.md)
@@ -30,9 +33,11 @@ The current docs are derived from the source and updated with the code:
 | `doctor-ingest` | OTLP gRPC/HTTP receiver, privacy filter, MonoFS writer |
 | `doctor-query` | Prometheus/Loki/Tempo/native APIs, UI, proxy, federation query plane |
 | `doctor-rules` | Recording-rule scheduler/evaluator |
+| `doctor-sentinel` | Alert evaluation, routing, delivery, and incident/postmortem service |
 | `doctor-federation-controller` | Builds AWS federation catalogs from Guardian |
 | `doctor-federation-build` | Offline catalog build CLI |
 | `doctor-federation-publish` | Publish a catalog snapshot |
+| `doctor-loadgen` | OTLP/query load-generation CLI |
 
 ## Build and test
 
@@ -54,9 +59,10 @@ make image-all MONOFS_DIR=../monofs
 
 | Service | Required |
 |---|---|
-| `doctor-ingest` | `DOCTOR_MONOFS_LOGENGINE_ADDR`, `DOCTOR_PRIVACY_HMAC_KEY`, `DOCTOR_INGEST_AUTH_TOKEN` |
+| `doctor-ingest` | `DOCTOR_MONOFS_LOGENGINE_ADDR`, `DOCTOR_PRIVACY_HMAC_KEY`, `DOCTOR_INGEST_TOKENS_FILE` (or `DOCTOR_INGEST_AUTH_TOKEN`) |
 | `doctor-query` | `DOCTOR_MONOFS_LOGENGINE_ADDR` |
-| `doctor-rules` | `DOCTOR_MONOFS_LOGENGINE_ADDR`, `DOCTOR_MONOFS_TOKEN`, `DOCTOR_RULES_API_TOKEN` |
+| `doctor-rules` | `DOCTOR_MONOFS_LOGENGINE_ADDR`, `DOCTOR_MONOFS_TOKEN`, `DOCTOR_RULES_TOKENS_FILE` (or `DOCTOR_RULES_API_TOKEN`) |
+| `doctor-sentinel` | none for in-memory dev; `DOCTOR_MONOFS_LOGENGINE_ADDR` + `DOCTOR_MONOFS_TOKEN` for durable MonoFS state |
 
 Authentication and access enforcement are opt-in and default to observe/open. Read
 [security-architecture.md](docs/security-architecture.md) before exposing any service to a network.

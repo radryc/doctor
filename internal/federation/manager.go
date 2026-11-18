@@ -29,19 +29,22 @@ type Options struct {
 	BreakerThreshold     int
 	BreakerCooldown      time.Duration
 	MetadataTTL          time.Duration
-	Timeout              time.Duration
-	StaleAfter           time.Duration
-	Source               string
-	ClientFactory        ClientFactory
-	TokenResolver        TokenResolver
-	Logger               *log.Logger
+	// DiscoveryLimit caps labels/metrics discovery results. Zero uses 10000.
+	DiscoveryLimit int
+	Timeout        time.Duration
+	StaleAfter     time.Duration
+	Source         string
+	ClientFactory  ClientFactory
+	TokenResolver  TokenResolver
+	Logger         *log.Logger
 }
 
 type managerState struct {
-	catalog  *Catalog
-	planner  *Planner
-	source   string
-	loadedAt time.Time
+	catalog     *Catalog
+	planner     *Planner
+	metricIndex []awsstore.MetricDescriptor
+	source      string
+	loadedAt    time.Time
 }
 
 // Manager implements proxy.AWSClient by resolving a query to a bounded set of
@@ -59,6 +62,7 @@ type Manager struct {
 	breakerThreshold     int
 	breakerCooldown      time.Duration
 	metadataTTL          time.Duration
+	discoveryLimit       int
 	logger               *log.Logger
 
 	inflight chan struct{}
@@ -148,16 +152,18 @@ func NewManager(catalog *Catalog, opts Options) *Manager {
 		breakerThreshold:     opts.BreakerThreshold,
 		breakerCooldown:      opts.BreakerCooldown,
 		metadataTTL:          opts.MetadataTTL,
+		discoveryLimit:       opts.DiscoveryLimit,
 		logger:               opts.Logger,
 		inflight:             make(chan struct{}, opts.MaxInflight),
 		pool:                 newClientPool(opts.ClientPoolMax, opts.ClientIdleTTL),
 		breakers:             make(map[string]*targetBreaker),
 	}
 	manager.state.Store(&managerState{
-		catalog:  catalog,
-		planner:  NewPlanner(catalog, opts.MaxFanout),
-		source:   strings.TrimSpace(opts.Source),
-		loadedAt: time.Now().UTC(),
+		catalog:     catalog,
+		planner:     NewPlanner(catalog, opts.MaxFanout),
+		metricIndex: buildMetricIndex(catalog),
+		source:      strings.TrimSpace(opts.Source),
+		loadedAt:    time.Now().UTC(),
 	})
 	return manager
 }
@@ -213,10 +219,11 @@ func (m *Manager) Reload(catalog *Catalog, source string) error {
 		return errors.New("federation catalog is nil")
 	}
 	next := &managerState{
-		catalog:  catalog,
-		planner:  NewPlanner(catalog, m.maxFanout),
-		source:   strings.TrimSpace(source),
-		loadedAt: time.Now().UTC(),
+		catalog:     catalog,
+		planner:     NewPlanner(catalog, m.maxFanout),
+		metricIndex: buildMetricIndex(catalog),
+		source:      strings.TrimSpace(source),
+		loadedAt:    time.Now().UTC(),
 	}
 	previous := m.state.Swap(next)
 	m.invalidateDiscoveryCache()
@@ -461,30 +468,31 @@ func (m *Manager) planWith(state *managerState, ctx context.Context, q Query) ([
 	return plan.Targets, nil
 }
 
-// ListMetrics returns the union of cached metric descriptors. A small catalog
-// without cached names falls back to live discovery; fleet-scale catalogs must
-// be populated by the catalog builder.
+// ListMetrics returns the union of cached metric descriptors. A catalog
+// without cached metadata falls back to live discovery when it is small enough;
+// fleet-scale catalogs must be populated by the catalog builder.
 func (m *Manager) ListMetrics(ctx context.Context, namespace, metric string) ([]awsstore.MetricDescriptor, error) {
 	state := m.current()
 	if state == nil || state.catalog == nil || state.catalog.Len() == 0 {
 		return nil, errors.New("aws federation is disabled")
 	}
+	if len(state.metricIndex) > 0 {
+		out := make([]awsstore.MetricDescriptor, 0, len(state.metricIndex))
+		for _, descriptor := range state.metricIndex {
+			if namespace != "" && descriptor.Namespace != namespace {
+				continue
+			}
+			if metric != "" && descriptor.MetricName != metric {
+				continue
+			}
+			out = append(out, descriptor)
+		}
+		return m.capMetricDescriptors(out), nil
+	}
+
 	targets := state.catalog.Targets()
 	if len(targets) == 0 {
 		return nil, nil
-	}
-
-	cached := make([]awsstore.MetricDescriptor, 0)
-	for _, target := range targets {
-		for _, name := range target.MetricNames {
-			if metric != "" && name != metric {
-				continue
-			}
-			cached = append(cached, awsstore.MetricDescriptor{MetricName: name, Region: target.Region, Account: target.Account})
-		}
-	}
-	if len(cached) > 0 {
-		return dedupeMetricDescriptors(cached), nil
 	}
 	if len(targets) > state.planner.MaxFanout() {
 		return nil, nil
@@ -511,12 +519,68 @@ func (m *Manager) ListMetrics(ctx context.Context, namespace, metric string) ([]
 			if out[i].Account == "" {
 				out[i].Account = result.target.Account
 			}
+			if out[i].Region == "" {
+				out[i].Region = result.target.Region
+			}
 		}
 	}
 	if len(out) == 0 && failures == len(targets) {
 		return nil, fmt.Errorf("aws federation: all %d targets failed ListMetrics", failures)
 	}
-	return dedupeMetricDescriptors(out), nil
+	return m.capMetricDescriptors(dedupeMetricDescriptors(out)), nil
+}
+
+func (m *Manager) capMetricDescriptors(in []awsstore.MetricDescriptor) []awsstore.MetricDescriptor {
+	limit := m.discoveryLimit
+	if limit <= 0 {
+		limit = 10000
+	}
+	if len(in) <= limit {
+		return in
+	}
+	if m.logger != nil {
+		m.logger.Printf("federation: ListMetrics truncated at %d of %d descriptors; use namespace/metric filters or narrow the catalog", limit, len(in))
+	}
+	return in[:limit]
+}
+
+// buildMetricIndex precomputes the deduped descriptor list once per catalog
+// load. ListMetrics then filters an in-memory index instead of scanning every
+// target on each Grafana autocomplete request.
+func buildMetricIndex(catalog *Catalog) []awsstore.MetricDescriptor {
+	if catalog == nil {
+		return nil
+	}
+	targets := catalog.Targets()
+	out := make([]awsstore.MetricDescriptor, 0)
+	for _, target := range targets {
+		if len(target.MetricDescriptors) > 0 {
+			for _, descriptor := range target.MetricDescriptors {
+				if descriptor.MetricName == "" {
+					continue
+				}
+				if descriptor.Account == "" {
+					descriptor.Account = target.Account
+				}
+				if descriptor.Region == "" {
+					descriptor.Region = target.Region
+				}
+				out = append(out, descriptor)
+			}
+			continue
+		}
+		for _, name := range target.MetricNames {
+			if name == "" {
+				continue
+			}
+			out = append(out, awsstore.MetricDescriptor{
+				MetricName: name,
+				Region:     target.Region,
+				Account:    target.Account,
+			})
+		}
+	}
+	return dedupeMetricDescriptors(out)
 }
 
 // ListServices returns the union of cached X-Ray services.
@@ -1143,6 +1207,9 @@ func dedupeMetricDescriptors(in []awsstore.MetricDescriptor) []awsstore.MetricDe
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Account != out[j].Account {
 			return out[i].Account < out[j].Account
+		}
+		if out[i].Region != out[j].Region {
+			return out[i].Region < out[j].Region
 		}
 		if out[i].Namespace == out[j].Namespace {
 			return out[i].MetricName < out[j].MetricName

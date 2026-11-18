@@ -54,6 +54,9 @@
 }
 
 .probe-kind--type {
-  background: var(--ui-hover);
-  color: var(--ui-muted);
+  background: transparent;
+  border: 1px solid var(--ui-border);
+  color: var(--ui-faint);
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }

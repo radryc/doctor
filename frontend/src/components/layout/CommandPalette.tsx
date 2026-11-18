@@ -87,6 +87,15 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         run: go("/"),
       },
       {
+        id: "nav-incidents",
+        group: "Go to",
+        label: "Incidents",
+        hint: "g i",
+        keywords: "incident ack mitigate resolve postmortem alert sets",
+        icon: LayoutDashboard,
+        run: go("/incidents"),
+      },
+      {
         id: "nav-dashboards",
         group: "Go to",
         label: "Dashboards",

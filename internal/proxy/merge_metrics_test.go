@@ -154,9 +154,12 @@ func TestExtractPrometheusStringList(t *testing.T) {
 	}
 }
 
-func TestExtractPrometheusSeriesDefaultsSource(t *testing.T) {
+func TestExtractPrometheusSeriesDoesNotGuessSource(t *testing.T) {
 	series := ExtractPrometheusSeries(map[string]any{"data": []any{map[string]any{"__name__": "x"}}})
-	if len(series) != 1 || series[0][LabelSource] != SourceAWS {
-		t.Fatalf("series = %#v, want source=aws default", series)
+	if len(series) != 1 {
+		t.Fatalf("series = %#v", series)
+	}
+	if _, ok := series[0][LabelSource]; ok {
+		t.Fatalf("series = %#v, want no injected source", series)
 	}
 }

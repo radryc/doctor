@@ -33,7 +33,9 @@ main.tsx
 
 | Route | Page | Primary data sources |
 |---|---|---|
-| `/` | `DashboardPage` (on-call triage) | `/v1/guardian/overview` |
+| `/` | `DashboardPage` (on-call triage) | `/v1/guardian/overview`, `/v1/incidents` |
+| `/incidents` | `IncidentsPage` (board, alert sets, policy, postmortems) | `/v1/incidents`, `/v1/alert-sets`, `/v1/incident-policy`, `/v1/postmortem-engines` |
+| `/incidents/:id` | `IncidentDetailPage` | `/v1/incidents/{id}`, `/v1/incidents/{id}/postmortem` |
 | `/dashboards` | `DashboardsPage` (browser) | `/v1/dashboards` |
 | `/dashboards/:id` | `DashboardsPage` (viewer/editor) | `/v1/dashboards/{tenant}/{id}`, widget queries |
 | `/services` | `ServicesPage` catalog | `/v1/services/discover`, Guardian overview for partitions |
@@ -41,16 +43,19 @@ main.tsx
 | `/federation` | `FederationCatalogPage` | `/v1/federation/status`, `/v1/federation/targets` |
 | `/probes` | `ProbesPage` | `/v1/guardian/probes` |
 | `/rules` | `RecordingRulesPage` | `/v1/rules`, `/v1/rules/status`, `/v1/rules/{tenant}/{group}`, evaluate |
+| `/quota` | `QuotaPage` | `/v1/quota` |
+| `/alerts`, `/alerts/*` | `AlertsPage` | `/v1/alerts*`, `/v1/alerts/inventory`, `/v1/alerts/routing/overview` |
 | `/traces` | `TracesPage` | `/v1/traces/recent`, `/v1/logs/services`, `/v1/traces/{id}` |
 | `/logs` | `LogsPage` | `/v1/logs/search`, `/v1/logs/services` |
 | `/metrics` | `MetricsPage` | Prometheus labels/query APIs, Guardian overview, log services |
+| `/sql` | `SqlPage` | `/v1/sql/query` |
 | `/fleet` | `FleetDashboard` | Guardian overview/topology/health/events |
 | `/partition/:name` | `PartitionViewPage` | Guardian topology/health/events |
 | `/partition/:name/assets` | `PartitionAssetsPage` | Guardian topology, Prometheus, logs, traces, Tempo metrics |
+| `/partition/:name/telemetry` | `PartitionAssetsLegacyPage` | legacy partition telemetry view |
 | `*` | redirect `/` | |
 
-`FleetViewPage.tsx` exists but is not referenced by `App.tsx`; it is dead UI code. `FleetView.tsx`
-is a shared component used by `FleetDashboard` and the partition asset pages.
+`FleetView.tsx` is a shared component used by `FleetDashboard` and the partition asset pages.
 
 ## 3. Page flows
 
@@ -61,7 +66,19 @@ is a shared component used by `FleetDashboard` and the partition asset pages.
   by tone, failing assets, then attention assets.
 - Shows summary cards, pie/bar charts, partition triage rows.
 - “Copy triage” builds deep links to partition assets/logs/traces/metrics and copies them.
+- Shows an **Active incidents** panel fed by `/v1/incidents`, linking to `/incidents`.
 - Links to `/fleet` for the full fleet view.
+
+### 3.1.1 Incidents (`/incidents`, `/incidents/:id`)
+
+- Board filtered by partition and state: open, acknowledged, mitigated, resolved.
+- Quick actions: ack/unack, mitigate (with override note), resolve, reopen.
+- Detail page: timeline, member alerts, mitigation countdown, postmortem tab
+  with agent analysis, draft editing, analyze/publish, and engine metadata.
+- Alert sets tab: matcher editor, groupBy, receiver selection, analysis provider,
+  postmortem engine, and live matching preview.
+- Partition policy tab: `mitigateDelay` (default 30m), auto-mitigate,
+  auto-resolve, resume/reopen windows, analysis and publishing defaults.
 
 ### 3.2 Dashboards (`DashboardsPage`)
 
@@ -227,7 +244,7 @@ health rules, traces, logs, graphs).
 
 - No frontend tests, lint script, or CI build step. The `frontend` npm scripts are dev/build/preview
   only.
-- `FleetViewPage.tsx` is unused.
+- `TopBar` and `AppLayout` links point to `/traces`, `/logs`, `/metrics`, `/services`, `/dashboards`, `/rules`, `/alerts`, `/incidents`, `/quota`, `/sql`, `/fleet`, `/probes`, `/federation`.
 - `PartitionAssetsPage`, `HubDetailView`, and `FleetDashboard` contain duplicated fetching and
   asset-detail logic; many effects are independent and can issue overlapping requests.
 - Several pages fall back from native data to Prometheus/Tempo/log searches with heuristic metric

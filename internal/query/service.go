@@ -21,6 +21,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/doctor/internal/access"
+	"github.com/radryc/doctor/internal/auth"
 	"github.com/radryc/doctor/internal/federation"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/quota"
@@ -45,28 +46,29 @@ type LogEngineBackend interface {
 }
 
 type Service struct {
-	defaultTenant    string
-	tenantHeader     string
-	guardianURL      string
-	guardianAPIURL   string
-	defaultPartition string
-	logEngine        LogEngineBackend
-	aws              proxy.AWSClient
-	awsViaRouter     bool
-	gcp              proxy.GCPClient
-	gcpViaRouter     bool
-	proxyRouter      *proxy.Router
-	guardianClient   *http.Client
-	rulesProxy       *httputil.ReverseProxy
-	sentinelProxy    *httputil.ReverseProxy
-	rulesToken       string
-	policyGate       *access.PolicyGate
-	dashboardStore   DashboardStore
-	quotaEngine      *quota.Engine
-	quotaProvider    *quota.Provider
-	ingestURL        string
-	ingestToken      string
-	ingestClient     *http.Client
+	defaultTenant       string
+	tenantHeader        string
+	guardianURL         string
+	guardianAPIURL      string
+	defaultPartition    string
+	logEngine           LogEngineBackend
+	aws                 proxy.AWSClient
+	awsViaRouter        bool
+	gcp                 proxy.GCPClient
+	gcpViaRouter        bool
+	proxyRouter         *proxy.Router
+	guardianClient      *http.Client
+	rulesProxy          *httputil.ReverseProxy
+	sentinelProxy       *httputil.ReverseProxy
+	rulesToken          string
+	rulesIdentitySecret string
+	policyGate          *access.PolicyGate
+	dashboardStore      DashboardStore
+	quotaEngine         *quota.Engine
+	quotaProvider       *quota.Provider
+	ingestURL           string
+	ingestToken         string
+	ingestClient        *http.Client
 
 	traceDiscoveryMu       sync.Mutex
 	traceDiscoveryCacheTTL time.Duration
@@ -407,6 +409,12 @@ func (s *Service) SetSentinelURL(raw string) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "sentinel service unavailable: " + err.Error()})
 	}
 	s.sentinelProxy = proxy
+}
+
+// SetRulesIdentitySecret configures the HMAC secret used to forward the
+// caller's verified identity to doctor-rules.
+func (s *Service) SetRulesIdentitySecret(secret string) {
+	s.rulesIdentitySecret = strings.TrimSpace(secret)
 }
 
 // SetRulesToken configures the service credential the query proxy presents to
@@ -830,6 +838,12 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/rules/", s.handleRulesProxy)
 	mux.HandleFunc("/v1/alerts", s.handleSentinelProxy)
 	mux.HandleFunc("/v1/alerts/", s.handleSentinelProxy)
+	mux.HandleFunc("/v1/incidents", s.handleSentinelProxy)
+	mux.HandleFunc("/v1/incidents/", s.handleSentinelProxy)
+	mux.HandleFunc("/v1/alert-sets", s.handleSentinelProxy)
+	mux.HandleFunc("/v1/alert-sets/", s.handleSentinelProxy)
+	mux.HandleFunc("/v1/incident-policy", s.handleSentinelProxy)
+	mux.HandleFunc("/v1/postmortem-engines", s.handleSentinelProxy)
 	// Alertmanager v2 compatibility for Grafana's Alertmanager data source.
 	mux.HandleFunc("/api/v2/status", s.handleSentinelProxy)
 	mux.HandleFunc("/api/v2/alerts", s.handleSentinelProxy)
@@ -923,6 +937,20 @@ func (s *Service) handleRulesProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
+	// Forward the caller's identity to doctor-rules so per-partition ownership
+	// is enforced there too. The service token remains as the transport
+	// credential; the signed identity is what the authorizer uses.
+	r.Header.Del(auth.InternalIdentityHeader)
+	if s.rulesIdentitySecret != "" {
+		if identity, ok := authz.IdentityFromContext(r.Context()); ok && !identity.IsAnonymous() {
+			token, err := auth.SignInternalIdentity(s.rulesIdentitySecret, identity, time.Minute, time.Now().UTC())
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sign internal identity: " + err.Error()})
+				return
+			}
+			r.Header.Set(auth.InternalIdentityHeader, token)
+		}
+	}
 	s.rulesProxy.ServeHTTP(w, r)
 }
 
@@ -992,6 +1020,11 @@ func (s *Service) handleSentinelProxy(w http.ResponseWriter, r *http.Request) {
 func sentinelRequestPartition(r *http.Request) string {
 	if partition := strings.TrimSpace(r.URL.Query().Get("partition")); partition != "" {
 		return partition
+	}
+	// Alert-set paths carry the set name, not a partition. The partition is
+	// always supplied as a query parameter by the UI and is handled above.
+	if strings.HasPrefix(r.URL.Path, "/v1/alert-sets/") {
+		return ""
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/alerts/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")

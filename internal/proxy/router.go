@@ -550,18 +550,41 @@ func gatedSignal(backend Backend) access.Signal {
 	return access.SignalMetrics
 }
 
+// QueryMeta describes how a federated metrics query was assembled.
+type QueryMeta struct {
+	// Aggregation is "global" when Doctor merged per-shard inner results into
+	// one value, "per-shard" when the response still contains backend/shard
+	// series, and "" for a single-backend query.
+	Aggregation string
+	// Backends is the number of backends that answered successfully.
+	Backends int
+}
+
 // MetricsInstant fans an instant PromQL query out and merges the results.
 func (r *Router) MetricsInstant(ctx context.Context, tenant, query string, at time.Time) (map[string]any, []Warning, error) {
-	return r.metricsInstant(ctx, tenant, query, at, "")
+	data, warnings, _, err := r.MetricsInstantWithMeta(ctx, tenant, query, at)
+	return data, warnings, err
 }
 
 // MetricsInstantForPartition is MetricsInstant with a pushed-down partition
 // filter. The matcher is provider-specific (Doctor/AWS/GCP).
 func (r *Router) MetricsInstantForPartition(ctx context.Context, tenant, query string, at time.Time, partition string) (map[string]any, []Warning, error) {
+	data, warnings, _, err := r.MetricsInstantForPartitionWithMeta(ctx, tenant, query, at, partition)
+	return data, warnings, err
+}
+
+// MetricsInstantWithMeta is MetricsInstant plus federation metadata.
+func (r *Router) MetricsInstantWithMeta(ctx context.Context, tenant, query string, at time.Time) (map[string]any, []Warning, QueryMeta, error) {
+	return r.metricsInstant(ctx, tenant, query, at, "")
+}
+
+// MetricsInstantForPartitionWithMeta is MetricsInstantForPartition plus
+// federation metadata.
+func (r *Router) MetricsInstantForPartitionWithMeta(ctx context.Context, tenant, query string, at time.Time, partition string) (map[string]any, []Warning, QueryMeta, error) {
 	return r.metricsInstant(ctx, tenant, query, at, partition)
 }
 
-func (r *Router) metricsInstant(ctx context.Context, tenant, query string, at time.Time, partition string) (map[string]any, []Warning, error) {
+func (r *Router) metricsInstant(ctx context.Context, tenant, query string, at time.Time, partition string) (map[string]any, []Warning, QueryMeta, error) {
 	return r.metricsQuery(ctx, tenant, query, "vector", partition, func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error) {
 		return upstream.PromInstant(ctx, tenant, query, at)
 	})
@@ -569,15 +592,28 @@ func (r *Router) metricsInstant(ctx context.Context, tenant, query string, at ti
 
 // MetricsRange fans a range PromQL query out and merges the results.
 func (r *Router) MetricsRange(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration) (map[string]any, []Warning, error) {
-	return r.metricsRange(ctx, tenant, query, start, end, step, "")
+	data, warnings, _, err := r.MetricsRangeWithMeta(ctx, tenant, query, start, end, step)
+	return data, warnings, err
 }
 
 // MetricsRangeForPartition is MetricsRange with a pushed-down partition filter.
 func (r *Router) MetricsRangeForPartition(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, partition string) (map[string]any, []Warning, error) {
+	data, warnings, _, err := r.MetricsRangeForPartitionWithMeta(ctx, tenant, query, start, end, step, partition)
+	return data, warnings, err
+}
+
+// MetricsRangeWithMeta is MetricsRange plus federation metadata.
+func (r *Router) MetricsRangeWithMeta(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration) (map[string]any, []Warning, QueryMeta, error) {
+	return r.metricsRange(ctx, tenant, query, start, end, step, "")
+}
+
+// MetricsRangeForPartitionWithMeta is MetricsRangeForPartition plus federation
+// metadata.
+func (r *Router) MetricsRangeForPartitionWithMeta(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, partition string) (map[string]any, []Warning, QueryMeta, error) {
 	return r.metricsRange(ctx, tenant, query, start, end, step, partition)
 }
 
-func (r *Router) metricsRange(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, partition string) (map[string]any, []Warning, error) {
+func (r *Router) metricsRange(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, partition string) (map[string]any, []Warning, QueryMeta, error) {
 	return r.metricsQuery(ctx, tenant, query, "matrix", partition, func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error) {
 		return upstream.PromRange(ctx, tenant, query, start, end, step)
 	})
@@ -747,14 +783,35 @@ func (r *Router) metricsQuery(
 	ctx context.Context,
 	tenant, query, defaultType, partition string,
 	exec func(ctx context.Context, upstream MetricsUpstream, query string) (map[string]any, error),
-) (map[string]any, []Warning, error) {
+) (map[string]any, []Warning, QueryMeta, error) {
+	meta := QueryMeta{}
 	stripped, mode := AWSQueryMode(query)
 	providerKind := KindAWS
 	if gcpStripped, gcpMode := GCPQueryMode(query); gcpMode != AWSQueryNone {
 		stripped, mode = gcpStripped, gcpMode
 		providerKind = KindGCP
 	}
-	criteria := parseSelectorCriteria(query)
+	criteriaQuery := query
+	if mode != AWSQueryNone {
+		criteriaQuery = stripped
+	}
+	criteria := parseSelectorCriteria(criteriaQuery)
+
+	// Only an unscoped query or a single-provider query can use pushdown
+	// aggregation. A `source=~"aws|doctor"` mixed query has different
+	// selectors per backend and stays per-shard.
+	var aggregation *AggregationPlan
+	aggregationCandidate := false
+	switch mode {
+	case AWSQueryNone:
+		if plan, ok, err := PlanFederatedAggregation(query); err == nil && ok {
+			aggregation, aggregationCandidate = plan, true
+		}
+	case AWSQueryOnly:
+		if plan, ok, err := PlanFederatedAggregation(stripped); err == nil && ok {
+			aggregation, aggregationCandidate = plan, true
+		}
+	}
 	var (
 		primary  []metricsTarget
 		fallback []metricsTarget
@@ -783,6 +840,11 @@ func (r *Router) metricsQuery(
 				target.query = stripped
 			}
 		}
+		if aggregationCandidate {
+			// Push only the inner expression; the outer aggregate is applied
+			// once, after the healthy shards have been merged.
+			target.query = aggregation.Inner
+		}
 		// Push the selected partition into federated providers' native labels so
 		// the backend does the filtering instead of returning every series.
 		// Local storage mixes native (guardian_partition) and AWS/GCP-ingested
@@ -798,6 +860,16 @@ func (r *Router) metricsQuery(
 			continue
 		}
 		primary = append(primary, target)
+	}
+
+	// A local-only deployment keeps the original query so fast paths such as
+	// count by (__name__) remain active; there is nothing to merge.
+	if aggregationCandidate && local != nil && len(primary) == 0 && len(fallback) == 0 {
+		aggregationCandidate = false
+		local.query = query
+		if mode == AWSQueryOnly {
+			local.query = stripped
+		}
 	}
 
 	var capWarnings []Warning
@@ -870,37 +942,42 @@ func (r *Router) metricsQuery(
 		localData  map[string]any
 		localEmpty = true
 		remoteData []PromRemote
+		successful int
+		failed     int
 	)
 
 	if local != nil {
 		results, err := run([]metricsTarget{*local})
 		if err != nil {
-			return nil, nil, err
+			return nil, warnings, meta, err
 		}
 		if results[0].err != nil {
-			return nil, nil, results[0].err
+			return nil, warnings, meta, results[0].err
 		}
 		localData = results[0].data
 		localEmpty = PrometheusResultEmpty(localData)
+		successful++
 	}
 
 	if len(primary) > 0 {
 		results, err := run(primary)
 		if err != nil {
-			return nil, nil, err
+			return nil, warnings, meta, err
 		}
 		for _, res := range results {
 			if res.err != nil {
 				r.noteBackendFailure(res.target.backend, res.err)
+				failed++
 				// A pure AWS query has no local fallback. Propagate the scope
 				// error so handlers can return 422 instead of an empty 200.
 				if mode == AWSQueryOnly && len(primary) == 1 {
-					return nil, warnings, res.err
+					return nil, warnings, meta, res.err
 				}
 				warnings = append(warnings, Warning{Backend: res.target.backend.Name, Signal: SignalMetrics, Message: res.err.Error()})
 				continue
 			}
 			r.recordSuccess(res.target.backend.Name)
+			successful++
 			remoteData = append(remoteData, PromRemote{
 				Source:  sourceForKind(res.target.backend.Kind),
 				Backend: res.target.backend.Name,
@@ -912,15 +989,17 @@ func (r *Router) metricsQuery(
 	if len(fallback) > 0 && localEmpty {
 		results, err := run(fallback)
 		if err != nil {
-			return nil, nil, err
+			return nil, warnings, meta, err
 		}
 		for _, res := range results {
 			if res.err != nil {
 				r.noteBackendFailure(res.target.backend, res.err)
+				failed++
 				warnings = append(warnings, Warning{Backend: res.target.backend.Name, Signal: SignalMetrics, Message: res.err.Error()})
 				continue
 			}
 			r.recordSuccess(res.target.backend.Name)
+			successful++
 			remoteData = append(remoteData, PromRemote{
 				Source:  sourceForKind(res.target.backend.Kind),
 				Backend: res.target.backend.Name,
@@ -930,7 +1009,41 @@ func (r *Router) metricsQuery(
 	}
 
 	merged := MergePrometheusQueryData(localData, defaultType, remoteData...)
-	return merged, warnings, nil
+	meta.Backends = successful
+	switch {
+	case aggregationCandidate && failed > 0:
+		// Never publish a global aggregate from a partial fleet. An understated
+		// sum or a missing max shard is worse than a clearly marked per-shard
+		// result.
+		meta.Aggregation = "per-shard"
+		warnings = append(warnings, Warning{
+			Backend: "router",
+			Signal:  SignalMetrics,
+			Message: "federated aggregation skipped because one or more backends failed; results are per-shard",
+		})
+	case aggregationCandidate && successful > 0:
+		aggregated, aggErr := aggregation.Apply(merged)
+		switch {
+		case aggErr == nil:
+			merged = aggregated
+			if successful > 1 {
+				meta.Aggregation = "global"
+			}
+		case errors.Is(aggErr, ErrUnsupportedFederatedAggregation):
+			meta.Aggregation = "per-shard"
+			warnings = append(warnings, Warning{
+				Backend: "router",
+				Signal:  SignalMetrics,
+				Message: "federated aggregation is not supported for this result shape; results are per-shard",
+			})
+		default:
+			return nil, warnings, meta, aggErr
+		}
+	case successful > 1:
+		meta.Aggregation = "per-shard"
+	}
+	return merged, warnings, meta, nil
+
 }
 
 func (r *Router) snapshot() []Backend {

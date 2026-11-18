@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,44 +21,45 @@ import (
 type proxyQueryResult struct {
 	data     map[string]any
 	warnings []proxy.Warning
+	meta     proxy.QueryMeta
 }
 
 // metricsInstantViaRouter coalesces identical in-flight instant queries. The
 // key includes the identity filters because the result is filtered in place
 // per request. A one-second bucket lets concurrent clients asking for "now"
 // share a single backend fan-out without making the result visibly stale.
-func (s *Service) metricsInstantViaRouter(ctx context.Context, tenant, query string, at time.Time, identity signalIdentity) (map[string]any, []proxy.Warning, error) {
+func (s *Service) metricsInstantViaRouter(ctx context.Context, tenant, query string, at time.Time, identity signalIdentity) (map[string]any, []proxy.Warning, proxy.QueryMeta, error) {
 	key := fmt.Sprintf("instant|%s|%s|%s|%s|%s|%d", tenant, identity.Partition, identity.Intent, identity.Asset, query, at.Unix())
 	result, err := s.queryFlight.Do(ctx, key, func(callCtx context.Context) (proxyQueryResult, error) {
-		data, warnings, err := s.proxyRouter.MetricsInstantForPartition(callCtx, tenant, query, at, identity.Partition)
+		data, warnings, meta, err := s.proxyRouter.MetricsInstantForPartitionWithMeta(callCtx, tenant, query, at, identity.Partition)
 		if err != nil {
 			return proxyQueryResult{}, err
 		}
-		return proxyQueryResult{data: data, warnings: warnings}, nil
+		return proxyQueryResult{data: data, warnings: warnings, meta: meta}, nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, proxy.QueryMeta{}, err
 	}
-	return result.data, result.warnings, nil
+	return result.data, result.warnings, result.meta, nil
 }
 
-func (s *Service) metricsRangeViaRouter(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, identity signalIdentity) (map[string]any, []proxy.Warning, error) {
+func (s *Service) metricsRangeViaRouter(ctx context.Context, tenant, query string, start, end time.Time, step time.Duration, identity signalIdentity) (map[string]any, []proxy.Warning, proxy.QueryMeta, error) {
 	key := fmt.Sprintf("range|%s|%s|%s|%s|%s|%d|%d|%d", tenant, identity.Partition, identity.Intent, identity.Asset, query, start.Unix(), end.Unix(), step.Nanoseconds())
 	result, err := s.queryFlight.Do(ctx, key, func(callCtx context.Context) (proxyQueryResult, error) {
-		data, warnings, err := s.proxyRouter.MetricsRangeForPartition(callCtx, tenant, query, start, end, step, identity.Partition)
+		data, warnings, meta, err := s.proxyRouter.MetricsRangeForPartitionWithMeta(callCtx, tenant, query, start, end, step, identity.Partition)
 		if err != nil {
 			return proxyQueryResult{}, err
 		}
-		return proxyQueryResult{data: data, warnings: warnings}, nil
+		return proxyQueryResult{data: data, warnings: warnings, meta: meta}, nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, proxy.QueryMeta{}, err
 	}
-	return result.data, result.warnings, nil
+	return result.data, result.warnings, result.meta, nil
 }
 
 func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.Request, query string, at time.Time) {
-	data, warnings, err := s.metricsInstantViaRouter(r.Context(), s.tenantFromRequest(r), query, at, identityFromRequest(r))
+	data, warnings, meta, err := s.metricsInstantViaRouter(r.Context(), s.tenantFromRequest(r), query, at, identityFromRequest(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, proxy.ErrScopeRequired), errors.Is(err, proxy.ErrTooBroad):
@@ -69,6 +72,7 @@ func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.
 		return
 	}
 	writeProxyWarnings(w, warnings)
+	writeAggregationHeader(w, meta)
 	filtered := s.filterPrometheusDataForRequest(r, data)
 	if !s.enforceSeriesLimit(w, r, filtered) {
 		return
@@ -79,7 +83,7 @@ func (s *Service) handlePrometheusQueryViaRouter(w http.ResponseWriter, r *http.
 // handlePrometheusQueryRangeViaRouter executes a range query through the
 // multi-backend router.
 func (s *Service) handlePrometheusQueryRangeViaRouter(w http.ResponseWriter, r *http.Request, query string, start, end time.Time, step time.Duration) {
-	data, warnings, err := s.metricsRangeViaRouter(r.Context(), s.tenantFromRequest(r), query, start, end, step, identityFromRequest(r))
+	data, warnings, meta, err := s.metricsRangeViaRouter(r.Context(), s.tenantFromRequest(r), query, start, end, step, identityFromRequest(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, proxy.ErrScopeRequired), errors.Is(err, proxy.ErrTooBroad):
@@ -92,6 +96,7 @@ func (s *Service) handlePrometheusQueryRangeViaRouter(w http.ResponseWriter, r *
 		return
 	}
 	writeProxyWarnings(w, warnings)
+	writeAggregationHeader(w, meta)
 	filtered := s.filterPrometheusDataForRequest(r, data)
 	if !s.enforceSeriesLimit(w, r, filtered) {
 		return
@@ -192,6 +197,13 @@ func (s *Service) handleProxyEndpoints(w http.ResponseWriter, r *http.Request) {
 // writeProxyWarnings reports partial backend failures without failing the
 // response. Observed access denials are surfaced separately so operators can
 // audit the observe-first rollout.
+func writeAggregationHeader(w http.ResponseWriter, meta proxy.QueryMeta) {
+	if meta.Aggregation == "" {
+		return
+	}
+	w.Header().Set("X-Doctor-Federation-Aggregation", meta.Aggregation)
+}
+
 func writeProxyWarnings(w http.ResponseWriter, warnings []proxy.Warning) {
 	if len(warnings) == 0 {
 		return
@@ -310,4 +322,183 @@ func filterSpansByService(records []segment.TraceRecord, service string) []segme
 		}
 	}
 	return out
+}
+
+// handlePrometheusLabelsViaRouter implements /api/v1/labels through the
+// multi-backend router, so static and discovered Prometheus/Doctor backends
+// are visible to Grafana's label autocomplete.
+func (s *Service) handlePrometheusLabelsViaRouter(w http.ResponseWriter, r *http.Request) {
+	match := requestParams(r, "match[]")
+	start, end := prometheusDiscoveryRange(r)
+	values, warnings, err := s.proxyRouter.MetricsLabels(
+		r.Context(), s.tenantFromRequest(r), match, start, end, partitionFromRequest(r))
+	if err != nil {
+		writePrometheusDiscoveryError(w, err)
+		return
+	}
+	writeProxyWarnings(w, warnings)
+	out := append([]string(nil), values...)
+	found := false
+	for _, value := range out {
+		if value == labelSource {
+			found = true
+			break
+		}
+	}
+	if !found {
+		out = append(out, labelSource)
+	}
+	sort.Strings(out)
+	writePrometheusSuccess(w, out)
+}
+
+// handlePrometheusLabelValuesViaRouter implements
+// /api/v1/label/{name}/values through the router. The metric catalog keeps its
+// provider-priority and truncation behaviour for __name__.
+func (s *Service) handlePrometheusLabelValuesViaRouter(w http.ResponseWriter, r *http.Request) {
+	rawLabelName := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/label/"), "/values")
+	if rawLabelName == "" {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", "label name is required")
+		return
+	}
+	labelName, err := url.PathUnescape(rawLabelName)
+	if err != nil {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
+
+	sources, err := parseMetricCatalogSource(r.URL.Query().Get("source"))
+	if err != nil {
+		writePrometheusError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
+	rawSource := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+	includeOther := rawSource == "" || rawSource == "all"
+	for _, part := range strings.Split(rawSource, ",") {
+		if strings.TrimSpace(part) == "all" {
+			includeOther = true
+		}
+	}
+	search := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := parseMetricCatalogLimit(r.URL.Query().Get("limit"))
+	if limit == 0 {
+		// Bound discovery even when the caller does not send ?limit=. A 50k
+		// target catalog must not serialize every cached label value.
+		limit = metricCatalogLimit
+	}
+
+	match := requestParams(r, "match[]")
+	start, end := prometheusDiscoveryRange(r)
+	results, warnings, err := s.proxyRouter.MetricsLabelValues(
+		r.Context(), s.tenantFromRequest(r), labelName, match, start, end, partitionFromRequest(r))
+	if err != nil {
+		writePrometheusDiscoveryError(w, err)
+		return
+	}
+	writeProxyWarnings(w, warnings)
+
+	values := make(map[string]int)
+	add := func(priority int, value string) {
+		if value == "" {
+			return
+		}
+		if current, ok := values[value]; !ok || priority < current {
+			values[value] = priority
+		}
+	}
+	for _, result := range results {
+		if !metricSourceEnabled(sources, result.Source, includeOther) {
+			continue
+		}
+		add(metricSourcePriority(result.Source), result.Value)
+	}
+
+	if labelName == labelSource {
+		available := map[string]struct{}{}
+		for _, source := range s.proxyRouter.MetricSources() {
+			available[source] = struct{}{}
+		}
+		if sources.doctor {
+			if _, ok := available[proxy.SourceDoctor]; ok {
+				add(metricCatalogDoctorPriority, sourceDoctor)
+			}
+		}
+		if sources.aws {
+			if _, ok := available[proxy.SourceAWS]; ok {
+				add(metricCatalogAWSPriority, awsSourceLabel)
+			}
+		}
+		if sources.gcp {
+			if _, ok := available[proxy.SourceGCP]; ok {
+				add(metricCatalogGCPPriority, proxy.SourceGCP)
+			}
+		}
+	}
+
+	if labelName != "__name__" {
+		returned := sortedPriorityValues(values)
+		if limit > 0 && len(returned) > limit {
+			w.Header().Set("X-Doctor-Metric-Truncated", "true")
+			returned = returned[:limit]
+		}
+		writePrometheusSuccess(w, returned)
+		return
+	}
+
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	names = filterMetricCatalog(names, search)
+	w.Header().Set("X-Doctor-Metric-Total", strconv.Itoa(len(names)))
+	out := arrangeMetricCatalog(names, values, limit)
+	if limit > 0 && len(names) > limit {
+		w.Header().Set("X-Doctor-Metric-Truncated", "true")
+	}
+	writePrometheusSuccess(w, out)
+}
+
+// handlePrometheusSeriesViaRouter implements /api/v1/series through the router.
+func (s *Service) handlePrometheusSeriesViaRouter(w http.ResponseWriter, r *http.Request) {
+	match := requestParams(r, "match[]")
+	start, end := prometheusDiscoveryRange(r)
+	series, warnings, err := s.proxyRouter.MetricsSeries(
+		r.Context(), s.tenantFromRequest(r), match, start, end, partitionFromRequest(r))
+	if err != nil {
+		writePrometheusDiscoveryError(w, err)
+		return
+	}
+	writeProxyWarnings(w, warnings)
+	if len(series) > maxPrometheusSeries {
+		writePrometheusError(w, http.StatusUnprocessableEntity, "execution", fmt.Sprintf(
+			"series result exceeds %d; narrow the selector or time range", maxPrometheusSeries))
+		return
+	}
+	writePrometheusSuccess(w, series)
+}
+
+func metricSourcePriority(source string) int {
+	switch source {
+	case proxy.SourceDoctor:
+		return metricCatalogDoctorPriority
+	case proxy.SourceAWS:
+		return metricCatalogAWSPriority
+	case proxy.SourceGCP:
+		return metricCatalogGCPPriority
+	default:
+		return metricCatalogGCPPriority
+	}
+}
+
+func metricSourceEnabled(sources metricCatalogSource, source string, includeOther bool) bool {
+	switch source {
+	case proxy.SourceDoctor:
+		return sources.doctor
+	case proxy.SourceAWS:
+		return sources.aws
+	case proxy.SourceGCP:
+		return sources.gcp
+	default:
+		return includeOther
+	}
 }

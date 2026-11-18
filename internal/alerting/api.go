@@ -22,6 +22,12 @@ type API struct {
 	AllowAll     bool
 	ServiceToken string
 	Now          func() time.Time
+	// FCBSecret authenticates ack callbacks from notfify/fcm-bridge. When it is
+	// empty, the callback endpoint is disabled unless AllowAll is set.
+	FCBSecret []byte
+	// AckIncident applies an acked/nacked page to an incident. Nil disables
+	// incident callbacks; alerts still work.
+	AckIncident IncidentAckFunc
 }
 
 // Handler builds the Sentinel HTTP handler.
@@ -90,6 +96,8 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "intake/guardian":
 		a.handleGuardianIntake(w, r)
+	case path == "intake/fcb/ack":
+		a.handleFCBAck(w, r)
 	case strings.HasPrefix(path, "intake/"):
 		source := strings.TrimPrefix(path, "intake/")
 		if strings.HasPrefix(source, "preview/") {
@@ -127,6 +135,8 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleRoutingOverview(w, r)
 	case path == "delivery":
 		a.handleDelivery(w, r)
+	case path == "inventory":
+		a.handleInventory(w, r)
 	case path == "rules":
 		a.handleRules(w, r)
 	case path == "rules/preview":

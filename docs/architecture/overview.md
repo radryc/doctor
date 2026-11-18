@@ -24,6 +24,7 @@ flowchart LR
     ING[doctor-ingest]
     Q[doctor-query<br/>+ embedded UI]
     R[doctor-rules]
+    S[doctor-sentinel]
     FC[doctor-federation-controller]
   end
 
@@ -49,6 +50,9 @@ flowchart LR
   FC -->|snapshot + tokens + metadata| MF
   R -->|PromQL query| Q
   R -->|derived metrics| MF
+  S -->|PromQL alert rules| Q
+  S -->|alerts, silences, incidents| MF
+  Q -->|/v1/alerts*, /v1/incidents*, /api/v2/*| S
   Ops --> Q
 ```
 
@@ -56,12 +60,14 @@ flowchart LR
 
 | Binary | Role | Startup dependencies | Long-running loops |
 |---|---|---|---|
-| `doctor-ingest` | OTLP trace/log/metric receiver, privacy filter, writer | MonoFS log-engine router, privacy HMAC key, ingest bearer token | pipeline workers, trace/log/metric buffers (only when the pipeline is disabled), pprof on localhost |
-| `doctor-query` | Query API, compatibility APIs, UI host, proxy router, federation query plane | MonoFS log-engine router; optional MonoFS file store, Guardian, AWS federation, OIDC, policy bundle | policy reload, federation catalog reload, client-pool pruning, proxy discovery |
-| `doctor-rules` | Recording-rule scheduler/evaluator and rule API | MonoFS file store and log-engine, doctor-query URL, rules API token | leader lease, scheduler, HTTP API |
-| `doctor-federation-controller` | Builds the AWS multi-account catalog from Guardian | Guardian API, MonoFS file store | leader lease + periodic sync |
+| `doctor-ingest` | OTLP trace/log/metric receiver, privacy filter, writer | MonoFS log-engine router, privacy HMAC key, ingest bearer token(s) | pipeline workers, trace/log/metric WAL buffers, quota provider/tracker, pprof on localhost |
+| `doctor-query` | Query API, compatibility APIs, UI host, proxy router, federation query plane | MonoFS log-engine router; optional MonoFS file store, Guardian, AWS/GCP federation, OIDC, policy/quota bundle, Sentinel/Rules proxies | policy/quota reload, federation catalog reload, client-pool pruning, proxy discovery |
+| `doctor-rules` | Recording-rule scheduler/evaluator and rule API | MonoFS file store and log-engine, doctor-query URL, rules API token(s) | leader lease, scheduler, HTTP API |
+| `doctor-sentinel` | Alert rule evaluation, source polling (Guardian/AWS/GCP), routing, delivery, incidents | optional MonoFS file store (in-memory fallback); optional doctor-query, Guardian, AWS/GCP, FCB, agent | sharded rule evaluation lease/scheduler, outbox dispatcher, incident reconciler, source pollers |
+| `doctor-federation-controller` | Builds the AWS/GCP multi-target catalog from Guardian | Guardian API, MonoFS file store | leader lease + periodic sync |
 | `doctor-federation-build` | Offline catalog builder | local input file | none |
 | `doctor-federation-publish` | Publish a prebuilt snapshot | MonoFS file store | none |
+| `doctor-loadgen` | OTLP/query load generator CLI | target OTLP endpoint | load workers, optional metrics HTTP server |
 
 The container image builds exactly one of these binaries (`DOCTOR_SERVICE`) and embeds the frontend
 build into `doctor-query`.
@@ -128,16 +134,12 @@ flowchart TB
    record model and resolves canonical identity (`<partition>.<intent>.<asset>`).
 3. `internal/privacy` sanitizes attribute values, bodies, span names, and status messages before
    storage.
-4. One of three execution paths writes the records:
-   - **pipeline** (bounded queue + workers) — the default because `DOCTOR_PIPELINE_ENABLED=true`
-   - **per-signal buffer** (in-memory + WAL, batched flush)
-   - **direct writer**
+4. Records are written through:
+   - **pipeline + WAL buffers** (default: `DOCTOR_PIPELINE_ENABLED=true` and `DOCTOR_*_BUFFER_ENABLED=true`): the pipeline writes into a `BufferedWriter` that stages batches in the per-signal WAL buffers, which flush asynchronously to MonoFS;
+   - **per-signal buffer** (in-memory + WAL, batched flush) when the pipeline is disabled;
+   - **direct writer** when both pipeline and buffers are disabled (rejected when `DOCTOR_INGEST_REQUIRE_DURABLE=true`).
 5. `MonoFSWriter` sends batches to MonoFS's router via `IngestTraces`, `IngestLogs`, and
    `IngestMetrics`.
-
-Important observed behavior: the service checks the pipeline **before** the buffers. With the
-default configuration both are created, so the buffers replay old WAL data at startup and then sit
-idle while all new data goes through the pipeline.
 
 ### Query plane
 
@@ -153,18 +155,18 @@ idle while all new data goes through the pipeline.
   dashboards, rules proxy, federation status, proxy endpoints, Guardian topology/health/events/
   probes, UI config/user.
 
-The query service can serve data through two different architectures:
-
-- **legacy/direct**: `Service.logEngine` + optional `Service.aws` client.
-- **proxy router**: `proxy.Router` with registered local/remote backends and optional AWS.
-
-Both remain in the code and are selected at runtime (`Service.proxyRouter != nil`). This is the
-largest source of duplicated query logic.
+The query service uses `proxy.Router` as its only execution path. Local storage, AWS, and GCP are
+registered as separate backends; `DOCTOR_PROXY_ENABLED` controls only external registry discovery.
+Provider ownership is explicit: `federation.Multi` aggregates status/targets but queries AWS only,
+while GCP has its own router backend.
 
 ### Control/integration plane
 
 - `doctor-rules` stores YAML rule groups in MonoFS, elects one leader, evaluates PromQL through
   `doctor-query`, and writes derived metric records back through the log-engine.
+- `doctor-sentinel` evaluates PromQL alert rules through `doctor-query`, polls Guardian/AWS/GCP
+  alert sources, routes firing alerts through an outbox to notification receivers, and reconciles
+  alert sets into incidents and postmortems.
 - `doctor-federation-controller` joins Guardian's partition and pusher feeds with pusher discovery
   metadata, publishes a sharded snapshot and a sharded token bundle to MonoFS, and maintains a
   metadata cache and leader lease.
@@ -178,8 +180,8 @@ largest source of duplicated query logic.
 These are the assumptions the implementation actually relies on:
 
 1. **MonoFS is the only supported ingest/query storage backend.** `doctor-ingest` refuses to start
-   without `DOCTOR_MONOFS_LOGENGINE_ADDR`; `doctor-query` does too. The legacy local `store/fs` and
-   WAL-based segment writer are not wired into any service.
+   without `DOCTOR_MONOFS_LOGENGINE_ADDR`; `doctor-query` does too. The legacy
+   WAL-based segment writer (`internal/wal/wal.go`) is not wired into any service.
 2. **Canonical identity is `<partition>.<intent>.<asset>`.** The shared `internal/identity` package
    validates and truncates names; `internal/otlp` promotes explicit Guardian coordinates to this
    form at ingest; `internal/query/labels.go` projects it into every compatibility API.
@@ -200,9 +202,13 @@ These are the assumptions the implementation actually relies on:
 
 ## 5. Deployment topology
 
-The `deploy/` directory only contains one Guardian `Partition` manifest for the local
-`doctor-telemetry` stack. There are no Compose/Kubernetes manifests for the six binaries in this
-repository. The intended topology, inferred from configuration and clients, is:
+The `deploy/` directory contains:
+
+- `deploy/guardian/` — Guardian `Partition` and intent manifests for `doctor-telemetry` (including `30-query-plane.yaml` and `36-sentinel-plane.yaml`)
+- `deploy/k8s/doctor.yaml` — reference Kubernetes manifests with probes, resource limits, non-root/read-only security contexts, and network policies
+- `deploy/kind/sentinel.yaml` — kind deployment manifest for `doctor-sentinel`
+
+The intended topology, inferred from configuration and clients, is:
 
 ```mermaid
 flowchart LR
@@ -259,6 +265,8 @@ federation CLI flags. The most important groups:
 | Federation | `DOCTOR_FEDERATION_*`, `DOCTOR_AWS_*`, `DOCTOR_GUARDIAN_*` | query/controller |
 | Proxy | `DOCTOR_PROXY_ENABLED`, `DOCTOR_PROXY_BACKENDS_FILE`, `DOCTOR_GUARDIAN_DISCOVERY_*` | query |
 | Rules | `DOCTOR_RULES_*` | rules |
+| Sentinel | `DOCTOR_SENTINEL_*`, `DOCTOR_FCB_*` | sentinel / query |
+| Quotas | `DOCTOR_QUOTA_*` | ingest / query / rules |
 | UI | `DOCTOR_GUARDIAN_UI_URL`, `DOCTOR_DEFAULT_PARTITION`, `DOCTOR_DASHBOARDS_STORE_ROOT` | query |
 | Doctor telemetry | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `DOCTOR_OTEL_*` | all |
 
@@ -282,14 +290,13 @@ A full variable list with defaults is in
 
 These are expanded in the internal documents:
 
-- two simultaneous ingest execution models (pipeline and buffers);
-- two simultaneous query models (legacy/direct and proxy router);
+- three duplicated per-signal WAL/buffer implementations (`trace_buffer`, `log_buffer`, `metric_buffer`);
 - three access-control models (OIDC gate, legacy resolver gate, repo policy gate);
 - duplicate LogQL/TraceQL parsing and duplicate trace search/summary logic;
-- MonoFS transport is still plaintext and the log-engine client has no credential;
-- tenant is a label, not an isolation boundary;
-- `doctor-rules` and the ingest API now require bearer tokens, but the rules authorizer is still
-  all-or-nothing and the dashboard plane still has no per-user authorization.
+- MonoFS transport supports TLS/mTLS (`DOCTOR_MONOFS_TLS_*`), though it defaults to plaintext when unconfigured;
+- tenant is a label, not a storage isolation boundary (MonoFS log-engine ignores the tenant field), though `TenantGuard` and per-collector tokens restrict tenant claims;
+- `doctor-rules` supports per-partition token scopes and signed caller identities; the dashboard
+  plane still has no per-user authorization.
 
 See [security-architecture.md](../security-architecture.md) for the trust
 boundaries and the risk register, and the logical flows for current behavior.

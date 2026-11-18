@@ -107,11 +107,12 @@ func NewWebAuthenticator(ctx context.Context, cfg Config, verifier authz.TokenVe
 	return authz.NewWebAuthenticator(ctx, webCfg)
 }
 
-// DefaultExemptPaths are always reachable without a bearer token. Metrics
-// endpoints stay public by design; logs and traces are gated by the access
-// layer instead.
+// DefaultExemptPaths are always reachable without a bearer token. Telemetry
+// (including the Prometheus /api/v1 API) is never public: metrics are globally
+// visible to authenticated callers, but authentication is required. The
+// scrape endpoint and health probes remain public for Kubernetes.
 func DefaultExemptPaths() []string {
-	return []string{"/healthz", "/ready", "/api/echo", "/metrics", "/api/v1"}
+	return []string{"/healthz", "/ready", "/api/echo", "/metrics", "/api/v1/status/buildinfo"}
 }
 
 // Middleware attaches identity to requests and optionally rejects anonymous

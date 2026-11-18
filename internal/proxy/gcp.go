@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/radryc/doctor/internal/segment"
@@ -127,6 +128,14 @@ type GCPUpstream struct {
 	FilterLogs      func(ctx context.Context, records []segment.LogRecord) []segment.LogRecord
 	FilterSpans     func(ctx context.Context, records []segment.TraceRecord) []segment.TraceRecord
 	FilterSummaries func(ctx context.Context, summaries []TraceSummary) []TraceSummary
+
+	// Cloud Monitoring exposes tens of thousands of metric names. Cache the
+	// __name__ label-values result briefly so Grafana autocomplete does not
+	// call the provider on every keystroke.
+	namesMu  sync.Mutex
+	names    []string
+	namesAt  time.Time
+	namesTTL time.Duration
 }
 
 // Name implements MetricsUpstream/LogsUpstream/TracesUpstream.
@@ -173,7 +182,7 @@ func (u *GCPUpstream) PromSeries(ctx context.Context, _ string, match []string, 
 	if err != nil {
 		return nil, err
 	}
-	return ExtractPrometheusSeries(resp), nil
+	return StampSeriesSource(ExtractPrometheusSeries(resp), SourceGCP), nil
 }
 
 func (u *GCPUpstream) PromLabels(ctx context.Context, _ string, match []string, start, end time.Time) ([]string, error) {
@@ -185,11 +194,40 @@ func (u *GCPUpstream) PromLabels(ctx context.Context, _ string, match []string, 
 }
 
 func (u *GCPUpstream) PromLabelValues(ctx context.Context, _, label string, match []string, start, end time.Time) ([]string, error) {
+	if label == "__name__" && len(match) == 0 {
+		if cached, ok := u.cachedMetricNames(); ok {
+			return cached, nil
+		}
+	}
 	resp, err := u.Client.PrometheusLabelValues(ctx, label, match, start, end)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractPrometheusStringList(resp), nil
+	values := ExtractPrometheusStringList(resp)
+	if label == "__name__" && len(match) == 0 {
+		u.storeMetricNames(values)
+	}
+	return values, nil
+}
+
+func (u *GCPUpstream) cachedMetricNames() ([]string, bool) {
+	ttl := u.namesTTL
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	u.namesMu.Lock()
+	defer u.namesMu.Unlock()
+	if u.names == nil || time.Since(u.namesAt) > ttl {
+		return nil, false
+	}
+	return append([]string(nil), u.names...), true
+}
+
+func (u *GCPUpstream) storeMetricNames(values []string) {
+	u.namesMu.Lock()
+	u.names = append([]string(nil), values...)
+	u.namesAt = time.Now()
+	u.namesMu.Unlock()
 }
 
 // QueryLogs implements LogsUpstream.

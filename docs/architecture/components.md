@@ -10,21 +10,19 @@ This document explains what each package and binary owns.
 
 Startup sequence (`cmd/doctor-ingest/main.go`):
 
-1. set `GOMEMLIMIT` to a hard-coded 858 MiB and start an optional pprof server;
-2. load `config.IngestConfig` and require `DOCTOR_PRIVACY_HMAC_KEY` plus either
-   `DOCTOR_INGEST_AUTH_TOKEN` or `DOCTOR_INGEST_TOKENS_FILE`;
-3. initialize OTel telemetry and the `doctor.component.up` heartbeat;
-4. build `privacy.Engine`, `MonoFSWriter`, optional trace/log/metric buffers, optional pipeline;
-5. build `ingest.Service` and register the three OTLP gRPC services plus the HTTP collector;
+1. load `config.IngestConfig`, set `GOMEMLIMIT` from `DOCTOR_MEMORY_LIMIT_BYTES` (default 858 MiB), and start an optional pprof server;
+2. initialize OTel telemetry and the `doctor.component.up` heartbeat;
+3. build `privacy.Engine`, `MonoFSWriter` (requires `DOCTOR_MONOFS_LOGENGINE_ADDR`), optional trace/log/metric WAL buffers, and optional pipeline (which wraps `BufferedWriter` when buffers are enabled);
+4. build `ingest.Service`, optional `quota.Engine` (`DOCTOR_QUOTA_ENABLED`), and bearer/mTLS auth (`DOCTOR_INGEST_TOKENS_FILE` or `DOCTOR_INGEST_AUTH_TOKEN`);
+5. register the three OTLP gRPC services + gRPC health check plus the HTTP collector;
 6. serve gRPC and HTTP concurrently; shut down on SIGINT/SIGTERM.
 
 Notable choices:
 
 - gRPC max receive/send size is 256 MiB (`grpc.MaxRecvMsgSize` / `MaxSendMsgSize`).
 - HTTP request bodies are limited to 10 MiB per OTLP request.
-- `TraceBuffer`, `LogBuffer`, and `MetricBuffer` are always constructed when enabled, even though
-  the default pipeline takes precedence over them.
-- `WriteGuardianEvents` on the MonoFS backend is a no-op.
+- When both `DOCTOR_PIPELINE_ENABLED` and `DOCTOR_*_BUFFER_ENABLED` are true (the default), the pipeline stages records in the WAL buffers via `BufferedWriter` and their background loops flush to MonoFS.
+- `WriteGuardianEvents` on the MonoFS backend returns `ErrGuardianEventsUnsupported` (HTTP 501).
 
 ### `cmd/doctor-query`
 
@@ -50,10 +48,31 @@ Middleware order (outermost to innermost):
 ```
 WebAuthenticator.Handler
   -> TenantTrust.Wrap
-    -> auth.Middleware.Wrap
-      -> PolicyGate.Middleware
-        -> query.Service.Handler (which itself wraps warning headers + Guardian token)
+    -> TenantGuard.Wrap
+      -> auth.Middleware.Wrap
+        -> PolicyGate.Middleware
+          -> quota.Engine.Middleware
+            -> query.Service.Handler (which itself wraps warning headers + Guardian token)
 ```
+
+### `cmd/doctor-sentinel`
+
+**Purpose:** alert evaluation, source polling (Guardian/AWS/GCP), routing, notification delivery, and incident/postmortem management.
+
+Startup sequence (`cmd/doctor-sentinel/main.go`):
+
+1. load `config.SentinelConfig` (`DOCTOR_SENTINEL_ENABLED`);
+2. connect MonoFS file store when `DOCTOR_MONOFS_LOGENGINE_ADDR` and `DOCTOR_MONOFS_TOKEN` are set, otherwise fall back to `alerting.NewMemoryStore()`;
+3. construct `alerting.Store` and `alerting.Service`, start subspace expiry loop;
+4. if `DOCTOR_SENTINEL_QUERY_URL` is set, start `alerting.RuleScheduler` behind a sharded `LeaseManager`;
+5. if `DOCTOR_SENTINEL_DELIVERY_ENABLED=true`, start `alerting.Dispatcher` (with `delivery.Registry` and optional FCB backend);
+6. if `DOCTOR_SENTINEL_INCIDENTS_ENABLED=true`, construct `incident.Store`, `incident.Service`, `incident.API`, and start the incident reconciliation loop;
+7. start enabled source pollers (`AWSSource`, `GCPSource`, `GuardianSource`);
+8. serve HTTP on `DOCTOR_SENTINEL_HTTP_ADDR` (default `:18082`).
+
+### `cmd/doctor-loadgen`
+
+**Purpose:** CLI tool for generating OTLP gRPC/HTTP telemetry and query load against Doctor endpoints.
 
 ### `cmd/doctor-rules`
 
@@ -181,19 +200,17 @@ and returned as an error by the trace reader.
 
 - `store.Store` defines a versioned file-store interface plus logical-path normalization, content
   hash, version ID, and batch revision ID helpers.
-- `store/fs` is a local disk implementation with `.versions/meta` and `.versions/data`; not used by
-  any service.
-- `store/monofs` contains the two gRPC clients used in production:
+- `store/monofs` contains the two gRPC clients used in production and shared `tls.go` (`DOCTOR_MONOFS_TLS_*`):
   - `GRPCClient`: file CAS operations (`UpsertPaths`, `DeletePaths`, `ListVersions`,
     `GetVersion`, `ReadFile`, `ListDir`), router registration, node discovery, heartbeat, and
-    per-node reads. Uses `insecure.NewCredentials()` and the `x-monofs-internal` metadata token for
+    per-node reads. Uses `TLSConfigFromEnv()` and the `x-monofs-internal` metadata token for
     node reads.
   - `LogEngineClient`: log/metric/trace ingest and query through `MonoFSRouterClient`; also streams
-    metric series metadata and trace discovery. Uses `insecure.NewCredentials()` and has no token
-    field.
+    metric series metadata and trace discovery, and executes DuckDB/ClickHouse SQL (`QueryDuckDBSQL`). Uses `TLSConfigFromEnv()` and accepts a MonoFS token via `NewLogEngineClientWithToken`.
 - `store/aws`: HTTP client for `guardian-pusher-aws` read API, with token-source abstraction,
   one-shot 401 token refresh, cached `/healthz`, and helpers for CloudWatch metrics/logs, X-Ray
   services/traces, and PromQL proxy endpoints.
+- `store/gcp`: HTTP client for `guardian-pusher-gcp` read API (Cloud Monitoring metrics, Cloud Logging, Cloud Trace, resources).
 
 ## 3. Ingest components
 
@@ -234,20 +251,10 @@ Signal routing detail:
 
 ```text
 ingestTraces/Logs/Metrics
-  if pipeline != nil   -> pipeline.Submit*  (default)
+  if pipeline != nil   -> pipeline.Submit*  (default; wraps BufferedWriter when buffers are enabled)
   else if buffer != nil -> buffer.Append
   else                  -> writer.Write*
 ```
-
-### `internal/guardian`
-
-Unused HTTP middleware helpers:
-
-- bearer-token auth with constant-time compare;
-- per-remote-address token-bucket rate limiter;
-- TTL deduplicator.
-
-Only tests reference them. They are not wired into ingest, query, or rules.
 
 ## 4. Query components
 
@@ -258,8 +265,9 @@ Only tests reference them. They are not wired into ingest, query, or rules.
   cookie `doctor_session`, optional require-login, RP-initiated logout.
 - `Middleware`: wraps the MonoFS `authz.Authenticator`, attaches identity, and rejects anonymous
   callers outside exempt paths when `require` is set.
-- `DefaultExemptPaths`: `/healthz`, `/ready`, `/api/echo`, `/metrics`, `/api/v1`. The `/api/v1`
-  entry exempts the entire Prometheus API, not just a health endpoint.
+- `DefaultExemptPaths`: `/healthz`, `/ready`, `/api/echo`, `/metrics`, `/api/v1/status/buildinfo`. Telemetry APIs (including `/api/v1/*`) require authentication when a verifier is configured.
+- `TenantGuard`: restricts query requests to `DOCTOR_QUERY_ALLOWED_TENANTS` or forces `DOCTOR_QUERY_SINGLE_TENANT`.
+- `InternalIdentity`: HMAC-signed `X-Doctor-Identity` header forwarded from `doctor-query` to `doctor-rules`.
 - `TenantTrust`: synthetic machine identity `ClientID=tenant:<name>`, group `doctor:tenant`, from
   the tenant header or query parameter, only when no verified identity exists.
 
@@ -433,9 +441,9 @@ Recording rules:
 
 | Peer | Protocol | Auth | Notes |
 |---|---|---|---|
-| OTLP clients → ingest | gRPC / HTTP protobuf or JSON | none | tenant from header/metadata; 256 MiB gRPC, 10 MiB HTTP |
-| ingest/query/rules → MonoFS log-engine | gRPC `MonoFSRouter` | none on the log-engine client | insecure transport |
-| query/rules/controller → MonoFS file store | gRPC router + node streaming | `x-monofs-internal` metadata token for node reads | insecure transport |
+| OTLP clients → ingest | gRPC / HTTP protobuf or JSON | bearer (`DOCTOR_INGEST_TOKENS_FILE` / `DOCTOR_INGEST_AUTH_TOKEN`), optional mTLS | tenant from header/metadata validated against allowlist; 256 MiB gRPC, 10 MiB HTTP |
+| ingest/query/rules → MonoFS log-engine | gRPC `MonoFSRouter` | optional token (`DOCTOR_MONOFS_TOKEN`) | TLS/mTLS via `DOCTOR_MONOFS_TLS_*` (plaintext if unconfigured) |
+| query/rules/controller/sentinel → MonoFS file store | gRPC router + node streaming | `x-monofs-internal` metadata token for node reads | TLS/mTLS via `DOCTOR_MONOFS_TLS_*` (plaintext if unconfigured) |
 | query → Guardian | HTTP JSON | caller bearer token or no token | legacy then M2M paths |
 | controller → Guardian | HTTP JSON | `X-Guardian-Internal-Token` | paginated M2M feeds |
 | query → AWS pusher | HTTP JSON / PromQL proxy | bearer token from target/resolver | optional 401 refresh |
@@ -451,7 +459,7 @@ Recording rules:
 | Ingest pipeline | `DOCTOR_PIPELINE_QUEUE_SIZE` (1000), `DOCTOR_PIPELINE_WORKERS` (4) |
 | Ingest buffers | per-signal max bytes (4 MiB default), pending bytes (3× max), trace max records (4096) |
 | OTLP request | gRPC 256 MiB, HTTP 10 MiB |
-| Memory | hard-coded 858 MiB `GOMEMLIMIT` in ingest |
+| Memory | `DOCTOR_MEMORY_LIMIT_BYTES` (default 858 MiB `GOMEMLIMIT` in ingest) |
 | PromQL | 4M samples and 100k series per query; 8M samples global; 1M engine `MaxSamples`; 30s default, 5m max caller timeout |
 | PromQL discovery | 15-minute scan window, 10k records, 200k series |
 | Broad range guard | 15 minutes for `{__name__=~".+"}` |
@@ -460,8 +468,8 @@ Recording rules:
 | TraceQL metrics | 20k spans, 500 series, 5k buckets, 500k samples |
 | Proxy | 32 global inflight by default, 32 remote backends, 15s backend timeout (or caller deadline), 5-failure/30s breaker |
 | Federation | 32 targets, 64 inflight, 8 concurrent target calls, 2 attempts, 5s per call, 10k client pool, 15m idle, 5 failures/30s breaker |
-| Guardian topology | one goroutine per partition, **unbounded** |
-| Trace discovery caches | TTL 30s default; maps have no global size cap/eviction sweep |
+| Guardian topology | capped at 8 concurrent partition fetches |
+| Trace discovery caches | TTL 30s default; 10k-entry cap per map with expired-entry pruning |
 | Dashboards/rules | CAS-protected; no request concurrency limiter |
 
 ## 8. Configuration reference
@@ -601,6 +609,11 @@ Recording rules:
 | `DOCTOR_MONOFS_TOKEN` | — | file store; dashboards, owners, federation bundle |
 | `DOCTOR_MONOFS_CLIENT_ID` | `doctor-query` | |
 | `DOCTOR_DASHBOARDS_STORE_ROOT` | `/doctor/v1/dashboards` | |
+| `DOCTOR_SENTINEL_URL` | — | enables `/v1/alerts*`, `/v1/incidents*`, `/api/v2/*` proxy |
+| `DOCTOR_GCP_ENABLED` | `true` | |
+| `DOCTOR_GCP_BACKEND_URL` / `_TOKEN` | — | legacy single GCP pusher |
+| `DOCTOR_BACKEND_REQUIRE_HTTPS` / `_ALLOW_LOOPBACK` / `_ALLOW_PRIVATE` / `_ALLOWED_HOSTS` | `false` / `false` / `true` / — | `netguard` URL policy for proxy backends |
+| `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` | — | tenant guard allowlist / forced single tenant |
 
 ### Rules (`internal/config.LoadRules`)
 
@@ -626,6 +639,20 @@ Recording rules:
 | `DOCTOR_MONOFS_LOGENGINE_ADDR` | — |
 | `DOCTOR_MONOFS_TOKEN` | — |
 | `DOCTOR_MONOFS_CLIENT_ID` | `doctor-rules` |
+
+### Sentinel (`internal/config.LoadSentinel`)
+
+See [alerts.md](../alerts.md#configuration) and [incidents.md](../incidents.md) for the `DOCTOR_SENTINEL_*` and `DOCTOR_FCB_*` variables.
+
+### MonoFS TLS (`internal/store/monofs.TLSConfigFromEnv`)
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DOCTOR_MONOFS_TLS_CA` | — | CA bundle path |
+| `DOCTOR_MONOFS_TLS_CERT` / `_KEY` | — | client certificate and key for mTLS |
+| `DOCTOR_MONOFS_TLS_SERVER_NAME` | — | TLS server name override |
+| `DOCTOR_MONOFS_TLS_REQUIRE` | `false` | reject plaintext even without cert files |
+| `DOCTOR_MONOFS_TLS_INSECURE` | `false` | explicit plaintext override |
 
 ### Doctor telemetry (`internal/telemetry.LoadConfig`)
 

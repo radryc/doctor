@@ -6,13 +6,18 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"path"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/radryc/doctor/internal/alerting"
 	"github.com/radryc/doctor/internal/config"
+	"github.com/radryc/doctor/internal/delivery"
+	"github.com/radryc/doctor/internal/incident"
+	"github.com/radryc/doctor/internal/netguard"
 	"github.com/radryc/doctor/internal/ruler"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 )
@@ -47,12 +52,19 @@ func main() {
 	}
 
 	store := alerting.NewStore(files, cfg.MonoFSToken, cfg.StoreRoot)
+	alertWake := make(chan struct{}, 1)
 	service := &alerting.Service{
 		Store:           store,
 		DefaultTenant:   cfg.DefaultTenant,
 		GuardianHMACKey: []byte(cfg.GuardianHMACSecret),
 		DeliveryEnabled: cfg.DeliveryEnabled,
 		Logger:          log.Default(),
+		Wake: func() {
+			select {
+			case alertWake <- struct{}{}:
+			default:
+			}
+		},
 	}
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -93,11 +105,90 @@ func main() {
 		Logger:       log.Default(),
 		AllowAll:     cfg.AuthAllowAll,
 		ServiceToken: cfg.ServiceToken,
+		FCBSecret:    []byte(cfg.FCBAckSecret),
 	}
 
-	dispatcher := &alerting.Dispatcher{Store: store, Logger: log.Default()}
+	urlPolicy := &netguard.Policy{
+		RequireHTTPS:  cfg.WebhookRequireHTTPS,
+		AllowPrivate:  cfg.WebhookAllowPrivate,
+		AllowLoopback: cfg.WebhookAllowLoopback,
+	}
+	dispatcher := &alerting.Dispatcher{
+		Store:     store,
+		Logger:    log.Default(),
+		URLPolicy: urlPolicy,
+		FCB: delivery.FCBConfig{
+			Enabled:       cfg.FCBEnabled,
+			BackendURL:    cfg.FCBBackendURL,
+			WebhookSecret: cfg.FCBWebhookSecret,
+			DefaultTopic:  cfg.FCBDefaultTopic,
+			Timeout:       cfg.FCBTimeout,
+		},
+	}
 	if cfg.DeliveryEnabled {
 		go dispatcher.Run(ctx)
+	}
+	if cfg.FCBEnabled {
+		if cfg.FCBBackendURL == "" {
+			log.Printf("sentinel fcb notifications enabled but DOCTOR_SENTINEL_FCB_BACKEND_URL is empty; fcb receivers without urlEnv will fail")
+		} else {
+			log.Printf("sentinel fcb notifications enabled: %s", cfg.FCBBackendURL)
+		}
+	}
+
+	var incidentHandler http.Handler
+	if cfg.IncidentsEnabled {
+		incidentStore := incident.NewStore(files, store, cfg.MonoFSToken, cfg.StoreRoot)
+		analyzers := map[string]incident.Analyzer{}
+		if cfg.IncidentAgentURL != "" {
+			analyzers[incident.AnalysisAgent] = incident.AgentAnalyzer{
+				URL:   cfg.IncidentAgentURL,
+				Token: cfg.IncidentAgentToken,
+			}
+		}
+		incidentService := &incident.Service{
+			Store:         incidentStore,
+			Alerts:        store,
+			AlertService:  service,
+			Engines:       incident.NewEngineRegistry(),
+			Analyzers:     analyzers,
+			Logger:        log.Default(),
+			BaseURL:       cfg.IncidentBaseURL,
+			Delivery:      cfg.DeliveryEnabled,
+			AsyncAnalysis: true,
+		}
+		incidentHandler = (&incident.API{
+			Store:    incidentStore,
+			Service:  incidentService,
+			AllowAll: cfg.AuthAllowAll,
+			Logger:   log.Default(),
+		}).Handler()
+		api.AckIncident = incidentService.AckByID
+		go func() {
+			interval := cfg.IncidentTick
+			if interval <= 0 {
+				interval = 15 * time.Second
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			reconcile := func() {
+				if err := incidentService.ReconcileTenant(ctx, cfg.DefaultTenant); err != nil && ctx.Err() == nil {
+					log.Printf("sentinel: incident reconcile: %v", err)
+				}
+			}
+			reconcile()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-alertWake:
+					reconcile()
+				case <-ticker.C:
+					reconcile()
+				}
+			}
+		}()
+		log.Printf("sentinel incidents enabled (tick=%s, agent=%t)", cfg.IncidentTick, cfg.IncidentAgentURL != "")
 	}
 
 	if cfg.AWSEnabled && cfg.AWSURL != "" {
@@ -149,15 +240,43 @@ func main() {
 		log.Printf("sentinel guardian source enabled: %s", cfg.GuardianURL)
 	}
 
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: api.Handler()}
+	rootHandler := http.NewServeMux()
+	if incidentHandler != nil {
+		rootHandler.Handle("/v1/incidents", incidentHandler)
+		rootHandler.Handle("/v1/incidents/", incidentHandler)
+		rootHandler.Handle("/v1/alert-sets", incidentHandler)
+		rootHandler.Handle("/v1/alert-sets/", incidentHandler)
+		rootHandler.Handle("/v1/incident-policy", incidentHandler)
+		rootHandler.Handle("/v1/postmortem-engines", incidentHandler)
+	}
+	rootHandler.Handle("/", api.Handler())
+	server := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           rootHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	log.Printf("doctor-sentinel listening on %s (store=%s, delivery=%t)", cfg.HTTPAddr, cfg.StoreRoot, cfg.DeliveryEnabled)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	tlsCert := strings.TrimSpace(os.Getenv("DOCTOR_SENTINEL_TLS_CERT_FILE"))
+	tlsKey := strings.TrimSpace(os.Getenv("DOCTOR_SENTINEL_TLS_KEY_FILE"))
+	if (tlsCert != "") != (tlsKey != "") {
+		log.Fatal("DOCTOR_SENTINEL_TLS_CERT_FILE and DOCTOR_SENTINEL_TLS_KEY_FILE must both be set")
+	}
+	log.Printf("doctor-sentinel listening on %s (store=%s, delivery=%t, tls=%t)", cfg.HTTPAddr, cfg.StoreRoot, cfg.DeliveryEnabled, tlsCert != "" && tlsKey != "")
+	var serveErr error
+	if tlsCert != "" && tlsKey != "" {
+		serveErr = server.ListenAndServeTLS(tlsCert, tlsKey)
+	} else {
+		serveErr = server.ListenAndServe()
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		log.Fatal(serveErr)
 	}
 }

@@ -338,10 +338,12 @@ Doctor has a **tenant label**, not a tenant isolation boundary:
 - tenant is read from `tenant` query parameter or `X-Doctor-Tenant` header (native APIs) and from
   HTTP header or gRPC metadata (ingest);
 - ingest restricts tenants to `DOCTOR_INGEST_ALLOWED_TENANTS` (default: the configured default
-  tenant), but the collector token is shared;
-- query accepts any tenant; there is no tenant allowlist on the query plane;
+  tenant) and supports per-collector tenant scopes via `DOCTOR_INGEST_TOKENS_FILE`;
+- query enforces `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` via `TenantGuard`
+  when configured, and otherwise accepts any requested tenant;
 - MonoFS log-engine ignores the tenant parameter entirely;
-- dashboards and rules use tenant as a path segment, with no per-tenant authorization;
+- dashboards and rules use tenant/partition as a path segment; `doctor-rules` enforces per-partition
+  token scopes (`DOCTOR_RULES_TOKENS_FILE`), while dashboards have no per-tenant authorization;
 - the repo policy is partition-based, not tenant-based;
 - metrics are globally readable by design, and metrics-based dashboards are an intended use case.
 
@@ -361,9 +363,7 @@ Observed issues:
    projections prefer canonical but preserve aliases.
 5. **AWS partition fallback**: when no policy binding matches, region is used as the partition, which
    can collide with a real partition name.
-6. **Federation `byTrace` index is dead**: the map is read by `Catalog.ByTrace` but never written, so
-   trace-ID planning always falls back to a full/small-catalog fan-out.
-7. **AWS dimension-only metrics** are kept even when a partition filter is active; they can reveal
-   metrics outside the selected partition.
-8. **Trace discovery cache** entries are keyed by tenant+identity+tag and never globally evicted on
-   expiry; a large user population accumulates entries.
+6. **Federation trace-ID planning**: trace IDs are intentionally unindexed in the catalog, so
+   trace-ID planning uses a bounded catalog fallback.
+7. **Trace discovery cache** entries are keyed by tenant+identity+tag, capped at 10,000 entries per
+   map with expired-entry pruning.

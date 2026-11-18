@@ -1,22 +1,18 @@
 package alerting
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/radryc/doctor/internal/delivery"
+	"github.com/radryc/doctor/internal/netguard"
 )
 
 const (
@@ -43,6 +39,12 @@ type Dispatcher struct {
 	// Owner identifies this dispatcher replica in outbox claims. It defaults
 	// to hostname/pid so replicas do not steal each other's in-flight sends.
 	Owner string
+	// URLPolicy rejects SSRF targets for operator-supplied webhook URLs.
+	URLPolicy *netguard.Policy
+	// FCB configures the optional fcm-bridge backend used by fcb receivers.
+	FCB delivery.FCBConfig
+	// Receivers overrides the process-wide receiver registry (tests/extensions).
+	Receivers *delivery.Registry
 
 	reconcileMu sync.Mutex
 	reconciled  bool
@@ -171,6 +173,10 @@ func (d *Dispatcher) deliverRecord(ctx context.Context, record OutboxRecord, now
 		return
 	}
 	record = claimed
+	if strings.EqualFold(strings.TrimSpace(record.Kind), EventKindIncident) {
+		d.deliverClaimedEvent(ctx, record, now, loadRouting)
+		return
+	}
 
 	alert, err := d.Store.GetAlert(ctx, record.Tenant, record.Partition, record.Fingerprint)
 	if err != nil {
@@ -241,227 +247,76 @@ func (d *Dispatcher) deliverRecord(ctx context.Context, record OutboxRecord, now
 	d.logf("delivery failed alert=%s channel=%s attempt=%d: %v", alert.Fingerprint, receiver.Name, record.Attempts, err)
 }
 
+func (d *Dispatcher) registry() *delivery.Registry {
+	if d.Receivers != nil {
+		return d.Receivers
+	}
+	return delivery.DefaultRegistry()
+}
+
+func (d *Dispatcher) runtime() delivery.Runtime {
+	return delivery.Runtime{Client: d.Client, URLPolicy: d.URLPolicy, FCB: d.FCB}
+}
+
 func (d *Dispatcher) send(ctx context.Context, receiver Receiver, alert Alert) error {
-	switch strings.ToLower(strings.TrimSpace(receiver.Type)) {
-	case "", "webhook":
-		return d.sendWebhook(ctx, receiver, alert)
-	case "slack":
-		return d.sendSlack(ctx, receiver, alert)
-	case "goalert":
-		return d.sendGoAlert(ctx, receiver, alert)
-	case "pagerduty", "pagerduty-events", "pd":
-		return d.sendPagerDuty(ctx, receiver, alert)
-	default:
-		return fmt.Errorf("alerting: unsupported receiver type %q", receiver.Type)
-	}
+	return d.sendMessage(ctx, receiver, alertMessage(alert))
 }
 
-func (d *Dispatcher) sendWebhook(ctx context.Context, receiver Receiver, alert Alert) error {
-	payload, err := json.Marshal(alert)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, receiver.URL, bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "doctor-sentinel")
-	for key, value := range receiver.Headers {
-		req.Header.Set(key, value)
-	}
-	if secret := receiverSecret(receiver); secret != "" {
-		mac := hmac.New(sha256.New, []byte(secret))
-		_, _ = mac.Write(payload)
-		req.Header.Set("X-Sentinel-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-		req.Header.Set("X-Doctor-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-	}
-	return d.do(req)
+func (d *Dispatcher) sendEvent(ctx context.Context, receiver Receiver, event Event) error {
+	return d.sendMessage(ctx, receiver, delivery.FromEvent(event))
 }
 
-func (d *Dispatcher) sendSlack(ctx context.Context, receiver Receiver, alert Alert) error {
-	text := formatSlackAlert(alert)
-	payload, err := json.Marshal(map[string]any{"text": text})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, receiver.URL, bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "doctor-sentinel")
-	for key, value := range receiver.Headers {
-		req.Header.Set(key, value)
-	}
-	return d.do(req)
+func (d *Dispatcher) sendMessage(ctx context.Context, receiver Receiver, message delivery.Message) error {
+	return d.registry().Send(ctx, d.runtime(), receiver, message)
 }
 
-func (d *Dispatcher) sendGoAlert(ctx context.Context, receiver Receiver, alert Alert) error {
-	values := urlValues{
-		"summary": {goAlertSummary(alert)},
-		"details": {goAlertDetails(alert)},
-		"dedup":   {alert.Fingerprint},
+// alertMessage adapts an Alert to the neutral sender model. Raw keeps the
+// historical Alert JSON for generic webhook compatibility.
+func alertMessage(alert Alert) delivery.Message {
+	raw, _ := json.Marshal(alert)
+	fields := []delivery.EventField{
+		{Label: "State", Value: alert.Status},
+		{Label: "Severity", Value: alert.Severity},
+		{Label: "Partition", Value: alert.Partition},
+		{Label: "Source", Value: alert.Source},
 	}
-	if alert.Status == StatusResolved {
-		values["action"] = []string{"close"}
+	if alert.Value != "" {
+		fields = append(fields, delivery.EventField{Label: "Value", Value: alert.Value})
 	}
-	endpoint := receiver.URL
-	// GoAlert's generic incoming webhook authenticates with the token as a
-	// query parameter, not a form field.
-	if token := receiverSecret(receiver); token != "" {
-		parsed, err := url.Parse(endpoint)
-		if err != nil {
-			return fmt.Errorf("alerting: goalert receiver %q has invalid url: %w", receiver.Name, err)
+	for key, value := range alert.Labels {
+		if key == "alertname" || key == "severity" || key == "partition" {
+			continue
 		}
-		query := parsed.Query()
-		query.Set("token", token)
-		parsed.RawQuery = query.Encode()
-		endpoint = parsed.String()
+		fields = append(fields, delivery.EventField{Label: key, Value: value})
 	}
-	body := values.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "doctor-sentinel")
-	for key, value := range receiver.Headers {
-		req.Header.Set(key, value)
-	}
-	return d.do(req)
-}
-
-func (d *Dispatcher) sendPagerDuty(ctx context.Context, receiver Receiver, alert Alert) error {
-	routingKey := receiverSecret(receiver)
-	if routingKey == "" {
-		return fmt.Errorf("alerting: pagerduty receiver %q has no routing key (set secretEnv)", receiver.Name)
-	}
-	endpoint := strings.TrimSpace(receiver.URL)
-	if endpoint == "" {
-		endpoint = defaultPagerDutyURL
-	}
-	eventAction := "trigger"
-	if alert.Status == StatusResolved {
-		eventAction = "resolve"
-	}
-	payload := map[string]any{
-		"routing_key":  routingKey,
-		"event_action": eventAction,
-		"dedup_key":    alert.Fingerprint,
-		"payload": map[string]any{
-			"summary":   firstNonEmpty(alert.Annotations["summary"], alert.Labels["alertname"], "Alert"),
-			"source":    fmt.Sprintf("%s/%s/%s", alert.Tenant, alert.Partition, firstNonEmpty(alert.Source, "sentinel")),
-			"severity":  pagerDutySeverity(alert.Severity),
-			"timestamp": alert.StartsAt.UTC().Format(time.RFC3339),
-			"custom_details": map[string]any{
-				"alertname":   alert.Labels["alertname"],
-				"partition":   alert.Partition,
-				"tenant":      alert.Tenant,
-				"status":      alert.Status,
-				"value":       alert.Value,
-				"labels":      alert.Labels,
-				"annotations": alert.Annotations,
-			},
+	return delivery.Message{
+		SchemaVersion: "doctor.alert/v1",
+		Kind:          delivery.KindAlert,
+		Event:         alert.Status,
+		ID:            alert.Fingerprint,
+		Title:         firstNonEmpty(alert.Labels["alertname"], alert.Annotations["summary"], "Alert"),
+		Summary:       alert.Annotations["summary"],
+		Status:        alert.Status,
+		Severity:      alert.Severity,
+		URL:           alert.Annotations["guardian.url"],
+		OccurredAt:    alert.StartsAt,
+		Fields:        fields,
+		Raw:           raw,
+		Alert: &delivery.AlertPayload{
+			Fingerprint: alert.Fingerprint,
+			Alertname:   alert.Labels["alertname"],
+			Source:      alert.Source,
+			Tenant:      alert.Tenant,
+			Partition:   alert.Partition,
+			Status:      alert.Status,
+			Severity:    alert.Severity,
+			Value:       alert.Value,
+			Labels:      alert.Labels,
+			Annotations: alert.Annotations,
+			StartsAt:    alert.StartsAt,
+			EndsAt:      alert.EndsAt,
 		},
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "doctor-sentinel")
-	for key, value := range receiver.Headers {
-		req.Header.Set(key, value)
-	}
-	return d.do(req)
-}
-
-func pagerDutySeverity(severity string) string {
-	switch strings.ToLower(strings.TrimSpace(severity)) {
-	case "critical", "fatal", "emergency":
-		return "critical"
-	case "warning", "warn":
-		return "warning"
-	default:
-		return "info"
-	}
-}
-
-// urlValues is a small alias to keep the GoAlert payload readable.
-type urlValues map[string][]string
-
-func (v urlValues) Encode() string {
-	values := make(url.Values, len(v))
-	for key, items := range v {
-		values[key] = append([]string(nil), items...)
-	}
-	return values.Encode()
-}
-
-func goAlertSummary(alert Alert) string {
-	name := firstNonEmpty(alert.Labels["alertname"], "Alert")
-	if summary := alert.Annotations["summary"]; summary != "" {
-		return fmt.Sprintf("[%s] %s: %s", strings.ToUpper(alert.Severity), name, summary)
-	}
-	return fmt.Sprintf("[%s] %s", strings.ToUpper(alert.Severity), name)
-}
-
-func goAlertDetails(alert Alert) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "**Source:** %s\n\n", alert.Source)
-	fmt.Fprintf(&b, "**Partition:** %s\n\n", alert.Partition)
-	fmt.Fprintf(&b, "**State:** %s\n\n", alert.Status)
-	fmt.Fprintf(&b, "**Severity:** %s\n\n", alert.Severity)
-	if summary := alert.Annotations["summary"]; summary != "" {
-		fmt.Fprintf(&b, "%s\n\n", summary)
-	}
-	b.WriteString("**Labels**\n\n")
-	keys := make([]string, 0, len(alert.Labels))
-	for key := range alert.Labels {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		fmt.Fprintf(&b, "- `%s=%s`\n", key, alert.Labels[key])
-	}
-	return b.String()
-}
-
-func (d *Dispatcher) do(req *http.Request) error {
-	client := d.Client
-	if client == nil {
-		client = &http.Client{Timeout: defaultWebhookTimeout}
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxWebhookBody))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return nil
-}
-
-func formatSlackAlert(alert Alert) string {
-	summary := alert.Annotations["summary"]
-	if summary == "" {
-		summary = alert.Labels["alertname"]
-	}
-	return fmt.Sprintf("[%s] %s (%s/%s) — %s", strings.ToUpper(alert.Severity), alert.Labels["alertname"], alert.Tenant, alert.Partition, summary)
-}
-
-func receiverSecret(receiver Receiver) string {
-	if receiver.SecretEnv != "" {
-		return strings.TrimSpace(os.Getenv(receiver.SecretEnv))
-	}
-	return ""
 }
 
 func (d *Dispatcher) now() time.Time {

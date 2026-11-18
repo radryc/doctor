@@ -2,8 +2,10 @@ package ruler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/radryc/doctor/internal/segment"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
@@ -32,6 +34,21 @@ func (w *LogEngineWriter) WriteMetrics(ctx context.Context, records []segment.Me
 	if prefix == "" {
 		prefix = "rules"
 	}
-	chunkID := fmt.Sprintf("%s-%d-%d", prefix, time.Now().UTC().UnixNano(), len(records))
+	// Derive the chunk ID from the record content. Retries, backfills, and a
+	// scheduler restart that replays the same tick then address the same
+	// chunk instead of appending duplicate samples.
+	chunkID, err := rulerChunkID(prefix, records)
+	if err != nil {
+		return err
+	}
 	return w.Client.IngestMetrics(ctx, chunkID, records)
+}
+
+func rulerChunkID(prefix string, records []segment.MetricPointRecord) (string, error) {
+	encoded, err := json.Marshal(records)
+	if err != nil {
+		return "", fmt.Errorf("ruler: encode metrics for chunk id: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(sum[:16])), nil
 }

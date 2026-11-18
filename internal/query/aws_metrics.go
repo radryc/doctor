@@ -171,7 +171,9 @@ func extractPrometheusStringList(response map[string]any) []string {
 }
 
 func extractPrometheusSeries(response map[string]any) []map[string]string {
-	return proxy.ExtractPrometheusSeries(response)
+	// The legacy AWS branch is the only caller; stamp provenance explicitly
+	// because the decoder no longer guesses the backend kind.
+	return proxy.StampSeriesSource(proxy.ExtractPrometheusSeries(response), proxy.SourceAWS)
 }
 
 func prometheusResultEmpty(data map[string]any) bool {

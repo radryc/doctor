@@ -228,6 +228,12 @@ an AWS client with a `targetTokenSource` backed by the resolver. The AWS client 
 `CheckScope` wraps rejections in `ScopeError` carrying matched/max fanout; HTTP handlers map them to
 422.
 
+The fan-out cap is a safety invariant, not a bug. Associative aggregates are merged globally (see
+Query), but an arbitrary query over 5,000 accounts still needs a rollup tier: precompute the required
+aggregate with recording rules (or a dedicated rollup store) and query the derived metric instead of
+raising `DOCTOR_FEDERATION_MAX_FANOUT`.
+
+
 ## 4. Fan-out
 
 `fanoutTargets`:
@@ -252,9 +258,15 @@ Breaker behavior:
 
 ## 5. Query operations
 
+`federation.Multi` aggregates status and target listings across AWS and GCP managers, but its
+Prometheus/CloudWatch methods query the AWS manager only. GCP owns a separate `gcp` backend in
+`proxy.Router`; making `Multi` query all managers would duplicate every GCP series and label it as
+AWS.
+
+
 | Method | Planning | Fan-out | Merge |
 |---|---|---|---|
-| `ListMetrics` | none unless cached names missing | all targets if ≤ max fanout | dedupe by namespace/name/region |
+| `ListMetrics` | none; cached descriptor index | live discovery only when the index is empty and targets ≤ max fanout | dedupe by account/region/namespace/name; capped at `DOCTOR_FEDERATION_DISCOVERY_LIMIT` |
 | `ListServices` | none | only targets with stale/missing metadata, if ≤ max fanout | dedupe by name/account/region; 1h cache |
 | `ListLogGroups` | none | all targets if ≤ max fanout | string dedupe |
 | `ResolveLogGroups` | catalog regex | fallback to list | regex filter |
@@ -271,9 +283,11 @@ Potential issues:
 
 - `PrometheusSeries/Labels/LabelValues` build the plan from stripped selectors but forward the
   original selectors to targets; Doctor-only labels can make CloudWatch reject the request.
-- `ListMetrics` dedupe omits account, so the same namespace/metric/region in multiple accounts
-  collapses.
-- `ListMetrics` can return every cached metric name for a 50k-target catalog in one response.
+- `ListMetrics` uses a per-catalog descriptor index. With descriptor metadata it preserves
+  namespace identity; legacy `metric_names` metadata has no namespace and is deduped by
+  account/region/name.
+- `ListMetrics` is capped by `DOCTOR_FEDERATION_DISCOVERY_LIMIT` (default 10k); callers should use
+  the namespace/metric filters for large catalogs.
 - Trace IDs are intentionally unindexed; trace-ID planning is a bounded catalog scan/fallback.
 
 ## 6. Status and admin views

@@ -45,12 +45,20 @@ func TestMiddlewareRequiresTokenOutsideExemptPaths(t *testing.T) {
 		t.Fatalf("logs status = %d, want 401", rec.Code)
 	}
 
-	// Prometheus metrics stay public.
+	// Telemetry (including the Prometheus API) is not public.
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("metrics status = %d, want 401", rec.Code)
+	}
+
+	// Build info is public so Grafana can probe the datasource.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/status/buildinfo", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("metrics status = %d, want 200", rec.Code)
+		t.Fatalf("buildinfo status = %d, want 200", rec.Code)
 	}
 
 	// Health stays public.

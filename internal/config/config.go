@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -120,9 +121,10 @@ type WALConfig struct {
 }
 
 type PipelineConfig struct {
-	Enabled   bool
-	QueueSize int
-	Workers   int
+	Enabled         bool
+	QueueSize       int
+	Workers         int
+	DurableRequired bool
 }
 
 type TraceBufferConfig struct {
@@ -150,22 +152,21 @@ type MetricBufferConfig struct {
 	MaxPendingBytes int
 }
 
-type CostConfig struct {
-	MaxPendingSegments  int64
-	MaxSegmentsPerHour  int64
-	MaxTotalObjectBytes int64
-}
-
 type IngestConfig struct {
 	DefaultTenant       string
 	TenantHeader        string
 	AuthToken           string
+	AuthTokensFile      string
 	AllowedTenants      []string
 	MemoryLimitBytes    int64
 	TLSCertFile         string
 	TLSKeyFile          string
 	GRPCTLSCertFile     string
 	GRPCTLSKeyFile      string
+	GRPCMTLSMode        string
+	GRPCMTLSCAFile      string
+	HTTPMTLSMode        string
+	HTTPMTLSCAFile      string
 	GRPCAddr            string
 	HTTPAddr            string
 	DebugAddr           string
@@ -179,30 +180,30 @@ type IngestConfig struct {
 	Privacy             PrivacyConfig
 	WAL                 WALConfig
 	Pipeline            PipelineConfig
-	Cost                CostConfig
 	Quota               QuotaConfig
 }
 
 type QueryConfig struct {
-	DefaultTenant       string
-	TenantHeader        string
-	HTTPAddr            string
-	TLSCertFile         string
-	TLSKeyFile          string
-	GuardianURL         string
-	GuardianAPIURL      string
-	DefaultPartition    string
-	MonoFSLogEngineAddr string
-	MonoFSToken         string
-	RulesURL            string
-	SentinelURL         string
-	RulesAPIToken       string
-	AWSEnabled          bool
-	AWSBackendURL       string
-	AWSBackendToken     string
-	GCPEnabled          bool
-	GCPBackendURL       string
-	GCPBackendToken     string
+	DefaultTenant          string
+	TenantHeader           string
+	HTTPAddr               string
+	TLSCertFile            string
+	TLSKeyFile             string
+	GuardianURL            string
+	GuardianAPIURL         string
+	DefaultPartition       string
+	MonoFSLogEngineAddr    string
+	MonoFSToken            string
+	RulesURL               string
+	SentinelURL            string
+	RulesAPIToken          string
+	InternalIdentitySecret string
+	AWSEnabled             bool
+	AWSBackendURL          string
+	AWSBackendToken        string
+	GCPEnabled             bool
+	GCPBackendURL          string
+	GCPBackendToken        string
 
 	FederationEnabled              bool
 	FederationCatalogFile          string
@@ -219,6 +220,7 @@ type QueryConfig struct {
 	FederationReloadInterval       time.Duration
 	FederationStaleAfter           time.Duration
 	FederationMaxFanout            int
+	FederationDiscoveryLimit       int
 	FederationMaxInflight          int
 	FederationMaxConcurrentTargets int
 	FederationMaxAttempts          int
@@ -294,24 +296,28 @@ type QueryConfig struct {
 
 // RulesConfig holds doctor-rules settings.
 type RulesConfig struct {
-	Enabled             bool
-	HTTPAddr            string
-	TLSCertFile         string
-	TLSKeyFile          string
-	APIToken            string
-	QueryURL            string
-	QueryToken          string
-	Workers             int
-	EvalTimeout         time.Duration
-	LeaseTTL            time.Duration
-	LeaseRenew          time.Duration
-	RulerID             string
-	StoreRoot           string
-	PollInterval        time.Duration
-	MonoFSLogEngineAddr string
-	MonoFSToken         string
-	MonoFSClientID      string
-	Quota               QuotaConfig
+	Enabled                bool
+	HTTPAddr               string
+	TLSCertFile            string
+	TLSKeyFile             string
+	APIToken               string
+	AuthTokensFile         string
+	InternalIdentitySecret string
+	QueryURL               string
+	QueryToken             string
+	Workers                int
+	EvalTimeout            time.Duration
+	MaxCatchUp             time.Duration
+	MaxCatchUpTicks        int
+	LeaseTTL               time.Duration
+	LeaseRenew             time.Duration
+	RulerID                string
+	StoreRoot              string
+	PollInterval           time.Duration
+	MonoFSLogEngineAddr    string
+	MonoFSToken            string
+	MonoFSClientID         string
+	Quota                  QuotaConfig
 }
 
 // LoadRules loads the doctor-rules configuration from the environment.
@@ -325,24 +331,28 @@ func LoadRules(service string) RulesConfig {
 		}
 	}
 	return RulesConfig{
-		Enabled:             envBool("DOCTOR_RULES_ENABLED", true),
-		HTTPAddr:            envString("DOCTOR_RULES_HTTP_ADDR", ":18081"),
-		TLSCertFile:         envString("DOCTOR_TLS_CERT_FILE", ""),
-		TLSKeyFile:          envString("DOCTOR_TLS_KEY_FILE", ""),
-		APIToken:            envString("DOCTOR_RULES_API_TOKEN", ""),
-		QueryURL:            envString("DOCTOR_RULES_QUERY_URL", ""),
-		QueryToken:          envString("DOCTOR_RULES_QUERY_TOKEN", ""),
-		Workers:             int(envInt64("DOCTOR_RULES_WORKERS", 8)),
-		EvalTimeout:         envDuration("DOCTOR_RULES_EVAL_TIMEOUT", 30*time.Second),
-		LeaseTTL:            envDuration("DOCTOR_RULES_LEASE_TTL", 30*time.Second),
-		LeaseRenew:          envDuration("DOCTOR_RULES_LEASE_RENEW", 10*time.Second),
-		RulerID:             rulerID,
-		StoreRoot:           envString("DOCTOR_RULES_STORE_ROOT", "/doctor/v1/rules"),
-		PollInterval:        envDuration("DOCTOR_RULES_POLL_INTERVAL", 30*time.Second),
-		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
-		MonoFSToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
-		MonoFSClientID:      envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-rules"),
-		Quota:               LoadQuota("doctor-rules", envString("DOCTOR_ACCESS_POLICY_URL", ""), envString("DOCTOR_ACCESS_POLICY_TOKEN", "")),
+		Enabled:                envBool("DOCTOR_RULES_ENABLED", true),
+		HTTPAddr:               envString("DOCTOR_RULES_HTTP_ADDR", ":18081"),
+		TLSCertFile:            envString("DOCTOR_TLS_CERT_FILE", ""),
+		TLSKeyFile:             envString("DOCTOR_TLS_KEY_FILE", ""),
+		APIToken:               envString("DOCTOR_RULES_API_TOKEN", ""),
+		AuthTokensFile:         envString("DOCTOR_RULES_TOKENS_FILE", ""),
+		InternalIdentitySecret: envString("DOCTOR_INTERNAL_IDENTITY_SECRET", ""),
+		QueryURL:               envString("DOCTOR_RULES_QUERY_URL", ""),
+		QueryToken:             envString("DOCTOR_RULES_QUERY_TOKEN", ""),
+		Workers:                int(envInt64("DOCTOR_RULES_WORKERS", 8)),
+		EvalTimeout:            envDuration("DOCTOR_RULES_EVAL_TIMEOUT", 30*time.Second),
+		MaxCatchUp:             envDuration("DOCTOR_RULES_MAX_CATCHUP", 0),
+		MaxCatchUpTicks:        int(envInt64("DOCTOR_RULES_MAX_CATCHUP_TICKS", 60)),
+		LeaseTTL:               envDuration("DOCTOR_RULES_LEASE_TTL", 30*time.Second),
+		LeaseRenew:             envDuration("DOCTOR_RULES_LEASE_RENEW", 10*time.Second),
+		RulerID:                rulerID,
+		StoreRoot:              envString("DOCTOR_RULES_STORE_ROOT", "/doctor/v1/rules"),
+		PollInterval:           envDuration("DOCTOR_RULES_POLL_INTERVAL", 30*time.Second),
+		MonoFSLogEngineAddr:    envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
+		MonoFSToken:            envString("DOCTOR_MONOFS_TOKEN", ""),
+		MonoFSClientID:         envString("DOCTOR_MONOFS_CLIENT_ID", "doctor-rules"),
+		Quota:                  LoadQuota("doctor-rules", envString("DOCTOR_ACCESS_POLICY_URL", ""), envString("DOCTOR_ACCESS_POLICY_TOKEN", "")),
 	}
 }
 
@@ -373,6 +383,16 @@ type SentinelConfig struct {
 	LeaseRenew           time.Duration
 	RulerID              string
 
+	IncidentsEnabled     bool
+	IncidentTick         time.Duration
+	IncidentAgentURL     string
+	IncidentAgentToken   string
+	IncidentBaseURL      string
+	IncidentAgentTimeout time.Duration
+	WebhookRequireHTTPS  bool
+	WebhookAllowPrivate  bool
+	WebhookAllowLoopback bool
+
 	AWSEnabled        bool
 	AWSURL            string
 	AWSToken          string
@@ -388,6 +408,19 @@ type SentinelConfig struct {
 	GCPRegion       string
 	GCPPartition    string
 	GCPPolicy       string
+
+	// FCB configures the optional fcm-bridge (FCB) notification backend used
+	// by receivers of type "fcb". The integration is disabled when BackendURL
+	// is empty unless Enabled is set explicitly.
+	FCBEnabled       bool
+	FCBBackendURL    string
+	FCBWebhookSecret string
+	// FCBAckSecret authenticates fcm-bridge device ack callbacks. It defaults
+	// to FCBWebhookSecret because the bridge reuses DOCTOR_WEBHOOK_SECRET when
+	// DOCTOR_ACK_SECRET is not set.
+	FCBAckSecret    string
+	FCBDefaultTopic string
+	FCBTimeout      time.Duration
 }
 
 // LoadSentinel loads the doctor-sentinel configuration from the environment.
@@ -400,6 +433,8 @@ func LoadSentinel(service string) SentinelConfig {
 			rulerID = "doctor-sentinel"
 		}
 	}
+	fcbBackendURL := envString("DOCTOR_SENTINEL_FCB_BACKEND_URL", envString("DOCTOR_FCB_BACKEND_URL", ""))
+	fcbWebhookSecret := envString("DOCTOR_SENTINEL_FCB_WEBHOOK_SECRET", envString("DOCTOR_FCB_WEBHOOK_SECRET", ""))
 	return SentinelConfig{
 		Enabled:              envBool("DOCTOR_SENTINEL_ENABLED", true),
 		HTTPAddr:             envString("DOCTOR_SENTINEL_HTTP_ADDR", ":18082"),
@@ -426,6 +461,16 @@ func LoadSentinel(service string) SentinelConfig {
 		LeaseRenew:           envDuration("DOCTOR_SENTINEL_LEASE_RENEW", 10*time.Second),
 		RulerID:              rulerID,
 
+		IncidentsEnabled:     envBool("DOCTOR_SENTINEL_INCIDENTS_ENABLED", false),
+		IncidentTick:         envDuration("DOCTOR_SENTINEL_INCIDENT_TICK", 15*time.Second),
+		IncidentAgentURL:     envString("DOCTOR_SENTINEL_AGENT_URL", ""),
+		IncidentAgentToken:   envString("DOCTOR_SENTINEL_AGENT_TOKEN", ""),
+		IncidentBaseURL:      envString("DOCTOR_SENTINEL_BASE_URL", ""),
+		IncidentAgentTimeout: envDuration("DOCTOR_SENTINEL_AGENT_TIMEOUT", 120*time.Second),
+		WebhookRequireHTTPS:  envBool("DOCTOR_SENTINEL_WEBHOOK_REQUIRE_HTTPS", false),
+		WebhookAllowPrivate:  envBool("DOCTOR_SENTINEL_WEBHOOK_ALLOW_PRIVATE", false),
+		WebhookAllowLoopback: envBool("DOCTOR_SENTINEL_WEBHOOK_ALLOW_LOOPBACK", false),
+
 		AWSEnabled:        envBool("DOCTOR_SENTINEL_AWS_ENABLED", false),
 		AWSURL:            envString("DOCTOR_SENTINEL_AWS_URL", ""),
 		AWSToken:          envString("DOCTOR_SENTINEL_AWS_TOKEN", ""),
@@ -441,6 +486,13 @@ func LoadSentinel(service string) SentinelConfig {
 		GCPRegion:       envString("DOCTOR_SENTINEL_GCP_REGION", ""),
 		GCPPartition:    envString("DOCTOR_SENTINEL_GCP_PARTITION", ""),
 		GCPPolicy:       envString("DOCTOR_SENTINEL_GCP_POLICY", ""),
+
+		FCBEnabled:       envBool("DOCTOR_SENTINEL_FCB_ENABLED", envBool("DOCTOR_FCB_ENABLED", fcbBackendURL != "")),
+		FCBBackendURL:    fcbBackendURL,
+		FCBWebhookSecret: fcbWebhookSecret,
+		FCBAckSecret:     envString("DOCTOR_SENTINEL_FCB_ACK_SECRET", envString("DOCTOR_FCB_ACK_SECRET", fcbWebhookSecret)),
+		FCBDefaultTopic:  envString("DOCTOR_SENTINEL_FCB_DEFAULT_TOPIC", envString("DOCTOR_FCB_DEFAULT_TOPIC", "")),
+		FCBTimeout:       envDuration("DOCTOR_SENTINEL_FCB_TIMEOUT", envDuration("DOCTOR_FCB_TIMEOUT", 10*time.Second)),
 	}
 }
 
@@ -449,12 +501,17 @@ func LoadIngest(service string) (IngestConfig, error) {
 		DefaultTenant:       envString("DOCTOR_DEFAULT_TENANT", "default"),
 		TenantHeader:        envString("DOCTOR_TENANT_HEADER", "X-Doctor-Tenant"),
 		AuthToken:           envString("DOCTOR_INGEST_AUTH_TOKEN", ""),
+		AuthTokensFile:      envString("DOCTOR_INGEST_TOKENS_FILE", ""),
 		AllowedTenants:      envCSV("DOCTOR_INGEST_ALLOWED_TENANTS", nil),
 		MemoryLimitBytes:    envInt64("DOCTOR_MEMORY_LIMIT_BYTES", 858<<20),
 		TLSCertFile:         envString("DOCTOR_TLS_CERT_FILE", ""),
 		TLSKeyFile:          envString("DOCTOR_TLS_KEY_FILE", ""),
 		GRPCTLSCertFile:     envString("DOCTOR_GRPC_TLS_CERT_FILE", ""),
 		GRPCTLSKeyFile:      envString("DOCTOR_GRPC_TLS_KEY_FILE", ""),
+		GRPCMTLSMode:        envString("DOCTOR_GRPC_MTLS_MODE", envString("DOCTOR_INGEST_MTLS_MODE", "off")),
+		GRPCMTLSCAFile:      envString("DOCTOR_GRPC_MTLS_CA_FILE", envString("DOCTOR_INGEST_MTLS_CA_FILE", "")),
+		HTTPMTLSMode:        envString("DOCTOR_HTTP_MTLS_MODE", envString("DOCTOR_INGEST_MTLS_MODE", "off")),
+		HTTPMTLSCAFile:      envString("DOCTOR_HTTP_MTLS_CA_FILE", envString("DOCTOR_INGEST_MTLS_CA_FILE", "")),
 		GRPCAddr:            envString("DOCTOR_GRPC_ADDR", ":4317"),
 		HTTPAddr:            envString("DOCTOR_HTTP_ADDR", ":4318"),
 		DebugAddr:           envString("DOCTOR_DEBUG_ADDR", "127.0.0.1:6060"),
@@ -492,53 +549,71 @@ func LoadIngest(service string) (IngestConfig, error) {
 			Dir:     envString("DOCTOR_WAL_DIR", ".doctor/wal"),
 		},
 		Pipeline: PipelineConfig{
-			Enabled:   envBool("DOCTOR_PIPELINE_ENABLED", true),
-			QueueSize: int(envInt64("DOCTOR_PIPELINE_QUEUE_SIZE", 1000)),
-			Workers:   int(envInt64("DOCTOR_PIPELINE_WORKERS", 4)),
-		},
-		Cost: CostConfig{
-			MaxPendingSegments:  envInt64("DOCTOR_COST_MAX_SEGMENTS", 0),
-			MaxSegmentsPerHour:  envInt64("DOCTOR_COST_MAX_SEGMENTS_PER_HOUR", 0),
-			MaxTotalObjectBytes: envInt64("DOCTOR_COST_MAX_TOTAL_BYTES", 0),
+			Enabled:         envBool("DOCTOR_PIPELINE_ENABLED", true),
+			QueueSize:       int(envInt64("DOCTOR_PIPELINE_QUEUE_SIZE", 1000)),
+			Workers:         int(envInt64("DOCTOR_PIPELINE_WORKERS", 4)),
+			DurableRequired: envBool("DOCTOR_INGEST_REQUIRE_DURABLE", false),
 		},
 	}
 	if strings.TrimSpace(cfg.Privacy.HMACKey) == "" {
 		return IngestConfig{}, errors.New("DOCTOR_PRIVACY_HMAC_KEY is required")
 	}
-	if strings.TrimSpace(cfg.AuthToken) == "" {
-		return IngestConfig{}, errors.New("DOCTOR_INGEST_AUTH_TOKEN is required")
+	if strings.TrimSpace(cfg.AuthToken) == "" && strings.TrimSpace(cfg.AuthTokensFile) == "" {
+		return IngestConfig{}, errors.New("DOCTOR_INGEST_AUTH_TOKEN or DOCTOR_INGEST_TOKENS_FILE is required")
 	}
-	// Default to the single configured tenant instead of accepting every
-	// header value. Operators that need multiple tenants must opt in explicitly
-	// with DOCTOR_INGEST_ALLOWED_TENANTS.
-	if len(cfg.AllowedTenants) == 0 {
+	// With a shared token, default to the single configured tenant instead of
+	// accepting every header value. Per-collector token files carry their own
+	// tenant groups, so the deployment-wide allowlist stays optional unless the
+	// operator sets DOCTOR_INGEST_ALLOWED_TENANTS explicitly.
+	if len(cfg.AllowedTenants) == 0 && strings.TrimSpace(cfg.AuthTokensFile) == "" {
 		cfg.AllowedTenants = []string{cfg.DefaultTenant}
+	}
+	if err := validateMTLS("grpc", cfg.GRPCMTLSMode, cfg.GRPCMTLSCAFile); err != nil {
+		return IngestConfig{}, err
+	}
+	if err := validateMTLS("http", cfg.HTTPMTLSMode, cfg.HTTPMTLSCAFile); err != nil {
+		return IngestConfig{}, err
 	}
 	cfg.Quota = LoadQuota("doctor-ingest", envString("DOCTOR_ACCESS_POLICY_URL", ""), envString("DOCTOR_ACCESS_POLICY_TOKEN", ""))
 	return cfg, nil
 }
 
+func validateMTLS(name, mode, caFile string) error {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "off":
+		return nil
+	case "optional", "require":
+		if strings.TrimSpace(caFile) == "" {
+			return fmt.Errorf("%s mTLS mode %q requires DOCTOR_%s_MTLS_CA_FILE (or DOCTOR_INGEST_MTLS_CA_FILE)", name, mode, strings.ToUpper(name))
+		}
+		return nil
+	default:
+		return fmt.Errorf("%s mTLS mode %q is invalid (want off, optional, or require)", name, mode)
+	}
+}
+
 func LoadQuery(service string) QueryConfig {
 	return QueryConfig{
-		DefaultTenant:       envString("DOCTOR_DEFAULT_TENANT", "default"),
-		TenantHeader:        envString("DOCTOR_TENANT_HEADER", "X-Doctor-Tenant"),
-		HTTPAddr:            envString("DOCTOR_QUERY_HTTP_ADDR", envString("DOCTOR_HTTP_ADDR", ":18080")),
-		TLSCertFile:         envString("DOCTOR_TLS_CERT_FILE", ""),
-		TLSKeyFile:          envString("DOCTOR_TLS_KEY_FILE", ""),
-		GuardianURL:         envString("DOCTOR_GUARDIAN_UI_URL", ""),
-		GuardianAPIURL:      envString("DOCTOR_GUARDIAN_API_URL", envString("DOCTOR_GUARDIAN_UI_URL", "")),
-		DefaultPartition:    envString("DOCTOR_DEFAULT_PARTITION", ""),
-		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
-		MonoFSToken:         envString("DOCTOR_MONOFS_TOKEN", ""),
-		RulesURL:            envString("DOCTOR_RULES_URL", ""),
-		SentinelURL:         envString("DOCTOR_SENTINEL_URL", ""),
-		RulesAPIToken:       envString("DOCTOR_RULES_API_TOKEN", ""),
-		AWSEnabled:          envBool("DOCTOR_AWS_ENABLED", true),
-		AWSBackendURL:       envString("DOCTOR_AWS_BACKEND_URL", ""),
-		AWSBackendToken:     envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
-		GCPEnabled:          envBool("DOCTOR_GCP_ENABLED", true),
-		GCPBackendURL:       envString("DOCTOR_GCP_BACKEND_URL", ""),
-		GCPBackendToken:     envString("DOCTOR_GCP_BACKEND_TOKEN", ""),
+		DefaultTenant:          envString("DOCTOR_DEFAULT_TENANT", "default"),
+		TenantHeader:           envString("DOCTOR_TENANT_HEADER", "X-Doctor-Tenant"),
+		HTTPAddr:               envString("DOCTOR_QUERY_HTTP_ADDR", envString("DOCTOR_HTTP_ADDR", ":18080")),
+		TLSCertFile:            envString("DOCTOR_TLS_CERT_FILE", ""),
+		TLSKeyFile:             envString("DOCTOR_TLS_KEY_FILE", ""),
+		GuardianURL:            envString("DOCTOR_GUARDIAN_UI_URL", ""),
+		GuardianAPIURL:         envString("DOCTOR_GUARDIAN_API_URL", envString("DOCTOR_GUARDIAN_UI_URL", "")),
+		DefaultPartition:       envString("DOCTOR_DEFAULT_PARTITION", ""),
+		MonoFSLogEngineAddr:    envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
+		MonoFSToken:            envString("DOCTOR_MONOFS_TOKEN", ""),
+		RulesURL:               envString("DOCTOR_RULES_URL", ""),
+		SentinelURL:            envString("DOCTOR_SENTINEL_URL", ""),
+		RulesAPIToken:          envString("DOCTOR_RULES_API_TOKEN", ""),
+		InternalIdentitySecret: envString("DOCTOR_INTERNAL_IDENTITY_SECRET", ""),
+		AWSEnabled:             envBool("DOCTOR_AWS_ENABLED", true),
+		AWSBackendURL:          envString("DOCTOR_AWS_BACKEND_URL", ""),
+		AWSBackendToken:        envString("DOCTOR_AWS_BACKEND_TOKEN", ""),
+		GCPEnabled:             envBool("DOCTOR_GCP_ENABLED", true),
+		GCPBackendURL:          envString("DOCTOR_GCP_BACKEND_URL", ""),
+		GCPBackendToken:        envString("DOCTOR_GCP_BACKEND_TOKEN", ""),
 
 		FederationEnabled:              envBool("DOCTOR_FEDERATION_ENABLED", false),
 		FederationCatalogFile:          envString("DOCTOR_FEDERATION_CATALOG_FILE", ""),
@@ -555,6 +630,7 @@ func LoadQuery(service string) QueryConfig {
 		FederationReloadInterval:       envDuration("DOCTOR_FEDERATION_RELOAD_INTERVAL", 30*time.Second),
 		FederationStaleAfter:           envDuration("DOCTOR_FEDERATION_STALE_AFTER", 0),
 		FederationMaxFanout:            int(envInt64("DOCTOR_FEDERATION_MAX_FANOUT", 32)),
+		FederationDiscoveryLimit:       int(envInt64("DOCTOR_FEDERATION_DISCOVERY_LIMIT", 10000)),
 		FederationMaxInflight:          int(envInt64("DOCTOR_FEDERATION_MAX_INFLIGHT", 64)),
 		FederationMaxConcurrentTargets: int(envInt64("DOCTOR_FEDERATION_MAX_CONCURRENT_TARGETS", 8)),
 		FederationMaxAttempts:          int(envInt64("DOCTOR_FEDERATION_MAX_ATTEMPTS", 2)),
@@ -582,7 +658,11 @@ func LoadQuery(service string) QueryConfig {
 		GuardianDiscoveryInterval: envDuration("DOCTOR_GUARDIAN_DISCOVERY_INTERVAL", 30*time.Second),
 		GuardianToken:             envString("DOCTOR_GUARDIAN_TOKEN", ""),
 
-		AuthRequire:       envBool("DOCTOR_AUTH_REQUIRE", false),
+		// Authentication is required by default. When no verifier is
+		// configured the middleware stays a pass-through, so development
+		// deployments are unaffected; once OIDC or break-glass is configured,
+		// anonymous access must be an explicit opt-out.
+		AuthRequire:       envBool("DOCTOR_AUTH_REQUIRE", true),
 		AuthExemptPaths:   envCSV("DOCTOR_AUTH_EXEMPT_PATHS", nil),
 		OIDCIssuer:        envString("DOCTOR_OIDC_ISSUER", ""),
 		OIDCAudience:      envString("DOCTOR_OIDC_AUDIENCE", ""),

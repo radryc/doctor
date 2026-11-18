@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { api } from "../api/client";
 import AlertMetadata from "../components/alerts/AlertMetadata";
-import AlertRulesTab from "../components/alerts/AlertRulesTab";
+import AlertInventoryTab from "../components/alerts/AlertInventoryTab";
 import RoutingBoard from "../components/alerts/RoutingBoard";
 import Tabs from "../components/ui/Tabs";
 import { useConfig } from "../context/ConfigContext";
@@ -22,6 +22,7 @@ import { isPartitionDenied, pickDefaultPartition } from "../lib/partitionAccess"
 import type {
   Alert,
   AlertListResponse,
+  AlertDefinition,
   AlertRuleGroupSummary,
   Capabilities,
   DeliveryRecord,
@@ -35,9 +36,9 @@ import type {
 } from "../types/alerts";
 
 const TABS = [
-  { key: "inbox", label: "Inbox" },
+  { key: "alerts", label: "Alerts" },
+  { key: "inventory", label: "Alerts inventory" },
   { key: "subspace", label: "Subspace" },
-  { key: "rules", label: "Rules" },
   { key: "silences", label: "Silences" },
   { key: "sources", label: "Sources" },
   { key: "receivers", label: "Routing" },
@@ -48,7 +49,7 @@ type TabKey = (typeof TABS)[number]["key"];
 
 function initialTab(pathname: string): TabKey {
   const part = pathname.split("/")[2];
-  return (TABS.find((tab) => tab.key === part)?.key ?? "inbox") as TabKey;
+  return (TABS.find((tab) => tab.key === part)?.key ?? "alerts") as TabKey;
 }
 
 function severityClass(severity: string): string {
@@ -121,6 +122,7 @@ export default function AlertsPage() {
   const lastLinkedPartition = useRef(linkedPartition);
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [definitions, setDefinitions] = useState<AlertDefinition[]>([]);
   const [subspaceAlerts, setSubspaceAlerts] = useState<Alert[]>([]);
   const [ruleGroups, setRuleGroups] = useState<AlertRuleGroupSummary[]>([]);
   const [silences, setSilences] = useState<Silence[]>([]);
@@ -130,8 +132,9 @@ export default function AlertsPage() {
   const [gcpPolicy, setGCPPolicy] = useState<GCPPolicy | null>(null);
   const [gcpPolicyText, setGCPPolicyText] = useState("");
   const [guardianPolicy, setGuardianPolicy] = useState<GuardianPolicy | null>(null);
-  const [guardianErrorFor, setGuardianErrorFor] = useState("0s");
+  const [guardianErrorFor, setGuardianErrorFor] = useState("5m");
   const [guardianAttentionFor, setGuardianAttentionFor] = useState("0s");
+  const [guardianUnavailableFor, setGuardianUnavailableFor] = useState("5m");
   const [guardianAlertOnLocked, setGuardianAlertOnLocked] = useState(false);
   const [receivers, setReceivers] = useState<ReceiverConfig | null>(null);
   const [routingAlerts, setRoutingAlerts] = useState<Alert[]>([]);
@@ -141,6 +144,7 @@ export default function AlertsPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [alertFilter, setAlertFilter] = useState("");
   const [severityFilter, setSeverityFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [silenceFor, setSilenceFor] = useState<Alert | null>(null);
@@ -286,19 +290,21 @@ export default function AlertsPage() {
     }
     try {
       await loadCaps();
-      if (tab === "inbox") await loadInbox();
+      if (tab === "alerts") await loadInbox();
       if (tab === "subspace") {
         const p = new URLSearchParams({ tenant, scope: "subspace" });
         if (partition && !partitionDenied) p.set("partition", partition);
         const data = await api.getAlerts(p);
         setSubspaceAlerts(data.alerts ?? []);
       }
-      if (tab === "rules" && partition) {
-        const [data, receiverData] = await Promise.all([
+      if (tab === "inventory" && partition) {
+        const [inventory, groupsData, receiverData] = await Promise.all([
+          api.getAlertInventory(tenant, partition),
           api.getAlertRuleGroups(tenant, partition),
           api.getReceivers(params),
         ]);
-        setRuleGroups(data.groups ?? []);
+        setDefinitions(inventory.definitions ?? []);
+        setRuleGroups(groupsData.groups ?? []);
         setReceivers({
           receivers: Array.isArray(receiverData?.receivers) ? receiverData.receivers : [],
           routes: Array.isArray(receiverData?.routes) ? receiverData.routes : [],
@@ -325,8 +331,9 @@ export default function AlertsPage() {
         setGCPPolicy(gcpPolicyData);
         setGCPPolicyText(JSON.stringify(gcpPolicyData, null, 2));
         setGuardianPolicy(guardianPolicyData);
-        setGuardianErrorFor(guardianPolicyData?.alerts?.GuardianPartitionError?.for || "0s");
+        setGuardianErrorFor(guardianPolicyData?.alerts?.GuardianPartitionError?.for || "5m");
         setGuardianAttentionFor(guardianPolicyData?.alerts?.GuardianPartitionAttention?.for || "0s");
+        setGuardianUnavailableFor(guardianPolicyData?.alerts?.GuardianPartitionUnavailable?.for || "5m");
         setGuardianAlertOnLocked(Boolean(guardianPolicyData?.alertOnLocked));
       }
       if (tab === "receivers") {
@@ -366,8 +373,20 @@ export default function AlertsPage() {
   const switchTab = (key: TabKey) => {
     setSelected(null);
     setSilenceFor(null);
-    navigate(key === "inbox" ? "/alerts" : `/alerts/${key}`);
+    navigate(key === "alerts" ? "/alerts" : `/alerts/${key}`);
   };
+
+  const openInstances = (alertname: string, source?: string) => {
+    setAlertFilter(alertname);
+    if (source) setSourceFilter(source);
+    setStatusFilter("all");
+    setSeverityFilter("all");
+    switchTab("alerts");
+  };
+
+  useEffect(() => {
+    setAlertFilter("");
+  }, [partition]);
 
   const acknowledge = async (alert: Alert) => {
     try {
@@ -513,11 +532,15 @@ export default function AlertsPage() {
           ...(guardianPolicy?.alerts ?? {}),
           GuardianPartitionError: {
             ...(guardianPolicy?.alerts?.GuardianPartitionError ?? {}),
-            for: guardianErrorFor.trim() || "0s",
+            for: guardianErrorFor.trim() || "5m",
           },
           GuardianPartitionAttention: {
             ...(guardianPolicy?.alerts?.GuardianPartitionAttention ?? {}),
             for: guardianAttentionFor.trim() || "0s",
+          },
+          GuardianPartitionUnavailable: {
+            ...(guardianPolicy?.alerts?.GuardianPartitionUnavailable ?? {}),
+            for: guardianUnavailableFor.trim() || "5m",
           },
         },
       };
@@ -574,7 +597,9 @@ export default function AlertsPage() {
     }
   };
 
-  const filteredAlerts = alerts;
+  const filteredAlerts = alertFilter
+    ? alerts.filter((alert) => (alert.labels.alertname ?? "") === alertFilter)
+    : alerts;
 
   return (
     <div className="h-full w-full overflow-hidden bg-slate-950 text-slate-100">
@@ -681,7 +706,7 @@ export default function AlertsPage() {
             </div>
           )}
 
-          {!partitionDenied && tab === "inbox" && partition && (
+          {!partitionDenied && tab === "alerts" && partition && (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
               <section className="rounded-lg border border-slate-800 bg-slate-900/50">
                 <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
@@ -703,9 +728,21 @@ export default function AlertsPage() {
                     <option value="all">All sources</option>
                     <option value="guardian">Guardian</option>
                     <option value="aws">AWS</option>
+                    <option value="gcp">GCP</option>
                     <option value="alertmanager">Alertmanager</option>
                     <option value="sentinel">Sentinel rule</option>
+                    <option value="test">Test</option>
                   </select>
+                  {alertFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setAlertFilter("")}
+                      className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] text-cyan-300"
+                      title="Clear the alert-name filter"
+                    >
+                      alert: {alertFilter} ×
+                    </button>
+                  )}
                   <span className="ml-auto text-[11px] text-slate-500">{filteredAlerts.length} alerts</span>
                 </div>
                 <div className="overflow-x-auto">
@@ -879,10 +916,11 @@ export default function AlertsPage() {
             </section>
           )}
 
-          {!partitionDenied && tab === "rules" && partition && (
-            <AlertRulesTab
+          {!partitionDenied && tab === "inventory" && partition && (
+            <AlertInventoryTab
               tenant={tenant}
               partition={partition}
+              definitions={definitions}
               groups={ruleGroups}
               endpoints={receivers?.receivers ?? []}
               caps={caps}
@@ -890,6 +928,7 @@ export default function AlertsPage() {
               onReload={loadTab}
               onNotice={setNotice}
               onError={setError}
+              onOpenInstances={openInstances}
             />
           )}
 
@@ -1004,7 +1043,7 @@ export default function AlertsPage() {
                 </div>
                 {partition ? (
                   <>
-                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
                       <label className="text-[11px] text-slate-400">
                         Attention delay
                         <input
@@ -1019,11 +1058,24 @@ export default function AlertsPage() {
                         <input
                           value={guardianErrorFor}
                           onChange={(event) => setGuardianErrorFor(event.target.value)}
-                          placeholder="0s"
+                          placeholder="5m"
+                          className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
+                        />
+                      </label>
+                      <label className="text-[11px] text-slate-400">
+                        Observability failure delay
+                        <input
+                          value={guardianUnavailableFor}
+                          onChange={(event) => setGuardianUnavailableFor(event.target.value)}
+                          placeholder="5m"
                           className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
                         />
                       </label>
                     </div>
+                    <p className="mt-2 text-[10px] text-slate-500">
+                      Observability failures mean Guardian could not read the partition (for example a status read
+                      deadline), so health is unknown rather than failing.
+                    </p>
                     <label className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
                       <input
                         type="checkbox"
@@ -1034,8 +1086,10 @@ export default function AlertsPage() {
                     </label>
                     <p className="mt-2 text-[10px] text-slate-500">
                       Use Go durations such as <span className="font-mono">30m</span> or{" "}
-                      <span className="font-mono">2h</span>. <span className="font-mono">0s</span> fires on the first
-                      observation.
+                      <span className="font-mono">2h</span>. Defaults are{" "}
+                      <span className="font-mono">5m</span> for errors and observability failures,{" "}
+                      <span className="font-mono">0s</span> for attention.{" "}
+                      <span className="font-mono">0s</span> fires on the first observation.
                     </p>
                   </>
                 ) : (

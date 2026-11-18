@@ -28,12 +28,16 @@ type GuardianAlertPolicy struct {
 	For Duration `json:"for,omitempty" yaml:"for,omitempty"`
 }
 
-// DefaultGuardianPolicy is the safe default: locked drift is ignored and every
-// alert fires on the first observation.
+// DefaultGuardianPolicy is the safe default: locked drift is ignored and
+// partition error/observability alerts require 5 minutes of continuous
+// observation before firing, so a single slow status read cannot page.
 func DefaultGuardianPolicy() *GuardianPolicy {
 	return &GuardianPolicy{
 		Version: 1,
-		Alerts:  map[string]GuardianAlertPolicy{},
+		Alerts: map[string]GuardianAlertPolicy{
+			GuardianPartitionErrorAlert:       {For: Duration(5 * time.Minute)},
+			GuardianPartitionUnavailableAlert: {For: Duration(5 * time.Minute)},
+		},
 	}
 }
 

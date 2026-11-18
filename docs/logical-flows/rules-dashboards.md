@@ -61,8 +61,12 @@ Details:
   - `max`, `min`: element-wise;
   - `last`: newest timestamp;
   - `keep`: retain per-shard series (source/shard labels preserved).
-- For `sum`, a partial response is skipped because adding a partial shard set would produce an
-  incorrect total.
+- For `sum`, a partial response is retried (default 2 attempts, 100ms apart) and then skipped
+  because adding a partial shard set would produce an incorrect total.
+- `Evaluator.EvaluateGroupAt` evaluates at an explicit timestamp. `/v1/rules/backfill` replays a
+  bounded range (`from`, `to`, optional `step`, max 10k ticks).
+- Recording-rule chunk IDs are derived from record content, so retries and repeated backfills do not
+  write duplicate samples.
 - Derived records set:
   - `Service` = a `service` label if present, else `"recording"`;
   - `Attributes` = rule labels + merged metric labels + `source="recording"`, `rule_group`, `rule`;
@@ -81,11 +85,14 @@ Details:
 | PUT | `/v1/rules/{partition}/{group}` | parse + validate + store (authenticated authorizer + rule quota) |
 | DELETE | `/v1/rules/{partition}/{group}` | delete with CAS (authenticated authorizer) |
 
-The server requires `DOCTOR_RULES_API_TOKEN` on every route except `/healthz` and `/metrics`. The
-authorizer is `ruler.AuthenticatedAuthorizer`, so mutations require an authenticated service
-principal. This is still all-or-nothing: any holder of the service token can modify any partition/group.
-The query service’s rules proxy only allows GET and POST `/v1/rules/evaluate` and injects the same
-service token.
+The server requires a bearer credential on every route except `/healthz` and `/metrics`.
+`DOCTOR_RULES_TOKENS_FILE` binds each token to partitions and a role (`admin`, `maintainer`, or
+`viewer`); `DOCTOR_RULES_API_TOKEN` remains as a legacy admin credential. `ScopedRulesAuthorizer`
+enforces `rules:write:<partition>` / `rules:read:<partition>` and filters list/read results.
+
+The query service’s rules proxy forwards the caller's verified identity as a short-lived HMAC-signed
+`X-Doctor-Identity` header (`DOCTOR_INTERNAL_IDENTITY_SECRET`) alongside the service credential, so
+proxied mutations are authorized against the caller's partition scopes.
 
 ### 1.4 Lease behavior
 
@@ -97,11 +104,13 @@ service token.
 
 ### 1.5 Known gaps
 
-- the rules API token is all-or-nothing; there is no per-partition ownership;
+- TODO(security): add OIDC identities so partition ownership can come from the IdP instead of a
+  static token file;
 - no partition validation beyond the URL path;
 - no dry-run/backtest API;
 - no rule evaluation history/audit;
-- the scheduler now skips missed intervals after a pause, but there is no catch-up policy;
+- `DOCTOR_RULES_MAX_CATCHUP` replays in-process gaps only; a restart does not recover the last-run
+  boundary (use `/v1/rules/backfill`);
 - API `List` reads each rule file individually (N+1);
 - rules self-telemetry is OTLP-only; `/metrics` exposes Go/process metrics.
 
@@ -164,9 +173,9 @@ flowchart LR
 | POST | `/v1/dashboards/import` | import document/bundle |
 | GET | `/v1/dashboards/export` | export bundle |
 
-There is no per-tenant or per-user authorization here. Any caller that passes the general auth
-middleware can read or write any tenant path. Writes are attributed to the service principal
-`doctor-query`, not the end user.
+Dashboard storage still has no per-tenant or per-user authorization: any caller that passes the
+general auth middleware can read or write any tenant path. Writes are attributed to
+`doctor-query`, not the end user. (Recording rules are separately scoped per partition.)
 
 ### 2.4 UI render flow
 

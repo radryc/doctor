@@ -36,6 +36,15 @@ type Service struct {
 	Querier         Querier
 	Logger          *log.Logger
 	Now             func() time.Time
+	// Wake is signalled after a successful alert transition so the incident
+	// reconciler can react immediately instead of waiting for its next tick.
+	Wake func()
+}
+
+func (s *Service) wake() {
+	if s != nil && s.Wake != nil {
+		s.Wake()
+	}
 }
 
 // IngestGuardian validates and normalizes a Guardian alert.
@@ -164,6 +173,7 @@ func (s *Service) Apply(ctx context.Context, incoming Alert) (*Alert, error) {
 		}
 		err = s.Store.SaveAlertExpected(ctx, next, outbox, version)
 		if err == nil {
+			s.wake()
 			return &next, nil
 		}
 		if !errors.Is(err, doctorstore.ErrConflict) {

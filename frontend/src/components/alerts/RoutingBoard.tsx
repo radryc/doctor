@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { GripVertical, Mail, Pencil, Plus, Radio, Save, Trash2, Webhook, X } from "lucide-react";
+import { GripVertical, Mail, Pencil, Plus, Radio, Save, Smartphone, Trash2, Webhook, X } from "lucide-react";
 import { api } from "../../api/client";
 import { assignSourceRoute, sourceRouteDestination } from "../../lib/routing";
 import type {
@@ -67,6 +67,12 @@ const KNOWN_SOURCE_ALERTS: SourceAlertCard[] = [
     severity: "warning",
     description: "A Guardian partition needs attention or has drift.",
   },
+  {
+    source: "guardian",
+    alert: "GuardianPartitionUnavailable",
+    severity: "warning",
+    description: "Guardian could not observe a partition (status read timed out), so its health is unknown.",
+  },
 ];
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -91,6 +97,22 @@ const TYPE_PRESETS: Record<string, Partial<Receiver>> = {
     secretEnv: "GOALERT_INTEGRATION_KEY",
     description: "Opens and closes alerts in a GoAlert service.",
   },
+  teams: {
+    urlEnv: "TEAMS_ONCALL_WEBHOOK_URL",
+    description: "Posts alert and incident cards to a Teams channel.",
+  },
+  zoom: {
+    urlEnv: "ZOOM_BRIDGE_WEBHOOK_URL",
+    description: "Posts incident updates to Zoom Team Chat.",
+  },
+  android: {
+    urlEnv: "ANDROID_ONCALL_WEBHOOK_URL",
+    description: "Sends a Doctor Android notification payload to your app or bridge.",
+  },
+  fcb: {
+    target: "",
+    description: "Sends to an FCB notification target. Leave the target empty to use the FCB on-call rotation.",
+  },
   webhook: {
     url: "https://example.com/hooks/sentinel",
     secretEnv: "SENTINEL_WEBHOOK_SECRET",
@@ -103,11 +125,17 @@ const TYPE_LABELS: Record<string, string> = {
   slack: "Slack",
   goalert: "GoAlert",
   webhook: "Webhook",
+  teams: "Microsoft Teams",
+  zoom: "Zoom Team Chat",
+  android: "Android",
+  fcb: "FCB",
 };
 
 function endpointIcon(type: string) {
   if (type === "pagerduty") return <Radio size={14} />;
-  if (type === "slack") return <Mail size={14} />;
+  if (type === "slack" || type === "teams") return <Mail size={14} />;
+  if (type === "zoom") return <Radio size={14} />;
+  if (type === "android" || type === "fcb") return <Smartphone size={14} />;
   return <Webhook size={14} />;
 }
 
@@ -245,6 +273,15 @@ export default function RoutingBoard({
     setRaw(JSON.stringify(config, null, 2));
   }, [config, dirty]);
 
+  useEffect(() => {
+    if (!draft) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDraft(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [draft]);
+
   const sourceAlerts = useMemo(() => {
     const cards = new Map<string, SourceAlertCard>();
     const remember = (card: SourceAlertCard, overwrite = false) => {
@@ -322,6 +359,22 @@ export default function RoutingBoard({
   const updateDraft = (patch: Partial<Receiver>) => {
     if (!draft) return;
     setDraft({ ...draft, receiver: { ...draft.receiver, ...patch } });
+  };
+
+  const selectPreset = (type: string) => {
+    // Switching transport must not carry over another sender's endpoint,
+    // credentials, target, or headers.
+    updateDraft({
+      type,
+      url: "",
+      urlEnv: "",
+      secretEnv: "",
+      target: "",
+      headers: undefined,
+      format: undefined,
+      templates: undefined,
+      ...TYPE_PRESETS[type],
+    });
   };
 
   const saveEndpoint = () => {
@@ -670,6 +723,14 @@ export default function RoutingBoard({
                         )}
                       </div>
                       <dl className="mt-3 grid grid-cols-1 gap-2 border-t border-slate-800/80 pt-2 sm:grid-cols-2">
+                        {receiver.target && (
+                          <div className="min-w-0">
+                            <dt className="text-[9px] uppercase tracking-wide text-slate-600">Target</dt>
+                            <dd className="break-all font-mono text-[10px] leading-snug text-slate-400">
+                              {receiver.target}
+                            </dd>
+                          </div>
+                        )}
                         <div className="min-w-0">
                           <dt className="text-[9px] uppercase tracking-wide text-slate-600">Endpoint</dt>
                           <dd className="break-all font-mono text-[10px] leading-snug text-slate-400">
@@ -903,9 +964,18 @@ export default function RoutingBoard({
       </section>
 
       {draft && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--strata-scrim)] p-4">
-          <div className="w-full max-w-lg rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-2xl">
-            <div className="flex items-start justify-between gap-3">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--strata-scrim)] p-4"
+          onClick={() => setDraft(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={draft.index === null ? "Add destination" : "Edit destination"}
+            className="max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="sticky top-0 z-10 -mx-5 -mt-5 flex items-start justify-between gap-3 border-b border-slate-800 bg-slate-900 px-5 pb-3 pt-5">
               <div>
                 <h2 className="text-sm font-semibold">{draft.index === null ? "Add destination" : "Edit destination"}</h2>
                 <p className="mt-1 text-[11px] text-slate-500">Credentials live in environment variables, never in the config.</p>
@@ -919,7 +989,7 @@ export default function RoutingBoard({
                 <button
                   key={type}
                   type="button"
-                  onClick={() => updateDraft({ type, ...TYPE_PRESETS[type] })}
+                  onClick={() => selectPreset(type)}
                   className={`rounded border p-2 text-left text-xs ${
                     draft.receiver.type === type ? "border-[var(--strata-accent)] bg-slate-800" : "border-slate-700 bg-slate-950"
                   }`}
@@ -946,24 +1016,56 @@ export default function RoutingBoard({
                 className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
               />
             </label>
-            <label className="mt-3 block text-[11px] text-slate-400">
-              URL
-              <input
-                value={draft.receiver.url ?? ""}
-                onChange={(event) => updateDraft({ url: event.target.value })}
-                className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
-              />
-            </label>
-            <label className="mt-3 block text-[11px] text-slate-400">
-              Credential environment variable
-              <input
-                value={draft.receiver.secretEnv ?? ""}
-                onChange={(event) => updateDraft({ secretEnv: event.target.value })}
-                className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
-                placeholder="PAGERDUTY_ROUTING_KEY"
-              />
-            </label>
-            <div className="mt-4 flex justify-end gap-2">
+            {draft.receiver.type === "fcb" && (
+              <>
+                <label className="mt-3 block text-[11px] text-slate-400">
+                  Target (optional: FCM topic or FCB target ID)
+                  <input
+                    value={draft.receiver.target ?? ""}
+                    onChange={(event) => updateDraft({ target: event.target.value })}
+                    className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
+                    placeholder="payments (blank = on-call rotation)"
+                  />
+                </label>
+                <p className="mt-2 text-[10px] text-slate-500">
+                  Create the target and assign devices in the FCB On-Call Console. The bridge URL, shared secret, and default target come from the Sentinel FCB config; no per-receiver URL or credential is needed here.
+                </p>
+              </>
+            )}
+            {draft.receiver.type !== "fcb" && (
+              <>
+                <label className="mt-3 block text-[11px] text-slate-400">
+                  URL
+                  <input
+                    value={draft.receiver.url ?? ""}
+                    onChange={(event) => updateDraft({ url: event.target.value })}
+                    className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
+                  />
+                </label>
+                <label className="mt-3 block text-[11px] text-slate-400">
+                  Webhook URL environment variable
+                  <input
+                    value={draft.receiver.urlEnv ?? ""}
+                    onChange={(event) => updateDraft({ urlEnv: event.target.value })}
+                    className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
+                    placeholder="TEAMS_ONCALL_WEBHOOK_URL"
+                  />
+                </label>
+                <label className="mt-3 block text-[11px] text-slate-400">
+                  Credential environment variable
+                  <input
+                    value={draft.receiver.secretEnv ?? ""}
+                    onChange={(event) => updateDraft({ secretEnv: event.target.value })}
+                    className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs"
+                    placeholder="PAGERDUTY_ROUTING_KEY"
+                  />
+                </label>
+                <p className="mt-2 text-[10px] text-slate-500">
+                  Teams and Zoom receivers accept alert and incident events. Incident updates use the same outbox and delivery log.
+                </p>
+              </>
+            )}
+            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex justify-end gap-2 border-t border-slate-800 bg-slate-900 px-5 pb-5 pt-3">
               <button type="button" onClick={() => setDraft(null)} className="btn text-xs">Cancel</button>
               <button type="button" onClick={saveEndpoint} className="btn btn--primary text-xs">Save destination</button>
             </div>

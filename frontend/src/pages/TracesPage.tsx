@@ -8,6 +8,7 @@ import { copyText } from "../lib/clipboard";
 import { splitServiceIdentity } from "../lib/logs";
 import { traceRoute } from "../lib/traceRoute";
 import TraceDetails, { fmtTime } from "../components/charts/TraceDetails";
+import TraceHelpButton from "../components/traces/TraceHelpButton";
 import type { LogIdentityInfo, LogRecord, TraceSummary, TraceRecord } from "../types/api";
 
 // Accepts the two formats Doctor emits and returns the canonical 32-hex form:
@@ -172,6 +173,7 @@ function SingleTraceView({ traceId, tenant, onBack }: { traceId: string; tenant:
           >
             <FileText size={12} /> Logs for trace
           </button>
+          <TraceHelpButton compact />
           <button className="xp-back-btn" onClick={onBack}>← Back to list</button>
         </div>
       </div>
@@ -680,6 +682,7 @@ export default function TracesPage() {
           >
             {copiedView ? <><Check size={11} /> Copied</> : <><Link2 size={11} /> Copy view</>}
           </button>
+          <TraceHelpButton />
         </div>
       </div>
 

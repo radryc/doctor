@@ -187,7 +187,21 @@ func main() {
 
 	var pipeline *ingest.Pipeline
 	if cfg.Pipeline.Enabled {
-		pipeline = ingest.NewPipeline(writer, ingest.PipelineConfig{
+		buffered := traceBuffer != nil || logBuffer != nil || metricBuffer != nil
+		if !buffered {
+			message := "ingest pipeline has no WAL buffers enabled: accepted records are written directly to MonoFS and a transient outage returns 500"
+			if cfg.Pipeline.DurableRequired {
+				log.Fatalf("DOCTOR_INGEST_REQUIRE_DURABLE=true but no trace/log/metric buffer is enabled")
+			}
+			log.Printf("WARNING: %s", message)
+		}
+		pipelineWriter := ingest.Flusher(writer)
+		if buffered {
+			// Stage accepted records in the WAL buffers, then let their
+			// background loops retry MonoFS. Submit* returns after the append.
+			pipelineWriter = ingest.NewBufferedWriter(writer, traceBuffer, logBuffer, metricBuffer)
+		}
+		pipeline = ingest.NewPipeline(pipelineWriter, ingest.PipelineConfig{
 			QueueSize: cfg.Pipeline.QueueSize,
 			Workers:   cfg.Pipeline.Workers,
 		})
@@ -221,10 +235,51 @@ func main() {
 		log.Printf("partition quota disabled: set DOCTOR_QUOTA_POLICY_URL or DOCTOR_QUOTA_ENABLED=true")
 	}
 
-	verifier := authz.NewStaticTokenVerifier()
-	verifier.Add(cfg.AuthToken, authz.Identity{Subject: "telemetry-ingest", ClientID: "telemetry-ingest"})
+	// Collector mTLS is optional (see CollectorTLSConfig above): bearer tokens
+	// continue to bind collectors to tenants, and mTLS adds transport-level
+	// client authentication. TODO(security): OIDC workload identity as an
+	// alternative to client certificates.
+	verifiers := make([]authz.TokenVerifier, 0, 2)
+	if strings.TrimSpace(cfg.AuthTokensFile) != "" {
+		scoped, err := ingest.LoadTokenFile(cfg.AuthTokensFile)
+		if err != nil {
+			log.Fatalf("load ingest token file: %v", err)
+		}
+		verifiers = append(verifiers, scoped)
+		log.Printf("ingest token file loaded from %s (%d collector credentials; tenant-scoped=%v)",
+			cfg.AuthTokensFile, scoped.TokenCount(), scoped.Scoped())
+	}
+	if strings.TrimSpace(cfg.AuthToken) != "" {
+		legacy := authz.NewStaticTokenVerifier()
+		legacy.Add(cfg.AuthToken, ingest.LegacyIdentity(cfg.AllowedTenants))
+		verifiers = append(verifiers, legacy)
+		log.Printf("legacy DOCTOR_INGEST_AUTH_TOKEN enabled (scoped to tenants %v); "+
+			"migrate to DOCTOR_INGEST_TOKENS_FILE for per-collector identity", cfg.AllowedTenants)
+	}
+	verifier := authz.NewChainVerifier(verifiers...)
 	ingestAuth := auth.NewMiddleware(verifier, true, []string{"/healthz", "/metrics"}, log.Default())
 	grpcAuth := authz.NewAuthenticator(verifier, nil, true)
+
+	grpcTLS, err := ingest.CollectorTLSConfig(cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile, ingest.CollectorMTLS{
+		Mode:   cfg.GRPCMTLSMode,
+		CAFile: cfg.GRPCMTLSCAFile,
+	})
+	if err != nil {
+		log.Fatalf("configure gRPC collector TLS: %v", err)
+	}
+	httpTLS, err := ingest.CollectorTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, ingest.CollectorMTLS{
+		Mode:   cfg.HTTPMTLSMode,
+		CAFile: cfg.HTTPMTLSCAFile,
+	})
+	if err != nil {
+		log.Fatalf("configure HTTP collector TLS: %v", err)
+	}
+	if grpcTLS != nil {
+		log.Printf("OTLP gRPC TLS enabled (mTLS mode=%s)", cfg.GRPCMTLSMode)
+	}
+	if httpTLS != nil {
+		log.Printf("OTLP HTTP TLS enabled (mTLS mode=%s)", cfg.HTTPMTLSMode)
+	}
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
@@ -243,12 +298,8 @@ func main() {
 			return authInterceptor(ctx, req, info, handler)
 		}),
 	}
-	if cfg.GRPCTLSCertFile != "" || cfg.GRPCTLSKeyFile != "" {
-		creds, credsErr := credentials.NewServerTLSFromFile(cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile)
-		if credsErr != nil {
-			log.Fatalf("load gRPC TLS credentials: %v", credsErr)
-		}
-		grpcServerOptions = append(grpcServerOptions, grpc.Creds(creds))
+	if grpcTLS != nil {
+		grpcServerOptions = append(grpcServerOptions, grpc.Creds(credentials.NewTLS(grpcTLS)))
 	}
 	grpcServer := grpc.NewServer(grpcServerOptions...)
 	if telemetryHandle.Enabled() {
@@ -261,6 +312,7 @@ func main() {
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           ingestAuth.Wrap(service.Handler()),
+		TLSConfig:         httpTLS,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       2 * time.Minute,
 		WriteTimeout:      2 * time.Minute,

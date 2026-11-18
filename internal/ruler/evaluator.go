@@ -31,6 +31,11 @@ type Evaluator struct {
 	Timeout time.Duration
 	Logger  *log.Logger
 	Now     func() time.Time
+
+	// PartialRetries re-queries when the proxy reports a degraded response.
+	// Defaults to 2. Zero disables retries only when RetryDisabled is set.
+	PartialRetries int
+	RetryDelay     time.Duration
 }
 
 // EvalResult summarizes one rule evaluation.
@@ -39,25 +44,35 @@ type EvalResult struct {
 	Group     string `json:"group"`
 	Rule      string `json:"rule"`
 	Samples   int    `json:"samples"`
+	Attempts  int    `json:"attempts,omitempty"`
 	Skipped   bool   `json:"skipped,omitempty"`
 	Partial   bool   `json:"partial,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
-// EvaluateGroup evaluates every rule in a group.
+// EvaluateGroup evaluates every rule in a group at the current time.
 func (e *Evaluator) EvaluateGroup(ctx context.Context, group Group) []EvalResult {
+	return e.EvaluateGroupAt(ctx, group, e.now().Add(-group.EvaluationDelayOrDefault()))
+}
+
+// EvaluateGroupAt evaluates every rule in a group at an explicit timestamp.
+// Backfill uses it to replay missed ticks; the caller owns delay handling.
+func (e *Evaluator) EvaluateGroupAt(ctx context.Context, group Group, at time.Time) []EvalResult {
 	results := make([]EvalResult, 0, len(group.Rules))
 	for _, rule := range group.Rules {
-		results = append(results, e.EvaluateRule(ctx, group, rule))
+		results = append(results, e.EvaluateRuleAt(ctx, group, rule, at))
 	}
 	return results
 }
 
-// EvaluateRule evaluates one recording rule.
+// EvaluateRule evaluates one recording rule at the current time.
 func (e *Evaluator) EvaluateRule(ctx context.Context, group Group, rule Rule) EvalResult {
+	return e.EvaluateRuleAt(ctx, group, rule, e.now().Add(-group.EvaluationDelayOrDefault()))
+}
+
+// EvaluateRuleAt evaluates one recording rule at an explicit timestamp.
+func (e *Evaluator) EvaluateRuleAt(ctx context.Context, group Group, rule Rule, at time.Time) EvalResult {
 	result := EvalResult{Partition: group.Partition, Group: group.Name, Rule: rule.Record}
-	now := e.now()
-	at := now.Add(-group.EvaluationDelayOrDefault())
 
 	callCtx := ctx
 	if e.Timeout > 0 {
@@ -65,7 +80,34 @@ func (e *Evaluator) EvaluateRule(ctx context.Context, group Group, rule Rule) Ev
 		callCtx, cancel = context.WithTimeout(ctx, e.Timeout)
 		defer cancel()
 	}
-	data, partial, err := e.Querier.PromInstant(callCtx, rule.Expr, at)
+	retries := e.PartialRetries
+	if retries <= 0 {
+		retries = 2
+	}
+	delay := e.RetryDelay
+	if delay <= 0 {
+		delay = 100 * time.Millisecond
+	}
+	var (
+		data    map[string]any
+		partial bool
+		err     error
+	)
+	for attempt := 1; attempt <= retries+1; attempt++ {
+		result.Attempts = attempt
+		data, partial, err = e.Querier.PromInstant(callCtx, rule.Expr, at)
+		if err != nil || !partial || attempt == retries+1 {
+			break
+		}
+		select {
+		case <-callCtx.Done():
+			err = callCtx.Err()
+		case <-time.After(delay):
+		}
+		if err != nil {
+			break
+		}
+	}
 	if err != nil {
 		result.Error = err.Error()
 		return result

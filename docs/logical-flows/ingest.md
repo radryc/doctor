@@ -15,10 +15,11 @@
 | `:4318/api/v1/status/buildinfo` | HTTP GET | build metadata |
 | `:6060/debug/pprof/*` | HTTP | Go pprof on localhost by default (`127.0.0.1:6060`, if enabled) |
 
-OTLP gRPC and HTTP require `Authorization: Bearer $DOCTOR_INGEST_AUTH_TOKEN`. The token is checked by
-a static bearer verifier; `/healthz` and `/metrics` are exempt. The tenant is read from the header or
-gRPC metadata and must be in `DOCTOR_INGEST_ALLOWED_TENANTS` (which defaults to the configured
-`DOCTOR_DEFAULT_TENANT`).
+OTLP gRPC and HTTP require a bearer token via `DOCTOR_INGEST_TOKENS_FILE` (preferred per-collector
+tokens scoped to tenants) or `Authorization: Bearer $DOCTOR_INGEST_AUTH_TOKEN` (legacy shared token).
+`/healthz` and `/metrics` are exempt. The tenant is read from the header or
+gRPC metadata and must satisfy both `DOCTOR_INGEST_ALLOWED_TENANTS` (which defaults to the configured
+`DOCTOR_DEFAULT_TENANT`) and the collector's tenant groups.
 
 ## 2. OTLP HTTP decoding
 
@@ -161,9 +162,8 @@ therefore become gRPC `Unknown` / HTTP 500, not a retryable status.
 3. call `writer.WriteGuardianEvents`.
 
 `MonoFSWriter.WriteGuardianEvents` returns `ErrGuardianEventsUnsupported` because the log-engine has
-no Guardian event chunk type. The endpoint now returns **501 Not Implemented** instead of reporting
-`{"accepted": N}` and silently dropping events. The `internal/guardian` auth/rate-limit/dedup
-helpers are still unused. This endpoint is not a working Guardian event sink.
+no Guardian event chunk type. The endpoint returns **501 Not Implemented** instead of reporting
+`{"accepted": N}` and silently dropping events. This endpoint is not a working Guardian event sink.
 
 ## 8. Shutdown
 
@@ -204,9 +204,9 @@ helpers are still unused. This endpoint is not a working Guardian event sink.
   every buffer is disabled; `DOCTOR_INGEST_REQUIRE_DURABLE=true` rejects that configuration.
 - Per-partition storage bytes are enforced by `internal/quota` when the policy sets
   `storage.max_bytes`. `DOCTOR_QUOTA_STATE_MODE=file` persists accepted bytes in a per-replica
-  journal + snapshot; `memory` (the default) still resets on restart. The shared-reservation phase is
-  described in [`docs/internal/durable-quota-state.md`](../internal/durable-quota-state.md). Actual
-  chunk deletion and retention are owned by MonoFS and are not enforced by Doctor.
+  journal + snapshot, and `DOCTOR_QUOTA_STATE_MODE=shared` uses MonoFS CAS block reservations across
+  replicas; `memory` (the default) resets on restart. Actual chunk deletion and retention are owned
+  by MonoFS and are not enforced by Doctor.
 - No legacy segment WAL (`internal/wal.WAL` is unused).
 - No request IDs, structured access logs, or audit trail for accepted telemetry.
 

@@ -94,6 +94,7 @@ func main() {
 	svc.SetDefaultPartition(cfg.DefaultPartition)
 	svc.SetRulesURL(cfg.RulesURL)
 	svc.SetRulesToken(cfg.RulesAPIToken)
+	svc.SetRulesIdentitySecret(cfg.InternalIdentitySecret)
 	if strings.TrimSpace(cfg.RulesURL) != "" && strings.TrimSpace(cfg.RulesAPIToken) == "" {
 		log.Printf("rules proxy is configured without DOCTOR_RULES_API_TOKEN; doctor-rules requires it and proxy requests will fail")
 	}
@@ -179,6 +180,7 @@ func main() {
 		}
 		opts := federation.Options{
 			MaxFanout:            cfg.FederationMaxFanout,
+			DiscoveryLimit:       cfg.FederationDiscoveryLimit,
 			MaxInflight:          cfg.FederationMaxInflight,
 			MaxConcurrentTargets: cfg.FederationMaxConcurrentTargets,
 			MaxAttempts:          cfg.FederationMaxAttempts,
@@ -285,14 +287,16 @@ func main() {
 	if cleanup != nil {
 		defer cleanup()
 	}
-	if cfg.ProxyEnabled {
-		setupProxyRouter(ctx, cfg, svc, awsClient, awsBackendEnabled, awsFederated, gcpClient, gcpFederated, gate, telemetryEngine)
-		if awsBackendEnabled {
-			svc.SetAWSViaRouter(true)
-		}
-		if gcpClient != nil {
-			svc.SetGCPViaRouter(true)
-		}
+	// The router is the only query execution path. DOCTOR_PROXY_ENABLED now
+	// controls only external registry discovery (static backends and Guardian
+	// pushers); local storage and the AWS/GCP federation backends are always
+	// registered so there is one merge/aggregation implementation.
+	setupProxyRouter(ctx, cfg, svc, awsClient, awsBackendEnabled, awsFederated, gcpClient, gcpFederated, gate, telemetryEngine)
+	if awsBackendEnabled {
+		svc.SetAWSViaRouter(true)
+	}
+	if gcpClient != nil {
+		svc.SetGCPViaRouter(true)
 	}
 
 	handler := svc.Handler()
@@ -398,7 +402,8 @@ func setupSecurity(ctx context.Context, cfg config.QueryConfig) (*access.Gate, *
 	if verifier != nil {
 		log.Printf("authentication enabled (issuer=%q require=%v)", cfg.OIDCIssuer, cfg.AuthRequire)
 	} else {
-		log.Printf("authentication disabled: set DOCTOR_OIDC_ISSUER/AUDIENCE or DOCTOR_BREAK_GLASS_TOKEN")
+		log.Printf("WARNING: authentication disabled; telemetry APIs (including /api/v1) are PUBLIC. " +
+			"Set DOCTOR_OIDC_ISSUER/AUDIENCE or DOCTOR_BREAK_GLASS_TOKEN to require authentication")
 	}
 	middleware := auth.NewMiddleware(verifier, cfg.AuthRequire, cfg.AuthExemptPaths, log.Default())
 
@@ -501,35 +506,39 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 		AllowedHosts:  cfg.BackendAllowedHosts,
 	}
 	registries := make([]proxy.Registry, 0, 2)
-	if cfg.ProxyBackendsFile != "" {
-		static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
-			Path:      cfg.ProxyBackendsFile,
-			Interval:  cfg.ProxyRegistryInterval,
-			Logger:    log.Default(),
-			URLPolicy: urlPolicy,
-		})
-		if err != nil {
-			log.Fatalf("load proxy backends: %v", err)
-		}
-		registries = append(registries, static)
-		go static.Run(ctx)
-		log.Printf("proxy backends loaded from %s", cfg.ProxyBackendsFile)
-	}
-	if cfg.GuardianDiscoveryEnabled {
-		if cfg.GuardianAPIURL == "" {
-			log.Printf("guardian discovery enabled but DOCTOR_GUARDIAN_API_URL is unset; discovery disabled")
-		} else {
-			discovery := proxy.NewGuardianDiscovery(proxy.GuardianDiscoveryConfig{
-				BaseURL:   cfg.GuardianAPIURL,
-				Token:     cfg.GuardianToken,
-				Interval:  cfg.GuardianDiscoveryInterval,
-				URLPolicy: urlPolicy,
+	if cfg.ProxyEnabled {
+		if cfg.ProxyBackendsFile != "" {
+			static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
+				Path:      cfg.ProxyBackendsFile,
+				Interval:  cfg.ProxyRegistryInterval,
 				Logger:    log.Default(),
+				URLPolicy: urlPolicy,
 			})
-			registries = append(registries, discovery)
-			go discovery.Run(ctx)
-			log.Printf("guardian backend discovery enabled via %s", cfg.GuardianAPIURL)
+			if err != nil {
+				log.Fatalf("load proxy backends: %v", err)
+			}
+			registries = append(registries, static)
+			go static.Run(ctx)
+			log.Printf("proxy backends loaded from %s", cfg.ProxyBackendsFile)
 		}
+		if cfg.GuardianDiscoveryEnabled {
+			if cfg.GuardianAPIURL == "" {
+				log.Printf("guardian discovery enabled but DOCTOR_GUARDIAN_API_URL is unset; discovery disabled")
+			} else {
+				discovery := proxy.NewGuardianDiscovery(proxy.GuardianDiscoveryConfig{
+					BaseURL:   cfg.GuardianAPIURL,
+					Token:     cfg.GuardianToken,
+					Interval:  cfg.GuardianDiscoveryInterval,
+					URLPolicy: urlPolicy,
+					Logger:    log.Default(),
+				})
+				registries = append(registries, discovery)
+				go discovery.Run(ctx)
+				log.Printf("guardian backend discovery enabled via %s", cfg.GuardianAPIURL)
+			}
+		}
+	} else {
+		log.Printf("proxy registry discovery disabled (DOCTOR_PROXY_ENABLED=false); local/AWS/GCP backends still use the router")
 	}
 
 	router := proxy.NewRouter(proxy.RouterConfig{

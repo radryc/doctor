@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/radryc/doctor/internal/delivery"
 )
 
 // Alert status values.
@@ -183,16 +185,9 @@ func (s Silence) Matches(alert Alert) bool {
 	return true
 }
 
-// Receiver describes one notification channel.
-type Receiver struct {
-	Name        string            `json:"name" yaml:"name"`
-	Type        string            `json:"type" yaml:"type"`
-	Description string            `json:"description,omitempty" yaml:"description,omitempty"`
-	URL         string            `json:"url,omitempty" yaml:"url,omitempty"`
-	SecretEnv   string            `json:"secretEnv,omitempty" yaml:"secretEnv,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
-	Timeout     string            `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-}
+// Receiver is the persisted notification channel. Implementations live in
+// internal/delivery and register at startup; see docs/receiver-plugins.md.
+type Receiver = delivery.Receiver
 
 // Route selects receivers for matching alerts.
 //
@@ -241,6 +236,9 @@ func (c *ReceiverConfig) Validate() error {
 		}
 		if strings.EqualFold(r.Type, "pagerduty") && strings.TrimSpace(r.URL) == "" {
 			r.URL = "https://events.pagerduty.com/v2/enqueue"
+		}
+		if err := r.Validate(); err != nil {
+			return err
 		}
 	}
 	for i := range c.Routes {
@@ -378,9 +376,13 @@ type PartitionAlertSummary struct {
 	Total     int    `json:"total"`
 }
 
-// OutboxRecord is a pending notification.
+// OutboxRecord is a pending notification. Kind is empty for legacy alert
+// records; SubjectID and EventSeq identify non-alert domains (incidents).
 type OutboxRecord struct {
 	ID           string    `json:"id"`
+	Kind         string    `json:"kind,omitempty"`
+	SubjectID    string    `json:"subjectId,omitempty"`
+	EventSeq     int64     `json:"eventSeq,omitempty"`
 	AlertID      string    `json:"alertId"`
 	Fingerprint  string    `json:"fingerprint"`
 	Tenant       string    `json:"tenant"`

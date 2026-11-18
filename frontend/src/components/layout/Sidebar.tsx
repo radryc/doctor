@@ -1,12 +1,13 @@
 import { NavLink } from "react-router-dom";
 import {
   Command, ListChecks, FileText, BarChart3, GitBranch,
-  LayoutDashboard, Search, Layers, Activity, Cpu, Cloud, Bell, Database, Gauge,
+  LayoutDashboard, Search, Layers, Activity, Cpu, Cloud, Bell, Database, Gauge, AlertTriangle,
 } from "lucide-react";
 import { useConfig } from "../../context/ConfigContext";
 
 const NAV = [
   { to: "/", label: "On-call", icon: LayoutDashboard, end: true },
+  { to: "/incidents", label: "Incidents", icon: AlertTriangle, end: false },
   { to: "/dashboards", label: "Dashboards", icon: Layers, end: false },
   { to: "/services", label: "APM Services", icon: Activity, end: false },
   { to: "/federation", label: "Federation", icon: Cloud, end: false },

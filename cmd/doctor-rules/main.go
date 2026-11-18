@@ -55,8 +55,8 @@ func main() {
 	if cfg.MonoFSToken == "" {
 		log.Fatal("DOCTOR_MONOFS_TOKEN is required to read and write rules in MonoFS")
 	}
-	if strings.TrimSpace(cfg.APIToken) == "" {
-		log.Fatal("DOCTOR_RULES_API_TOKEN is required to authenticate the rules API")
+	if strings.TrimSpace(cfg.APIToken) == "" && strings.TrimSpace(cfg.AuthTokensFile) == "" {
+		log.Fatal("DOCTOR_RULES_API_TOKEN or DOCTOR_RULES_TOKENS_FILE is required to authenticate the rules API")
 	}
 
 	files, err := monofsstore.NewGRPCClient(ctx, monofsstore.ClientConfig{
@@ -97,12 +97,14 @@ func main() {
 		Logger:  log.Default(),
 	}
 	scheduler := &ruler.Scheduler{
-		Evaluator:    evaluator,
-		Load:         store.List,
-		Limits:       limits,
-		Workers:      cfg.Workers,
-		PollInterval: cfg.PollInterval,
-		Logger:       log.Default(),
+		Evaluator:       evaluator,
+		Load:            store.List,
+		Limits:          limits,
+		Workers:         cfg.Workers,
+		PollInterval:    cfg.PollInterval,
+		CatchUp:         cfg.MaxCatchUp,
+		MaxCatchUpTicks: cfg.MaxCatchUpTicks,
+		Logger:          log.Default(),
 	}
 
 	lease := ruler.NewLeaseManager(
@@ -116,7 +118,7 @@ func main() {
 	api := &ruler.API{
 		Store:      store,
 		Evaluator:  evaluator,
-		Authorizer: ruler.AuthenticatedAuthorizer{},
+		Authorizer: ruler.ScopedRulesAuthorizer{},
 		Limits:     limits,
 		Scheduler:  scheduler,
 		Lease:      lease,
@@ -124,9 +126,35 @@ func main() {
 	}
 	go lease.Run(ctx, scheduler.Run)
 
-	verifier := authz.NewStaticTokenVerifier()
-	verifier.Add(cfg.APIToken, authz.Identity{Subject: "doctor-rules-api", ClientID: "doctor-rules-api"})
-	apiHandler := auth.NewMiddleware(verifier, true, []string{"/healthz", "/metrics"}, log.Default()).Wrap(api.Handler())
+	// TODO(security): accept OIDC identities here (issuer/audience/groups) so
+	// partition ownership can come from the IdP instead of a static token file.
+	verifiers := make([]authz.TokenVerifier, 0, 2)
+	if strings.TrimSpace(cfg.AuthTokensFile) != "" {
+		scoped, err := ruler.LoadRulesTokenFile(cfg.AuthTokensFile)
+		if err != nil {
+			log.Fatalf("load rules token file: %v", err)
+		}
+		verifiers = append(verifiers, scoped)
+		log.Printf("rules token file loaded from %s (%d credentials)", cfg.AuthTokensFile, scoped.Count())
+	}
+	if strings.TrimSpace(cfg.APIToken) != "" {
+		legacy := authz.NewStaticTokenVerifier()
+		legacy.Add(cfg.APIToken, authz.Identity{
+			Subject:  "doctor-rules-api",
+			ClientID: "doctor-rules-api",
+			Groups:   []string{ruler.RulesAdminGroup},
+		})
+		verifiers = append(verifiers, legacy)
+		log.Printf("legacy DOCTOR_RULES_API_TOKEN enabled as an admin credential; migrate to DOCTOR_RULES_TOKENS_FILE for per-partition scopes")
+	}
+	verifier := authz.NewChainVerifier(verifiers...)
+	// Authenticate the transport credential first, then replace the service
+	// identity with the signed caller identity when doctor-query forwarded one.
+	apiHandler := auth.InternalIdentityMiddleware(cfg.InternalIdentitySecret, log.Default())(api.Handler())
+	apiHandler = auth.NewMiddleware(verifier, true, []string{"/healthz", "/metrics"}, log.Default()).Wrap(apiHandler)
+	if strings.TrimSpace(cfg.InternalIdentitySecret) == "" {
+		log.Printf("DOCTOR_INTERNAL_IDENTITY_SECRET is unset: proxied user identities will fall back to the rules service credential")
+	}
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

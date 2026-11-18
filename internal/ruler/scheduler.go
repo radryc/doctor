@@ -33,6 +33,10 @@ type Scheduler struct {
 	PollInterval time.Duration
 	Logger       *log.Logger
 	Now          func() time.Time
+	// CatchUp bounds in-process catch-up after a pause. Zero disables it.
+	CatchUp time.Duration
+	// MaxCatchUpTicks caps replay work per scheduling cycle. Zero uses 60.
+	MaxCatchUpTicks int
 
 	mu       sync.Mutex
 	stats    SchedulerStats
@@ -50,9 +54,30 @@ type SchedulerStats struct {
 	Groups    int       `json:"groups"`
 	Due       int64     `json:"due"`
 	Evaluated int64     `json:"evaluated"`
+	CatchUp   int64     `json:"catchUp"`
 	Skipped   int64     `json:"skipped"`
 	LastLoad  time.Time `json:"lastLoad"`
 	LastError string    `json:"lastError,omitempty"`
+}
+
+// groupEvaluatorAt is implemented by Evaluator so the scheduler can evaluate
+// at the scheduled tick (and replay missed ticks) instead of "now".
+type groupEvaluatorAt interface {
+	EvaluateGroupAt(ctx context.Context, group Group, at time.Time) []EvalResult
+}
+
+func (s *Scheduler) evaluateTick(ctx context.Context, group Group, at time.Time) {
+	var results []EvalResult
+	if evaluator, ok := s.Evaluator.(groupEvaluatorAt); ok {
+		results = evaluator.EvaluateGroupAt(ctx, group, at)
+	} else {
+		results = s.Evaluator.EvaluateGroup(ctx, group)
+	}
+	for _, result := range results {
+		if result.Error != "" && s.Logger != nil {
+			s.Logger.Printf("rules: group=%s rule=%s error=%s", result.Group, result.Rule, result.Error)
+		}
+	}
 }
 
 // Stats returns a snapshot of scheduler counters.
@@ -171,9 +196,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 				}
 			}
 			group := heap.Pop(pending).(*scheduledGroup)
-			// Skip missed intervals instead of walking every interval that
-			// elapsed while the process was paused. Recording rules should run
-			// at the next future boundary, not replay hours of catch-up work.
+			tick := group.next
+			// Advance the schedule to the next future boundary. Catch-up (when
+			// enabled) replays the gap below in the worker, bounded by
+			// CatchUp and MaxCatchUpTicks.
 			if !group.next.After(now) {
 				group.next = now.Add(group.interval)
 			}
@@ -207,7 +233,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 				return
 			}
 			wg.Add(1)
-			go func(group *scheduledGroup, ref GroupRef) {
+			go func(group *scheduledGroup, ref GroupRef, tick time.Time) {
 				defer wg.Done()
 				defer func() { <-sem }()
 				defer func() {
@@ -216,13 +242,27 @@ func (s *Scheduler) Run(ctx context.Context) {
 					s.stats.Evaluated++
 					s.mu.Unlock()
 				}()
-				results := s.Evaluator.EvaluateGroup(ctx, groupForRef(ref))
-				for _, result := range results {
-					if result.Error != "" && s.Logger != nil {
-						s.Logger.Printf("rules: group=%s rule=%s error=%s", result.Group, result.Rule, result.Error)
-					}
+				s.evaluateTick(ctx, groupForRef(ref), tick)
+				if s.CatchUp <= 0 {
+					return
 				}
-			}(group, group.ref)
+				start := tick
+				if now.Sub(start) > s.CatchUp {
+					start = now.Add(-s.CatchUp)
+				}
+				limit := s.MaxCatchUpTicks
+				if limit <= 0 {
+					limit = 60
+				}
+				replayed := 0
+				for next := start.Add(group.interval); !next.After(now) && replayed < limit; next = next.Add(group.interval) {
+					s.evaluateTick(ctx, groupForRef(ref), next)
+					replayed++
+					s.mu.Lock()
+					s.stats.CatchUp++
+					s.mu.Unlock()
+				}
+			}(group, group.ref, tick)
 			continue
 		}
 
