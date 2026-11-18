@@ -4,7 +4,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -54,15 +56,111 @@ func isIdentityKey(key string) bool {
 	return strings.HasPrefix(key, "guardian.target.")
 }
 
+const (
+	defaultKeyID  = "k1"
+	tokenPrefix   = "tok_v2_"
+	tokenTagBytes = 16 // 128-bit MAC tag = 32 hex chars
+)
+
 type Engine struct {
-	key []byte
+	activeKeyID string
+	keys        map[string][]byte
 }
 
 func New(hmacKey string) (*Engine, error) {
 	if strings.TrimSpace(hmacKey) == "" {
 		return nil, fmt.Errorf("privacy hmac key is required")
 	}
-	return &Engine{key: []byte(hmacKey)}, nil
+	return NewWithKeys(defaultKeyID, map[string]string{defaultKeyID: hmacKey})
+}
+
+// NewWithKeys constructs a privacy engine with an active key ID and a map of
+// key ID -> HMAC secret for key rotation and historical token verification.
+func NewWithKeys(activeKeyID string, keys map[string]string) (*Engine, error) {
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("privacy hmac key is required")
+	}
+	normalized := make(map[string][]byte, len(keys))
+	for rawID, secret := range keys {
+		kid := sanitizeKeyID(rawID)
+		if kid == "" {
+			return nil, fmt.Errorf("invalid privacy key id %q", rawID)
+		}
+		if strings.TrimSpace(secret) == "" {
+			return nil, fmt.Errorf("privacy hmac key for %q is empty", kid)
+		}
+		if _, exists := normalized[kid]; exists {
+			return nil, fmt.Errorf("duplicate privacy key id %q after sanitization", kid)
+		}
+		normalized[kid] = []byte(secret)
+	}
+
+	active := defaultKeyID
+	if strings.TrimSpace(activeKeyID) != "" {
+		active = sanitizeKeyID(activeKeyID)
+		if active == "" {
+			return nil, fmt.Errorf("invalid active privacy key id %q", activeKeyID)
+		}
+	}
+	if _, ok := normalized[active]; !ok {
+		return nil, fmt.Errorf("active privacy key id %q not found in keys", active)
+	}
+
+	return &Engine{
+		activeKeyID: active,
+		keys:        normalized,
+	}, nil
+}
+
+// LoadFromEnv builds an Engine from DOCTOR_PRIVACY_KEY_ID,
+// DOCTOR_PRIVACY_HMAC_KEY, and DOCTOR_PRIVACY_KEYS_JSON, falling back to a
+// single "k1" key when only DOCTOR_PRIVACY_HMAC_KEY is set.
+func LoadFromEnv() (*Engine, error) {
+	rawKeyID := strings.TrimSpace(os.Getenv("DOCTOR_PRIVACY_KEY_ID"))
+	hmacKey := os.Getenv("DOCTOR_PRIVACY_HMAC_KEY")
+	keysJSON := strings.TrimSpace(os.Getenv("DOCTOR_PRIVACY_KEYS_JSON"))
+
+	activeKeyID := defaultKeyID
+	if rawKeyID != "" {
+		activeKeyID = sanitizeKeyID(rawKeyID)
+		if activeKeyID == "" {
+			return nil, fmt.Errorf("invalid DOCTOR_PRIVACY_KEY_ID %q", rawKeyID)
+		}
+	}
+
+	keys := make(map[string]string)
+	if keysJSON != "" {
+		var parsed map[string]string
+		if err := json.Unmarshal([]byte(keysJSON), &parsed); err != nil {
+			return nil, fmt.Errorf("parse DOCTOR_PRIVACY_KEYS_JSON: %w", err)
+		}
+		for k, v := range parsed {
+			keys[k] = v
+		}
+	}
+
+	if strings.TrimSpace(hmacKey) != "" {
+		if _, exists := keys[activeKeyID]; !exists {
+			keys[activeKeyID] = hmacKey
+		}
+	}
+
+	if len(keys) == 0 {
+		return New(hmacKey)
+	}
+	return NewWithKeys(activeKeyID, keys)
+}
+
+func sanitizeKeyID(id string) string {
+	var b strings.Builder
+	b.Grow(len(id))
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 func (e *Engine) SanitizeAttributes(attrs map[string]string) map[string]string {
@@ -132,10 +230,54 @@ func isValidLuhn(s string) bool {
 }
 
 func (e *Engine) Tokenize(value string) string {
-	mac := hmac.New(sha256.New, e.key)
+	return tokenizeWithSecret(e.activeKeyID, e.keys[e.activeKeyID], value)
+}
+
+// TokenizeWithKey mints a versioned 128-bit HMAC token using the specified key ID.
+func (e *Engine) TokenizeWithKey(keyID, value string) (string, error) {
+	kid := sanitizeKeyID(keyID)
+	key, ok := e.keys[kid]
+	if !ok {
+		return "", fmt.Errorf("unknown privacy key id %q", keyID)
+	}
+	return tokenizeWithSecret(kid, key, value), nil
+}
+
+// VerifyToken checks whether token is a valid versioned HMAC token for rawValue
+// using any configured key (active or rotated).
+func (e *Engine) VerifyToken(token, rawValue string) bool {
+	if !strings.HasPrefix(token, tokenPrefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(token, tokenPrefix)
+	sep := strings.IndexByte(rest, '_')
+	if sep <= 0 {
+		return false
+	}
+	kid := rest[:sep]
+	tagHex := rest[sep+1:]
+	if len(tagHex) != tokenTagBytes*2 {
+		return false
+	}
+	tag, err := hex.DecodeString(tagHex)
+	if err != nil || len(tag) != tokenTagBytes {
+		return false
+	}
+	key, ok := e.keys[kid]
+	if !ok || len(key) == 0 {
+		return false
+	}
+	return hmac.Equal(tag, computeTag(key, rawValue))
+}
+
+func tokenizeWithSecret(keyID string, key []byte, value string) string {
+	return tokenPrefix + keyID + "_" + hex.EncodeToString(computeTag(key, value))
+}
+
+func computeTag(key []byte, value string) []byte {
+	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(value))
-	sum := mac.Sum(nil)
-	return "tok_" + hex.EncodeToString(sum[:8])
+	return mac.Sum(nil)[:tokenTagBytes]
 }
 
 func (e *Engine) sanitizeValue(key, value string) string {
