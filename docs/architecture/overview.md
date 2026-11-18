@@ -188,8 +188,9 @@ These are the assumptions the implementation actually relies on:
 3. **Metrics are public; logs and traces are partition-filtered.** The shared policy package
    documents this explicitly (`CanReadSignal` always allows metrics). Doctor enforces the policy
    only for logs and traces. Metrics-based dashboards are an intended product use case.
-4. **Access is observe-first.** The default `DOCTOR_ACCESS_MODE=observe` and
-   `DOCTOR_ACCESS_REQUIRE=false` mean an unconfigured deployment is open. Enforcement is opt-in.
+4. **Access is enforce-first.** The default `DOCTOR_ACCESS_MODE=enforce` applies policy when
+   `DOCTOR_ACCESS_POLICY_URL` or `DOCTOR_ACCESS_POLICY_FILE` is configured; `observe` is an
+   explicit opt-out for validation. Without a policy source there is nothing to enforce.
 5. **Query and control-plane state is versioned through MonoFS CAS.** Dashboards, rules, federation
    manifests, leases, token shards, and the metadata cache all use expected-version writes.
 6. **Federation identity is account+region.** A catalog target is one pusher read API per AWS

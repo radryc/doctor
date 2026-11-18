@@ -597,7 +597,7 @@ Recording rules:
 | `DOCTOR_SESSION_DIR` | `.doctor/sessions` | |
 | `DOCTOR_BREAK_GLASS_TOKEN` | — | static admin token |
 | `DOCTOR_ACCESS_RESOLVER` | `owners` | `owners`, `static`, `grants`, `chain`, `allow-all` |
-| `DOCTOR_ACCESS_MODE` | `observe` | `observe` or `enforce` |
+| `DOCTOR_ACCESS_MODE` | `enforce` | `enforce` or `observe` (explicit opt-out) |
 | `DOCTOR_ACCESS_ENFORCE_LOGS` / `_TRACES` | `false` | used outside `enforce` |
 | `DOCTOR_ACCESS_TEAM_MAPPING` | — | file or inline team map |
 | `DOCTOR_ACCESS_POLICY_URL` | — | Compiled access-policy bundle (logs/traces/partition scope) |

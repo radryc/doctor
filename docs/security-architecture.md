@@ -257,7 +257,7 @@ so `would_filter` metrics accurately reflect what enforcement would drop (`TestO
 |---|---|---|
 | `DOCTOR_AUTH_REQUIRE` | `true` | anonymous query access is rejected when a verifier is configured |
 | `DOCTOR_OIDC_REQUIRE_LOGIN` | `false` | browser login not required |
-| `DOCTOR_ACCESS_MODE` | `observe` | no log/trace filtering |
+| `DOCTOR_ACCESS_MODE` | `enforce` | partition policy enforcement enabled |
 | `DOCTOR_ACCESS_TRUST_TENANT_HEADER` | `false` | tenant trust off |
 | `DOCTOR_PROXY_ENABLED` | `true` | proxy fan-out enabled |
 | `DOCTOR_AWS_ENABLED` | `true` | AWS fallback enabled if a URL exists |
@@ -539,7 +539,7 @@ Use this as the minimum for an Internet-reachable deployment:
 - [ ] `/api/v1` now requires authentication when a verifier is configured. Metrics remain globally
       visible to authenticated callers; provision a Grafana bearer token instead of leaving the API
       anonymous.
-- [ ] Set `DOCTOR_ACCESS_MODE=enforce` after validating observe-mode would-filter counts.
+- [ ] Validate `DOCTOR_ACCESS_MODE=enforce` would-filter counts; use `observe` only as an explicit, temporary opt-out.
 - [ ] Set `DOCTOR_RULES_TOKENS_FILE` (per-partition scopes) or `DOCTOR_RULES_API_TOKEN` and keep the
       rules port on the internal network.
 - [ ] Set `DOCTOR_FEDERATION_TOKEN_KEY` and store it in a secret manager; the controller refuses to
