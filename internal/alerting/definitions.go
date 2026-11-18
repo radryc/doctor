@@ -66,7 +66,7 @@ func (a *API) handleInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if tenant == "" {
 		if a.Service != nil && strings.TrimSpace(a.Service.DefaultTenant) != "" {
 			tenant = a.Service.DefaultTenant

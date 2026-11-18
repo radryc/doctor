@@ -202,3 +202,47 @@ func TestLoadIngestUsesLowLatencyBufferDefaults(t *testing.T) {
 		t.Fatalf("allowed tenants = %#v, want [default]", cfg.AllowedTenants)
 	}
 }
+
+func TestLoadSentinelSecurityDefaults(t *testing.T) {
+	t.Setenv("DOCTOR_SENTINEL_AUTH_ALLOW_ALL", "")
+	t.Setenv("DOCTOR_SENTINEL_IDENTITY_SECRET", "sentinel-hmac")
+
+	cfg := LoadSentinel("doctor-sentinel")
+	if cfg.AuthAllowAll {
+		t.Fatal("AuthAllowAll = true, want false by default")
+	}
+	if cfg.IdentityHMACSecret != "sentinel-hmac" {
+		t.Fatalf("IdentityHMACSecret = %q, want sentinel-hmac", cfg.IdentityHMACSecret)
+	}
+}
+
+func TestLoadQuerySecurityDefaults(t *testing.T) {
+	t.Setenv("DOCTOR_BACKEND_ALLOW_PRIVATE", "")
+	cfg := LoadQuery("doctor-query")
+	if cfg.BackendAllowPrivate {
+		t.Fatal("BackendAllowPrivate = true, want false by default")
+	}
+}
+
+func TestLoadIngestDebugDisabledByDefault(t *testing.T) {
+	t.Setenv("DOCTOR_PRIVACY_HMAC_KEY", "test-hmac-key")
+	t.Setenv("DOCTOR_INGEST_AUTH_TOKEN", "test-ingest-token")
+	t.Setenv("DOCTOR_DEBUG_ENABLED", "")
+
+	cfg, err := LoadIngest("doctor-ingest")
+	if err != nil {
+		t.Fatalf("LoadIngest() error = %v", err)
+	}
+	if cfg.DebugEnabled {
+		t.Fatal("DebugEnabled = true, want false by default")
+	}
+
+	t.Setenv("DOCTOR_DEBUG_ENABLED", "true")
+	cfg, err = LoadIngest("doctor-ingest")
+	if err != nil {
+		t.Fatalf("LoadIngest() error = %v", err)
+	}
+	if !cfg.DebugEnabled {
+		t.Fatal("DebugEnabled = false, want true when DOCTOR_DEBUG_ENABLED=true")
+	}
+}

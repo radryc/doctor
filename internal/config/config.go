@@ -169,6 +169,7 @@ type IngestConfig struct {
 	HTTPMTLSCAFile      string
 	GRPCAddr            string
 	HTTPAddr            string
+	DebugEnabled        bool
 	DebugAddr           string
 	MonoFSLogEngineAddr string
 	MonoFSRouterAddr    string
@@ -374,6 +375,7 @@ type SentinelConfig struct {
 	GuardianToken        string
 	GuardianPollInterval time.Duration
 	ServiceToken         string
+	IdentityHMACSecret   string
 	AuthAllowAll         bool
 	DeliveryEnabled      bool
 	PollInterval         time.Duration
@@ -452,7 +454,8 @@ func LoadSentinel(service string) SentinelConfig {
 		GuardianToken:        envString("DOCTOR_SENTINEL_GUARDIAN_TOKEN", envString("DOCTOR_GUARDIAN_TOKEN", "")),
 		GuardianPollInterval: envDuration("DOCTOR_SENTINEL_GUARDIAN_POLL_INTERVAL", 30*time.Second),
 		ServiceToken:         envString("DOCTOR_SENTINEL_SERVICE_TOKEN", ""),
-		AuthAllowAll:         envBool("DOCTOR_SENTINEL_AUTH_ALLOW_ALL", true),
+		IdentityHMACSecret:   envString("DOCTOR_SENTINEL_IDENTITY_SECRET", ""),
+		AuthAllowAll:         envBool("DOCTOR_SENTINEL_AUTH_ALLOW_ALL", false),
 		DeliveryEnabled:      envBool("DOCTOR_SENTINEL_DELIVERY_ENABLED", true),
 		PollInterval:         envDuration("DOCTOR_SENTINEL_POLL_INTERVAL", 30*time.Second),
 		EvalShards:           int(envInt64("DOCTOR_SENTINEL_EVAL_SHARDS", 1)),
@@ -514,6 +517,7 @@ func LoadIngest(service string) (IngestConfig, error) {
 		HTTPMTLSCAFile:      envString("DOCTOR_HTTP_MTLS_CA_FILE", envString("DOCTOR_INGEST_MTLS_CA_FILE", "")),
 		GRPCAddr:            envString("DOCTOR_GRPC_ADDR", ":4317"),
 		HTTPAddr:            envString("DOCTOR_HTTP_ADDR", ":4318"),
+		DebugEnabled:        envBool("DOCTOR_DEBUG_ENABLED", false),
 		DebugAddr:           envString("DOCTOR_DEBUG_ADDR", "127.0.0.1:6060"),
 		MonoFSLogEngineAddr: envString("DOCTOR_MONOFS_LOGENGINE_ADDR", ""),
 		MonoFSRouterAddr:    envString("DOCTOR_MONOFS_ROUTER_ADDR", ""),
@@ -650,7 +654,7 @@ func LoadQuery(service string) QueryConfig {
 		ProxyBackendTimeout:       envDuration("DOCTOR_PROXY_BACKEND_TIMEOUT", 15*time.Second),
 		BackendRequireHTTPS:       envBool("DOCTOR_BACKEND_REQUIRE_HTTPS", false),
 		BackendAllowLoopback:      envBool("DOCTOR_BACKEND_ALLOW_LOOPBACK", false),
-		BackendAllowPrivate:       envBool("DOCTOR_BACKEND_ALLOW_PRIVATE", true),
+		BackendAllowPrivate:       envBool("DOCTOR_BACKEND_ALLOW_PRIVATE", false),
 		BackendAllowedHosts:       envCSV("DOCTOR_BACKEND_ALLOWED_HOSTS", nil),
 		AllowedTenants:            envCSV("DOCTOR_QUERY_ALLOWED_TENANTS", nil),
 		SingleTenant:              envString("DOCTOR_QUERY_SINGLE_TENANT", ""),

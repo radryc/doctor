@@ -156,7 +156,7 @@ func TestAlertmanagerRespectsPartitionAccess(t *testing.T) {
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
 	service := &Service{Store: store, DefaultTenant: "default"}
-	api := &API{Store: store, Service: service, Now: func() time.Time { return now }}
+	api := &API{Store: store, Service: service, IdentityHMACSecret: "test-secret", Now: func() time.Time { return now }}
 	server := httptest.NewServer(api.Handler())
 	defer server.Close()
 
@@ -174,6 +174,7 @@ func TestAlertmanagerRespectsPartitionAccess(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/alerts", nil)
 	req.Header.Set("X-Doctor-User", "operator@example.com")
 	req.Header.Set("X-Doctor-Partition-Access", "payments")
+	req.Header.Set("X-Doctor-Identity-Sig", SignIdentity("test-secret", "operator@example.com", "", ""))
 	rec := httptest.NewRecorder()
 	api.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

@@ -50,7 +50,7 @@ func main() {
 		log.Printf("GOMEMLIMIT set to %dMiB", cfg.MemoryLimitBytes>>20)
 	}
 
-	if cfg.DebugAddr != "" {
+	if cfg.DebugEnabled && cfg.DebugAddr != "" {
 		go func() {
 			log.Printf("pprof debug server listening on %s", cfg.DebugAddr)
 			debugServer := &http.Server{

@@ -14,10 +14,12 @@ import (
 
 // API serves the incident, alert-set, policy, and postmortem surface.
 type API struct {
-	Store    *Store
-	Service  *Service
-	AllowAll bool
-	Logger   *log.Logger
+	Store              *Store
+	Service            *Service
+	AllowAll           bool
+	IdentityHMACSecret string
+	ServiceToken       string
+	Logger             *log.Logger
 }
 
 // Handler builds the incident HTTP handler.
@@ -33,7 +35,7 @@ func (a *API) Handler() http.Handler {
 }
 
 func (a *API) identity(r *http.Request) alerting.Identity {
-	return alerting.IdentityFromRequest(r, a.AllowAll)
+	return alerting.IdentityFromRequestWithAuth(r, a.AllowAll, a.IdentityHMACSecret, a.ServiceToken)
 }
 
 func tenantPartition(r *http.Request) (string, string) {

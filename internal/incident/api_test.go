@@ -97,3 +97,45 @@ func TestAPIIncidentLifecycle(t *testing.T) {
 		t.Fatalf("postmortem status = %s", doc.Status)
 	}
 }
+
+func TestAPIRejectsUnsignedAdminWhenAllowAllFalse(t *testing.T) {
+	files := alerting.NewMemoryStore()
+	alerts := alerting.NewStore(files, "", "/doctor/v1/alerts")
+	store := NewStore(files, alerts, "", "/doctor/v1/alerts")
+	service := &Service{Store: store, Alerts: alerts, Engines: NewEngineRegistry(), Analyzers: map[string]Analyzer{}, Delivery: false}
+	api := &API{
+		Store:              store,
+		Service:            service,
+		AllowAll:           false,
+		IdentityHMACSecret: "incident-secret",
+		ServiceToken:       "svc-secret",
+	}
+	handler := api.Handler()
+
+	// Unsigned X-Doctor-Admin: true must be rejected.
+	req := httptest.NewRequest(http.MethodGet, "/v1/incidents?tenant=default&partition=doctor", nil)
+	req.Header.Set("X-Doctor-User", "attacker")
+	req.Header.Set("X-Doctor-Admin", "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unsigned admin status = %d, want 404", rec.Code)
+	}
+
+	// Signed X-Doctor-Identity-Sig must be accepted.
+	req.Header.Set("X-Doctor-Identity-Sig", alerting.SignIdentity("incident-secret", "attacker", "true", ""))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("signed admin status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Valid service token must also be accepted.
+	reqSvc := httptest.NewRequest(http.MethodGet, "/v1/incidents?tenant=default&partition=doctor", nil)
+	reqSvc.Header.Set("Authorization", "Bearer svc-secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, reqSvc)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("service token status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+}

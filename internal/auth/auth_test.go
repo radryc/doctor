@@ -128,3 +128,30 @@ func TestNewVerifierDisabled(t *testing.T) {
 		t.Fatalf("verifier = %#v, err = %v", verifier, err)
 	}
 }
+
+func TestMiddlewareFailsClosedWithoutVerifier(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := NewMiddleware(nil, true, nil, nil).Wrap(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("non-exempt status without verifier = %d, want 401", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exempt status without verifier = %d, want 200", rec.Code)
+	}
+
+	passThrough := NewMiddleware(nil, false, nil, nil).Wrap(next)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
+	rec = httptest.NewRecorder()
+	passThrough.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("require=false status without verifier = %d, want 200", rec.Code)
+	}
+}

@@ -100,12 +100,13 @@ func main() {
 		log.Printf("sentinel rule evaluation enabled via %s (shard %d/%d)", cfg.QueryURL, cfg.ShardIndex, cfg.EvalShards)
 	}
 	api := &alerting.API{
-		Store:        store,
-		Service:      service,
-		Logger:       log.Default(),
-		AllowAll:     cfg.AuthAllowAll,
-		ServiceToken: cfg.ServiceToken,
-		FCBSecret:    []byte(cfg.FCBAckSecret),
+		Store:              store,
+		Service:            service,
+		Logger:             log.Default(),
+		AllowAll:           cfg.AuthAllowAll,
+		ServiceToken:       cfg.ServiceToken,
+		IdentityHMACSecret: cfg.IdentityHMACSecret,
+		FCBSecret:          []byte(cfg.FCBAckSecret),
 	}
 
 	urlPolicy := &netguard.Policy{
@@ -158,10 +159,12 @@ func main() {
 			AsyncAnalysis: true,
 		}
 		incidentHandler = (&incident.API{
-			Store:    incidentStore,
-			Service:  incidentService,
-			AllowAll: cfg.AuthAllowAll,
-			Logger:   log.Default(),
+			Store:              incidentStore,
+			Service:            incidentService,
+			AllowAll:           cfg.AuthAllowAll,
+			IdentityHMACSecret: cfg.IdentityHMACSecret,
+			ServiceToken:       cfg.ServiceToken,
+			Logger:             log.Default(),
 		}).Handler()
 		api.AckIncident = incidentService.AckByID
 		go func() {

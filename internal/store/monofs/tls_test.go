@@ -63,3 +63,12 @@ func TestTLSConfigLoadsCA(t *testing.T) {
 		t.Fatal("expected invalid CA bundle to fail")
 	}
 }
+
+func TestBearerTokenRequireTransportSecurity(t *testing.T) {
+	if (bearerToken{token: "t", requireTLS: false}).RequireTransportSecurity() {
+		t.Fatal("RequireTransportSecurity() = true, want false when requireTLS=false")
+	}
+	if !(bearerToken{token: "t", requireTLS: true}).RequireTransportSecurity() {
+		t.Fatal("RequireTransportSecurity() = false, want true when requireTLS=true")
+	}
+}
