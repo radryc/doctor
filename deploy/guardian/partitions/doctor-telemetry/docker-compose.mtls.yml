@@ -1,0 +1,59 @@
+# Local mTLS override for the doctor-telemetry partition.
+#
+# This file is an opt-in *override* for the local compose stack; it does not
+# change any default. Apply it together with the base compose file:
+#
+#   cd tlsx && go run ./cmd/tlsx gen --dir ../doctor/.tls --reuse-ca
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f deploy/guardian/partitions/doctor-telemetry/docker-compose.mtls.yml \
+#     up -d
+#
+# Every doctor service mounts its own certificate directory at the shared
+# STRATA_TLS_* default path. The same leaf is used for server and client
+# authentication, so outbound calls to doctor-query/doctor-sentinel/doctor-rules
+# and to MonoFS are mutually authenticated too.
+#
+# The generated CA is for local development and bootstrap. Production installs
+# replace it with cert-manager, Vault, or SPIFFE-issued certs mounted at the
+# same paths.
+services:
+  doctor-ingest:
+    volumes:
+      - ./.tls/doctor-ingest:/var/run/secrets/strata-tls:ro
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_REQUIRE_CLIENT_CERT: "true"
+      STRATA_TLS_ALLOWED_SPIFFE_IDS: >-
+        spiffe://strata.local/ns/doctor/sa/doctor-query,
+        spiffe://strata.local/ns/doctor/sa/otlp-collector
+
+  doctor-query:
+    volumes:
+      - ./.tls/doctor-query:/var/run/secrets/strata-tls:ro
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_REQUIRE_CLIENT_CERT: "true"
+      # Outbound calls are upgraded to https:// in required mode. Keep the
+      # explicit scheme so the intent is obvious in `docker compose config`.
+      DOCTOR_RULES_URL: https://doctor-rules:18081
+      DOCTOR_SENTINEL_URL: https://doctor-sentinel:18082
+      STRATA_TLS_EXPECTED_SPIFFE_IDS: >-
+        spiffe://strata.local/ns/doctor/sa/doctor-rules,
+        spiffe://strata.local/ns/doctor/sa/doctor-sentinel
+
+  doctor-rules:
+    volumes:
+      - ./.tls/doctor-rules:/var/run/secrets/strata-tls:ro
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_REQUIRE_CLIENT_CERT: "true"
+      DOCTOR_RULES_QUERY_URL: https://doctor-query:18080
+
+  doctor-sentinel:
+    volumes:
+      - ./.tls/doctor-sentinel:/var/run/secrets/strata-tls:ro
+    environment:
+      STRATA_TLS_MODE: required
+      STRATA_TLS_REQUIRE_CLIENT_CERT: "true"
+      DOCTOR_SENTINEL_QUERY_URL: https://doctor-query:18080
