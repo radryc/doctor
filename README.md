@@ -66,3 +66,52 @@ make image-all MONOFS_DIR=../monofs
 
 Authentication and access enforcement are opt-in and default to observe/open. Read
 [security-architecture.md](docs/security-architecture.md) before exposing any service to a network.
+
+## Transport security (TLS/mTLS)
+
+Doctor uses the shared Strata `STRATA_TLS_*` contract
+([`tlsx`](../tlsx)). `STRATA_TLS_MODE=off` is the default and leaves every
+listener plaintext (the legacy `DOCTOR_*_TLS_*` certificate variables keep
+working unchanged). Set `STRATA_TLS_MODE=required` to serve TLS only and verify
+peers.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STRATA_TLS_MODE` | `off` | `off`, `optional`, `required` |
+| `STRATA_TLS_CERT_FILE` | `/var/run/secrets/strata-tls/tls.crt` | leaf certificate (server, and client when available) |
+| `STRATA_TLS_KEY_FILE` | `/var/run/secrets/strata-tls/tls.key` | leaf key |
+| `STRATA_TLS_CA_FILE` | `/var/run/secrets/strata-tls/ca.crt` | CA bundle for peer verification |
+| `STRATA_TLS_SERVER_NAME` | | override the dialed server name |
+| `STRATA_TLS_REQUIRE_CLIENT_CERT` | `true` | require client certificates on servers (mTLS) |
+| `STRATA_TLS_ALLOWED_SPIFFE_IDS` | | server-side peer SPIFFE allowlist |
+| `STRATA_TLS_EXPECTED_SPIFFE_IDS` | | client-side server SPIFFE allowlist |
+
+Behaviour by service:
+
+| Service | Listener | Outbound |
+|---|---|---|
+| `doctor-query` | HTTPS (mTLS when a client CA is mounted) | Guardian, rules, sentinel, ingest usage |
+| `doctor-ingest` | OTLP gRPC `:4317` + HTTP `:4318` | MonoFS logengine |
+| `doctor-rules` | HTTPS | doctor-query, MonoFS |
+| `doctor-sentinel` | HTTPS | doctor-query, Guardian, MonoFS |
+
+In `required` mode outbound URLs configured as `http://` are upgraded to
+`https://`, and the CA bundle is used as `RootCAs`. The MonoFS client keeps the
+existing `DOCTOR_MONOFS_TLS_*` variables; when none of them are set and
+`STRATA_TLS_MODE!=off`, it falls back to the shared client contract (CA at
+minimum, client certificate when present). A bearer token is still refused over
+plaintext.
+
+Generate a local PKI and run the mTLS compose override:
+
+```bash
+(cd ../tlsx && go run ./cmd/tlsx gen --dir ../doctor/.tls --reuse-ca)
+docker compose -f docker-compose.yml \
+  -f deploy/guardian/partitions/doctor-telemetry/docker-compose.mtls.yml up -d
+```
+
+The generated CA and 30-day leaf certificates are for local development and
+bootstrap only. Production replaces the local CA with cert-manager, Vault, or
+SPIFFE-issued certificates mounted at the same paths; no application changes are
+required.
+
