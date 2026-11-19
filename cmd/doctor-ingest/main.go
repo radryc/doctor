@@ -279,18 +279,15 @@ func main() {
 	var grpcTLS, httpTLS *tls.Config
 	if tlsEnv.Enabled() {
 		// STRATA_TLS_* is the primary contract and takes precedence over the
-		// legacy DOCTOR_*_MTLS_* settings. The same certificate serves both the
-		// OTLP gRPC and HTTP listeners.
-		serverTLS, err := tlsEnv.ServerTLS("", "")
-		if err != nil {
-			log.Fatalf("configure collector TLS: %v", err)
-		}
-		grpcTLS = serverTLS
-		// Optional mode keeps the HTTP OTLP listener plaintext for local
-		// collectors while gRPC uses mTLS.
-		httpTLS, err = tlsEnv.ServerTLSHTTP("", "")
-		if err != nil {
-			log.Fatalf("configure collector HTTP TLS: %v", err)
+		// legacy DOCTOR_*_MTLS_* settings. Optional mode keeps the OTLP
+		// listeners plaintext so the local collector can keep exporting
+		// without client certificates; required mode enables TLS for both.
+		if tlsEnv.Required() {
+			serverTLS, err := tlsEnv.ServerTLS("", "")
+			if err != nil {
+				log.Fatalf("configure collector TLS: %v", err)
+			}
+			grpcTLS, httpTLS = serverTLS, serverTLS
 		}
 	} else {
 		// Legacy path: DOCTOR_GRPC_TLS_* / DOCTOR_TLS_* with
