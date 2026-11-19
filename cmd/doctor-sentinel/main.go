@@ -279,7 +279,7 @@ func main() {
 	if (tlsCert != "") != (tlsKey != "") {
 		log.Fatal("DOCTOR_SENTINEL_TLS_CERT_FILE and DOCTOR_SENTINEL_TLS_KEY_FILE must both be set")
 	}
-	serverTLS, err := tlsEnv.ServerTLS(tlsCert, tlsKey)
+	serverTLS, err := tlsEnv.ServerTLSHTTP(tlsCert, tlsKey)
 	if err != nil {
 		log.Fatalf("configure HTTP TLS: %v", err)
 	}

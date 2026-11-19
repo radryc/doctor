@@ -177,7 +177,7 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	serverTLS, err := tlsEnv.ServerTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	serverTLS, err := tlsEnv.ServerTLSHTTP(cfg.TLSCertFile, cfg.TLSKeyFile)
 	if err != nil {
 		log.Fatalf("configure HTTP TLS: %v", err)
 	}

@@ -371,7 +371,7 @@ func main() {
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
-	serverTLS, err := tlsEnv.ServerTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	serverTLS, err := tlsEnv.ServerTLSHTTP(cfg.TLSCertFile, cfg.TLSKeyFile)
 	if err != nil {
 		log.Fatalf("configure HTTP TLS: %v", err)
 	}

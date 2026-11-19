@@ -285,7 +285,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("configure collector TLS: %v", err)
 		}
-		grpcTLS, httpTLS = serverTLS, serverTLS
+		grpcTLS = serverTLS
+		// Optional mode keeps the HTTP OTLP listener plaintext for local
+		// collectors while gRPC uses mTLS.
+		httpTLS, err = tlsEnv.ServerTLSHTTP("", "")
+		if err != nil {
+			log.Fatalf("configure collector HTTP TLS: %v", err)
+		}
 	} else {
 		// Legacy path: DOCTOR_GRPC_TLS_* / DOCTOR_TLS_* with
 		// DOCTOR_GRPC_MTLS_* / DOCTOR_HTTP_MTLS_* unchanged.

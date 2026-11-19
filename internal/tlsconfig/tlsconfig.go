@@ -99,6 +99,17 @@ func (c Config) ServerTLS(legacyCertFile, legacyKeyFile string) (*tls.Config, er
 	return tlsx.NewServerTLSConfig(serverCfg)
 }
 
+// ServerTLSHTTP builds the TLS configuration for an HTTP listener. Optional
+// mode keeps HTTP plaintext so local UIs, port-forwards and probes keep
+// working while gRPC uses mTLS; required mode enables TLS for HTTP too. An
+// explicit legacy certificate is honored as an opt-in.
+func (c Config) ServerTLSHTTP(legacyCertFile, legacyKeyFile string) (*tls.Config, error) {
+	if c.Mode() == tlsx.ModeOptional && strings.TrimSpace(legacyCertFile) == "" {
+		return nil, nil
+	}
+	return c.ServerTLS(legacyCertFile, legacyKeyFile)
+}
+
 // ClientTLS builds the TLS configuration used for outbound calls. The client
 // certificate is optional (one-way TLS when absent); the CA bundle is used
 // whenever the file exists.
