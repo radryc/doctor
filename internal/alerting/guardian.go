@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/radryc/doctor/internal/tlsconfig"
 )
 
 // Guardian partition alert names. The alerts are partition-scoped so Nightwatch
@@ -270,7 +272,7 @@ func (s *GuardianSource) fetchPartitions(ctx context.Context) ([]GuardianPartiti
 }
 
 func (s *GuardianSource) get(ctx context.Context, path string) ([]byte, int, error) {
-	endpoint := strings.TrimRight(s.BaseURL, "/") + path
+	endpoint := tlsconfig.URL(strings.TrimRight(s.BaseURL, "/") + path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, 0, err
@@ -283,7 +285,7 @@ func (s *GuardianSource) get(ctx context.Context, path string) ([]byte, int, err
 	}
 	client := s.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = tlsconfig.HTTPClient(30 * time.Second)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

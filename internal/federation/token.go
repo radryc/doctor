@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/radryc/doctor/internal/tlsconfig"
 )
 
 var (
@@ -173,10 +175,10 @@ func NewGuardianTokenResolver(opts GuardianTokenResolverOptions) *GuardianTokenR
 	}
 	client := opts.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = tlsconfig.HTTPClient(10 * time.Second)
 	}
 	return &GuardianTokenResolver{
-		baseURL:     strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/"),
+		baseURL:     tlsconfig.URL(strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/")),
 		token:       strings.TrimSpace(opts.Token),
 		httpClient:  client,
 		cacheTTL:    cacheTTL,

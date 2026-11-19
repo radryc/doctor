@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/radryc/doctor/internal/tlsconfig"
 )
 
 // GuardianFeed reads the machine-facing Guardian APIs used by the catalog
@@ -23,10 +25,10 @@ type GuardianFeed struct {
 // NewGuardianFeed builds a Guardian feed client.
 func NewGuardianFeed(baseURL, token string, client *http.Client) *GuardianFeed {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = tlsconfig.HTTPClient(30 * time.Second)
 	}
 	return &GuardianFeed{
-		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		BaseURL: tlsconfig.URL(strings.TrimRight(strings.TrimSpace(baseURL), "/")),
 		Token:   strings.TrimSpace(token),
 		Client:  client,
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/radryc/tlsx"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -25,6 +26,10 @@ type TLSConfig struct {
 	Require bool
 	// Insecure is the explicit development-only escape hatch.
 	Insecure bool
+	// Strata carries the shared STRATA_TLS_* client contract when none of the
+	// legacy DOCTOR_MONOFS_TLS_* settings are present. It enables the CA
+	// bundle, automatic certificate rotation, and SPIFFE server verification.
+	Strata *tlsx.ClientConfig
 }
 
 // TLSConfigFromEnv reads the shared MonoFS TLS settings.
@@ -33,9 +38,13 @@ type TLSConfig struct {
 // (DOCTOR_MONOFS_TOKEN), because bearer credentials must never traverse a
 // plaintext connection without an explicit opt-out. Local development can set
 // DOCTOR_MONOFS_TLS_REQUIRE=false or DOCTOR_MONOFS_TLS_INSECURE=true.
+//
+// When no DOCTOR_MONOFS_TLS_* variable is set and STRATA_TLS_MODE is not off,
+// the shared STRATA_TLS_* client contract is used instead: the CA bundle is
+// required for verification and the client certificate is used when present.
 func TLSConfigFromEnv() TLSConfig {
 	tokenConfigured := strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TOKEN")) != ""
-	return TLSConfig{
+	legacy := TLSConfig{
 		CAFile:     strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TLS_CA")),
 		CertFile:   strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TLS_CERT")),
 		KeyFile:    strings.TrimSpace(os.Getenv("DOCTOR_MONOFS_TLS_KEY")),
@@ -43,6 +52,68 @@ func TLSConfigFromEnv() TLSConfig {
 		Require:    envBool("DOCTOR_MONOFS_TLS_REQUIRE", tokenConfigured),
 		Insecure:   envBool("DOCTOR_MONOFS_TLS_INSECURE", false),
 	}
+	if monoFSTLSEnvSet() {
+		return legacy
+	}
+	env, err := tlsx.LoadEnv()
+	if err != nil {
+		log.Printf("monofs TLS: ignoring STRATA_TLS_* configuration: %v", err)
+		return legacy
+	}
+	if env.Mode == tlsx.ModeOff {
+		return legacy
+	}
+	client := env.ClientConfig()
+	if !pairExists(client.CertFile, client.KeyFile) {
+		client.CertFile, client.KeyFile = "", ""
+	}
+	if client.CAFile != "" {
+		if _, err := os.Stat(client.CAFile); err != nil {
+			if env.Mode == tlsx.ModeRequired {
+				log.Printf("monofs TLS: STRATA_TLS_CA_FILE %q is not readable; connections will fail closed", client.CAFile)
+			}
+			client.CAFile = ""
+		}
+	}
+	return TLSConfig{
+		ServerName: client.ServerName,
+		Require:    true,
+		Insecure:   legacy.Insecure,
+		Strata:     &client,
+	}
+}
+
+// monoFSTLSEnvSet reports whether the legacy DOCTOR_MONOFS_TLS_* contract was
+// configured explicitly, in which case it keeps precedence.
+func monoFSTLSEnvSet() bool {
+	for _, key := range []string{
+		"DOCTOR_MONOFS_TLS_CA",
+		"DOCTOR_MONOFS_TLS_CERT",
+		"DOCTOR_MONOFS_TLS_KEY",
+		"DOCTOR_MONOFS_TLS_SERVER_NAME",
+		"DOCTOR_MONOFS_TLS_REQUIRE",
+		"DOCTOR_MONOFS_TLS_INSECURE",
+	} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func pairExists(certFile, keyFile string) bool {
+	certFile = strings.TrimSpace(certFile)
+	keyFile = strings.TrimSpace(keyFile)
+	if certFile == "" || keyFile == "" {
+		return false
+	}
+	if _, err := os.Stat(certFile); err != nil {
+		return false
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		return false
+	}
+	return true
 }
 
 // ensureBearerTransport refuses to attach a bearer token to a plaintext
@@ -75,6 +146,13 @@ func (c TLSConfig) Credentials() (credentials.TransportCredentials, error) {
 	if c.Insecure {
 		log.Printf("monofs TLS: using plaintext transport because DOCTOR_MONOFS_TLS_INSECURE=true")
 		return insecure.NewCredentials(), nil
+	}
+	if c.Strata != nil {
+		tlsCfg, err := tlsx.NewClientTLSConfig(*c.Strata)
+		if err != nil {
+			return nil, fmt.Errorf("monofs TLS: %w", err)
+		}
+		return credentials.NewTLS(tlsCfg), nil
 	}
 	if !c.Require && c.CAFile == "" && c.CertFile == "" && c.KeyFile == "" {
 		return insecure.NewCredentials(), nil

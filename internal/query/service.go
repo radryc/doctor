@@ -28,6 +28,7 @@ import (
 	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/segment"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
+	"github.com/radryc/doctor/internal/tlsconfig"
 	"github.com/radryc/monofs/pkg/authz"
 	"github.com/radryc/monofs/pkg/authz/policy"
 )
@@ -337,10 +338,10 @@ func (s *Service) SetTenantHeader(header string) {
 }
 
 // SetGuardianURL sets the URL of the Guardian web UI shown as a header link.
-func (s *Service) SetGuardianURL(u string) { s.guardianURL = u }
+func (s *Service) SetGuardianURL(u string) { s.guardianURL = tlsconfig.URL(u) }
 
 // SetGuardianAPIURL sets the Guardian API base URL used for server-side fetches.
-func (s *Service) SetGuardianAPIURL(u string) { s.guardianAPIURL = u }
+func (s *Service) SetGuardianAPIURL(u string) { s.guardianAPIURL = tlsconfig.URL(u) }
 
 // SetDefaultPartition sets the partition pre-filled in the topology form.
 func (s *Service) SetDefaultPartition(p string) { s.defaultPartition = p }
@@ -359,19 +360,19 @@ func (s *Service) SetQuota(provider *quota.Provider, engine *quota.Engine) {
 // SetIngestUsage configures the optional doctor-ingest usage proxy used by the
 // quota dashboard.
 func (s *Service) SetIngestUsage(url, token string) {
-	s.ingestURL = strings.TrimRight(strings.TrimSpace(url), "/")
+	s.ingestURL = tlsconfig.URL(strings.TrimRight(strings.TrimSpace(url), "/"))
 	s.ingestToken = strings.TrimSpace(token)
 	if s.ingestURL == "" {
 		return
 	}
 	if s.ingestClient == nil {
-		s.ingestClient = &http.Client{Timeout: 5 * time.Second}
+		s.ingestClient = tlsconfig.HTTPClient(5 * time.Second)
 	}
 }
 
 // SetRulesURL configures the doctor-rules API base URL used by the UI proxy.
 func (s *Service) SetRulesURL(raw string) {
-	raw = strings.TrimSpace(raw)
+	raw = tlsconfig.URL(raw)
 	if raw == "" {
 		s.rulesProxy = nil
 		return
@@ -382,6 +383,7 @@ func (s *Service) SetRulesURL(raw string) {
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = tlsconfig.Transport()
 	director := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		director(req)
@@ -399,7 +401,7 @@ func (s *Service) SetRulesURL(raw string) {
 // proxy. Sentinel is a separate process; doctor-query only forwards reads and
 // operator actions.
 func (s *Service) SetSentinelURL(raw string) {
-	raw = strings.TrimSpace(raw)
+	raw = tlsconfig.URL(raw)
 	if raw == "" {
 		s.sentinelProxy = nil
 		return
@@ -410,6 +412,7 @@ func (s *Service) SetSentinelURL(raw string) {
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = tlsconfig.Transport()
 	director := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		director(req)
@@ -816,11 +819,9 @@ func NewServiceLogEngine(c *monofsstore.LogEngineClient, defaultTenant string) *
 		}
 	}
 	return &Service{
-		defaultTenant: defaultTenant,
-		logEngine:     backend,
-		guardianClient: &http.Client{
-			Timeout: 15 * time.Second,
-		},
+		defaultTenant:  defaultTenant,
+		logEngine:      backend,
+		guardianClient: tlsconfig.HTTPClient(15 * time.Second),
 	}
 }
 
