@@ -17,6 +17,7 @@ import (
 	"github.com/radryc/doctor/internal/ruler"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/doctor/internal/telemetry"
+	"github.com/radryc/doctor/internal/tlsconfig"
 	"github.com/radryc/monofs/pkg/authz"
 )
 
@@ -27,6 +28,10 @@ func main() {
 	cfg := config.LoadRules("doctor-rules")
 	if !cfg.Enabled {
 		log.Fatal("doctor-rules is disabled (DOCTOR_RULES_ENABLED=false)")
+	}
+	tlsEnv, err := tlsconfig.Load()
+	if err != nil {
+		log.Fatalf("load STRATA_TLS_* configuration: %v", err)
 	}
 	telemetryCfg, err := telemetry.LoadConfig("doctor-rules")
 	if err != nil {
@@ -172,10 +177,15 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	log.Printf("doctor-rules listening on %s (ruler=%s, store=%s)", cfg.HTTPAddr, cfg.RulerID, cfg.StoreRoot)
+	serverTLS, err := tlsEnv.ServerTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		log.Fatalf("configure HTTP TLS: %v", err)
+	}
+	server.TLSConfig = serverTLS
+	log.Printf("doctor-rules listening on %s (ruler=%s, store=%s, tls=%t, tls_mode=%s)", cfg.HTTPAddr, cfg.RulerID, cfg.StoreRoot, serverTLS != nil, tlsEnv.Mode())
 	var serveErr error
-	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
-		serveErr = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if serverTLS != nil {
+		serveErr = server.ListenAndServeTLS("", "")
 	} else {
 		serveErr = server.ListenAndServe()
 	}

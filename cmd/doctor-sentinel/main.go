@@ -21,6 +21,7 @@ import (
 	"github.com/radryc/doctor/internal/netguard"
 	"github.com/radryc/doctor/internal/ruler"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
+	"github.com/radryc/doctor/internal/tlsconfig"
 )
 
 func main() {
@@ -30,6 +31,10 @@ func main() {
 	cfg := config.LoadSentinel("doctor-sentinel")
 	if !cfg.Enabled {
 		log.Fatal("doctor-sentinel is disabled (DOCTOR_SENTINEL_ENABLED=false)")
+	}
+	tlsEnv, err := tlsconfig.Load()
+	if err != nil {
+		log.Fatalf("load STRATA_TLS_* configuration: %v", err)
 	}
 
 	var files alerting.FileStore
@@ -274,10 +279,16 @@ func main() {
 	if (tlsCert != "") != (tlsKey != "") {
 		log.Fatal("DOCTOR_SENTINEL_TLS_CERT_FILE and DOCTOR_SENTINEL_TLS_KEY_FILE must both be set")
 	}
-	log.Printf("doctor-sentinel listening on %s (store=%s, delivery=%t, tls=%t)", cfg.HTTPAddr, cfg.StoreRoot, cfg.DeliveryEnabled, tlsCert != "" && tlsKey != "")
+	serverTLS, err := tlsEnv.ServerTLS(tlsCert, tlsKey)
+	if err != nil {
+		log.Fatalf("configure HTTP TLS: %v", err)
+	}
+	server.TLSConfig = serverTLS
+	tlsEnabled := serverTLS != nil
+	log.Printf("doctor-sentinel listening on %s (store=%s, delivery=%t, tls=%t, tls_mode=%s)", cfg.HTTPAddr, cfg.StoreRoot, cfg.DeliveryEnabled, tlsEnabled, tlsEnv.Mode())
 	var serveErr error
-	if tlsCert != "" && tlsKey != "" {
-		serveErr = server.ListenAndServeTLS(tlsCert, tlsKey)
+	if tlsEnabled {
+		serveErr = server.ListenAndServeTLS("", "")
 	} else {
 		serveErr = server.ListenAndServe()
 	}

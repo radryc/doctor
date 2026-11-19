@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"github.com/radryc/doctor/internal/privacy"
 	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/telemetry"
+	"github.com/radryc/doctor/internal/tlsconfig"
 	"github.com/radryc/doctor/internal/wal"
 	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -40,6 +42,10 @@ func main() {
 	cfg, err := config.LoadIngest("doctor-ingest")
 	if err != nil {
 		log.Fatal(err)
+	}
+	tlsEnv, err := tlsconfig.Load()
+	if err != nil {
+		log.Fatalf("load STRATA_TLS_* configuration: %v", err)
 	}
 
 	// Set a soft memory limit below the container limit so GC runs
@@ -270,25 +276,47 @@ func main() {
 	ingestAuth := auth.NewMiddleware(verifier, true, []string{"/healthz", "/metrics"}, log.Default())
 	grpcAuth := authz.NewAuthenticator(verifier, nil, true)
 
-	grpcTLS, err := ingest.CollectorTLSConfig(cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile, ingest.CollectorMTLS{
-		Mode:   cfg.GRPCMTLSMode,
-		CAFile: cfg.GRPCMTLSCAFile,
-	})
-	if err != nil {
-		log.Fatalf("configure gRPC collector TLS: %v", err)
-	}
-	httpTLS, err := ingest.CollectorTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, ingest.CollectorMTLS{
-		Mode:   cfg.HTTPMTLSMode,
-		CAFile: cfg.HTTPMTLSCAFile,
-	})
-	if err != nil {
-		log.Fatalf("configure HTTP collector TLS: %v", err)
+	var grpcTLS, httpTLS *tls.Config
+	if tlsEnv.Enabled() {
+		// STRATA_TLS_* is the primary contract and takes precedence over the
+		// legacy DOCTOR_*_MTLS_* settings. The same certificate serves both the
+		// OTLP gRPC and HTTP listeners.
+		serverTLS, err := tlsEnv.ServerTLS("", "")
+		if err != nil {
+			log.Fatalf("configure collector TLS: %v", err)
+		}
+		grpcTLS, httpTLS = serverTLS, serverTLS
+	} else {
+		// Legacy path: DOCTOR_GRPC_TLS_* / DOCTOR_TLS_* with
+		// DOCTOR_GRPC_MTLS_* / DOCTOR_HTTP_MTLS_* unchanged.
+		grpcTLS, err = ingest.CollectorTLSConfig(cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile, ingest.CollectorMTLS{
+			Mode:   cfg.GRPCMTLSMode,
+			CAFile: cfg.GRPCMTLSCAFile,
+		})
+		if err != nil {
+			log.Fatalf("configure gRPC collector TLS: %v", err)
+		}
+		httpTLS, err = ingest.CollectorTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, ingest.CollectorMTLS{
+			Mode:   cfg.HTTPMTLSMode,
+			CAFile: cfg.HTTPMTLSCAFile,
+		})
+		if err != nil {
+			log.Fatalf("configure HTTP collector TLS: %v", err)
+		}
 	}
 	if grpcTLS != nil {
-		log.Printf("OTLP gRPC TLS enabled (mTLS mode=%s)", cfg.GRPCMTLSMode)
+		if tlsEnv.Enabled() {
+			log.Printf("OTLP gRPC TLS enabled (STRATA_TLS_MODE=%s)", tlsEnv.Mode())
+		} else {
+			log.Printf("OTLP gRPC TLS enabled (mTLS mode=%s)", cfg.GRPCMTLSMode)
+		}
 	}
 	if httpTLS != nil {
-		log.Printf("OTLP HTTP TLS enabled (mTLS mode=%s)", cfg.HTTPMTLSMode)
+		if tlsEnv.Enabled() {
+			log.Printf("OTLP HTTP TLS enabled (STRATA_TLS_MODE=%s)", tlsEnv.Mode())
+		} else {
+			log.Printf("OTLP HTTP TLS enabled (mTLS mode=%s)", cfg.HTTPMTLSMode)
+		}
 	}
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
@@ -337,8 +365,10 @@ func main() {
 		errCh <- grpcServer.Serve(lis)
 	}()
 	go func() {
-		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
-			errCh <- httpServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if httpServer.TLSConfig != nil {
+			// The certificate is supplied by TLSConfig (legacy files are loaded
+			// into Certificates; STRATA_TLS_* uses GetCertificate).
+			errCh <- httpServer.ListenAndServeTLS("", "")
 			return
 		}
 		errCh <- httpServer.ListenAndServe()

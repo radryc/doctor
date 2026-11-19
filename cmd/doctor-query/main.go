@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	gcpstore "github.com/radryc/doctor/internal/store/gcp"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/doctor/internal/telemetry"
+	"github.com/radryc/doctor/internal/tlsconfig"
 	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -36,6 +38,10 @@ func main() {
 	defer stop()
 
 	cfg := config.LoadQuery("doctor-query")
+	tlsEnv, err := tlsconfig.Load()
+	if err != nil {
+		log.Fatalf("load STRATA_TLS_* configuration: %v", err)
+	}
 	telemetryCfg, err := telemetry.LoadConfig("doctor-query")
 	if err != nil {
 		log.Fatal(err)
@@ -365,6 +371,15 @@ func main() {
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
+	serverTLS, err := tlsEnv.ServerTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		log.Fatalf("configure HTTP TLS: %v", err)
+	}
+	server.TLSConfig = serverTLS
+	if serverTLS != nil {
+		log.Printf("doctor-query HTTP TLS enabled (STRATA_TLS_MODE=%s, client certs=%v)",
+			tlsEnv.Mode(), serverTLS.ClientAuth != tls.NoClientCert)
+	}
 	if telemetryHandle.Enabled() {
 		server.Handler = otelhttp.NewHandler(server.Handler, "doctor-query-http")
 	}
@@ -373,8 +388,9 @@ func main() {
 		_ = server.Shutdown(context.Background())
 	}()
 	var serveErr error
-	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
-		serveErr = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if serverTLS != nil {
+		// The certificate is supplied by TLSConfig (hot-reloading GetCertificate).
+		serveErr = server.ListenAndServeTLS("", "")
 	} else {
 		serveErr = server.ListenAndServe()
 	}
