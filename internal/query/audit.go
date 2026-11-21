@@ -17,6 +17,8 @@ import (
 )
 
 const (
+	sharedDisplayHeader     = "X-Strata-Display-Profile"
+	sharedDisplayQuery      = "displayProfile"
 	defaultAuditEventsLimit = 100
 	maxAuditEventsLimit     = 1000
 	auditReadPathEndpoint   = "/v1/audit/events"
@@ -138,6 +140,10 @@ func withAuditLoggingTo(next http.Handler, logPath string) http.Handler {
 			return
 		}
 		identity, _ := authz.IdentityFromContext(r.Context())
+		profile := strings.TrimSpace(r.Header.Get(sharedDisplayHeader))
+		if profile == "" {
+			profile = strings.TrimSpace(r.URL.Query().Get(sharedDisplayQuery))
+		}
 		event := map[string]any{
 			"time":      time.Now().UTC().Format(time.RFC3339Nano),
 			"requestId": requestIDFromContext(r),
@@ -149,6 +155,7 @@ func withAuditLoggingTo(next http.Handler, logPath string) http.Handler {
 			"clientId":  identity.ClientID,
 			"tenant":    strings.TrimSpace(r.URL.Query().Get("tenant")),
 			"remote":    r.RemoteAddr,
+			"detail":    "displayProfile=" + profile,
 		}
 		if isAuditRead {
 			event["action"] = "audit_read"
