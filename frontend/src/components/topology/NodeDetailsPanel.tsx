@@ -1,3 +1,4 @@
+import { displayKey } from "../../lib/display";
 import type { GuardianTopologyNode } from "../../types/api";
 
 function healthColor(level?: string): string {
@@ -54,11 +55,11 @@ export default function NodeDetailsPanel({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <p className="text-[11px] uppercase tracking-wide text-gray-500">Partition</p>
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">{displayKey("partition")}</p>
               <p className="text-sm text-gray-200 mt-1">{node.partition || "-"}</p>
             </div>
             <div>
-              <p className="text-[11px] uppercase tracking-wide text-gray-500">Intent</p>
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">{displayKey("intent")}</p>
               <p className="text-sm text-gray-200 mt-1">{node.intent || "-"}</p>
             </div>
           </div>

@@ -1,3 +1,4 @@
+import { displayKey } from "../../lib/display";
 import { Fragment } from "react";
 import TraceWaterfall from "./TraceWaterfall";
 import type { TraceRecord } from "../../types/api";
@@ -121,7 +122,7 @@ export function SpanTable({ spans }: { spans: TraceRecord[] }) {
       <div className="trace-span-table">
         <div className="trace-span-header">
           <span>Name</span>
-          <span>Partition</span>
+          <span>{displayKey("partition")}</span>
           <span>Duration</span>
           <span>Status</span>
           <span>Start</span>

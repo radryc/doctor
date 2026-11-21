@@ -77,6 +77,18 @@ func (s *Service) Resolve(ctx context.Context, subject, requested string) (*shar
 	return profile, version, nil
 }
 
+// Profiles returns the compiled profiles for UI selection.
+func (s *Service) Profiles(ctx context.Context) ([]shared.CompiledProfile, string, error) {
+	if s == nil {
+		return nil, "", nil
+	}
+	bundle, version, err := s.bundleFor(ctx)
+	if err != nil {
+		return nil, version, err
+	}
+	return bundle.Profiles, version, nil
+}
+
 // Version returns the current bundle version, refreshing if needed.
 func (s *Service) Version(ctx context.Context) string {
 	if s == nil {

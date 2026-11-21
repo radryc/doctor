@@ -1,3 +1,4 @@
+import { displayKey } from "../lib/display";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
@@ -204,7 +205,7 @@ export default function PartitionAssetsPage() {
           </button>
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[var(--strata-accent-text)]">Partition traffic & recovery</p>
-            <h1 className="mt-1 text-xl font-semibold">{name || "Partition"}</h1>
+            <h1 className="mt-1 text-xl font-semibold">{name || displayKey("partition")}</h1>
             <p className="mt-1 text-xs text-slate-500">
               {assets.length} assets · {trafficPaths.length} traffic paths · {activeAlerts.length} active alerts
               {fleet.lastSync ? ` · synced ${fleet.lastSync.toLocaleTimeString()}` : ""}
@@ -367,7 +368,7 @@ export default function PartitionAssetsPage() {
             <div className="mt-3 overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead className="text-[10px] uppercase tracking-wide text-slate-500">
-                  <tr><th className="px-2 py-1.5">Asset</th><th className="px-2 py-1.5">Intent</th><th className="px-2 py-1.5">Status</th><th className="px-2 py-1.5 text-right">RPS</th><th className="px-2 py-1.5">Alerts</th><th className="px-2 py-1.5" /></tr>
+                  <tr><th className="px-2 py-1.5">{displayKey("asset")}</th><th className="px-2 py-1.5">{displayKey("intent")}</th><th className="px-2 py-1.5">Status</th><th className="px-2 py-1.5 text-right">RPS</th><th className="px-2 py-1.5">Alerts</th><th className="px-2 py-1.5" /></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
                   {assetsWithState.map((asset) => (
