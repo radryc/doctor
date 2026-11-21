@@ -818,11 +818,15 @@ func NewServiceLogEngine(c *monofsstore.LogEngineClient, defaultTenant string) *
 			backend = newCachingBackend(backend, ttl)
 		}
 	}
-	return &Service{
+	svc := &Service{
 		defaultTenant:  defaultTenant,
 		logEngine:      backend,
 		guardianClient: tlsconfig.HTTPClient(15 * time.Second),
 	}
+	if reader := NewClickHouseAuditReaderFromEnv(); reader != nil {
+		svc.auditReader = reader
+	}
+	return svc
 }
 
 func (s *Service) Handler() http.Handler {

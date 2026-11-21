@@ -4,6 +4,7 @@
 package auditlog
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/radryc/monofs/pkg/audit"
 	"github.com/radryc/monofs/pkg/authz"
 )
 
@@ -32,6 +34,8 @@ var (
 	auditFile     *os.File
 	auditFileMu   sync.Mutex
 	auditFilePath string
+	emitterOnce   sync.Once
+	sharedEmitter *audit.ServiceEmitter
 )
 
 // IncrementWriteError records one failed audit write for the component.
@@ -83,13 +87,90 @@ func WriteTo(explicitPath string, event map[string]any) error {
 			log.Printf("audit_log_write_error requestId=%q path=%q err=%v audit=%s", requestID, path, writeErr, payload)
 			return writeErr
 		}
+		emitShared(event)
 		return nil
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("DOCTOR_AUDIT_ENABLED")), "false") {
 		return nil
 	}
 	log.Printf("audit %s", payload)
+	emitShared(event)
 	return nil
+}
+
+// sharedEmitter returns the process-wide ClickHouse emitter configured by the
+// AUDIT_* environment contract. It is nil when auditing is disabled.
+func sharedEmitterInstance() *audit.ServiceEmitter {
+	emitterOnce.Do(func() {
+		emitter, err := audit.NewServiceEmitter(audit.ConfigFromEnv("doctor"))
+		if err != nil {
+			log.Printf("audit_emitter_error err=%v", err)
+			return
+		}
+		sharedEmitter = emitter
+	})
+	return sharedEmitter
+}
+
+func emitShared(event map[string]any) {
+	emitter := sharedEmitterInstance()
+	if emitter == nil {
+		return
+	}
+	action := audit.ActionWrite
+	if method, _ := event["method"].(string); method == http.MethodGet || method == http.MethodHead {
+		action = audit.ActionRead
+	}
+	if raw, _ := event["action"].(string); raw == "read" || raw == "audit_read" {
+		action = audit.Action(raw)
+	}
+	decision := audit.DecisionAllow
+	status := intField(event, "status")
+	if status >= http.StatusBadRequest {
+		decision = audit.DecisionDeny
+	}
+	service, _ := event["component"].(string)
+	if service == "" {
+		service = "doctor"
+	}
+	ev := audit.Event{
+		Service:       service,
+		Scope:         "telemetry",
+		Action:        action,
+		Decision:      decision,
+		Reason:        eventString(event, "reason"),
+		ActorSubject:  eventString(event, "subject"),
+		ActorClientID: eventString(event, "clientId"),
+		Email:         eventString(event, "email"),
+		Tenant:        eventString(event, "tenant"),
+		Resource:      eventString(event, "path"),
+		ResourceType:  "http",
+		RequestID:     eventString(event, "requestId"),
+		Method:        eventString(event, "method"),
+		Path:          eventString(event, "path"),
+		Status:        status,
+		SourceIP:      eventString(event, "remote"),
+		UserAgent:     eventString(event, "userAgent"),
+		Detail:        eventString(event, "detail"),
+	}
+	_ = emitter.Emit(context.Background(), ev)
+}
+
+func eventString(event map[string]any, key string) string {
+	value, _ := event[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func intField(event map[string]any, key string) int {
+	switch v := event[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
 }
 
 // MutationMiddleware audits non-GET requests whose path matches one of the
