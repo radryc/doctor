@@ -919,6 +919,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/ui/user", s.handleUIUser)
 	mux.HandleFunc("/v1/quota", s.handleQuota)
 	mux.HandleFunc("/v1/audit/events", s.handleAuditEvents)
+	mux.HandleFunc("/v1/audit/status", s.handleAuditStatus)
 	mux.HandleFunc("/", s.handleUI)
 	return s.withDisplayMapping(withHTTPMetrics(withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLoggingTo(withWarningHeaders(s.guardianTokenMiddleware(mux)), s.auditLogPath)))))))
 }

@@ -45,6 +45,99 @@ func NewClickHouseAuditReaderFromEnv() *ClickHouseAuditReader {
 	}
 }
 
+// AuditStatus is the aggregate health snapshot used by the status endpoint and
+// the Guardian probe. It never includes event content.
+type AuditStatus struct {
+	OK                   bool       `json:"ok"`
+	ClickHouse           bool       `json:"clickhouse"`
+	EventsTotal          uint64     `json:"eventsTotal"`
+	EventsRecent         uint64     `json:"eventsRecent"`
+	LastEventAt          *time.Time `json:"lastEventAt,omitempty"`
+	ConflictingSequences uint64     `json:"conflictingSequences"`
+	MaxEventAge          string     `json:"maxEventAge"`
+}
+
+// StatusReader is implemented by readers that can report aggregate health.
+type StatusReader interface {
+	Status(ctx context.Context) (AuditStatus, error)
+}
+
+// Status returns aggregate counts and recent-event age without exposing events.
+func (r *ClickHouseAuditReader) Status(ctx context.Context) (AuditStatus, error) {
+	status := AuditStatus{ClickHouse: true, MaxEventAge: "15m"}
+	if r == nil || r.endpoint == "" {
+		return status, fmt.Errorf("audit reader is not configured")
+	}
+	var total uint64
+	var recent uint64
+	var last time.Time
+	query := "SELECT count() AS total, countIf(timestamp >= now() - INTERVAL 15 MINUTE) AS recent, max(timestamp) AS last FROM " + r.database + ".events FORMAT JSONEachRow"
+	row, err := r.queryOne(ctx, query)
+	if err != nil {
+		return status, err
+	}
+	if value, ok := row["total"].(float64); ok {
+		total = uint64(value)
+	}
+	if value, ok := row["recent"].(float64); ok {
+		recent = uint64(value)
+	}
+	if raw, ok := row["last"].(string); ok && raw != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			last = parsed
+		}
+	}
+	conflictsQuery := "SELECT count() AS conflicts FROM (SELECT writer_id, seq, uniqExact(hash) h FROM " + r.database + ".events GROUP BY writer_id, seq HAVING h > 1) FORMAT JSONEachRow"
+	conflictRow, err := r.queryOne(ctx, conflictsQuery)
+	if err != nil {
+		return status, err
+	}
+	var conflicts uint64
+	if value, ok := conflictRow["conflicts"].(float64); ok {
+		conflicts = uint64(value)
+	}
+	status.EventsTotal = total
+	status.EventsRecent = recent
+	status.ConflictingSequences = conflicts
+	if !last.IsZero() {
+		status.LastEventAt = &last
+	}
+	status.OK = conflicts == 0 && !last.IsZero() && time.Since(last) <= 15*time.Minute
+	return status, nil
+}
+
+func (r *ClickHouseAuditReader) queryOne(ctx context.Context, query string) (map[string]any, error) {
+	u, err := url.Parse(r.endpoint)
+	if err != nil {
+		return nil, err
+	}
+	params := u.Query()
+	params.Set("query", query)
+	params.Set("date_time_output_format", "iso")
+	u.RawQuery = params.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if r.user != "" || r.password != "" {
+		req.SetBasicAuth(r.user, r.password)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("audit status query: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var row map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&row); err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
 // ReadAuditEvents implements AuditReader.
 func (r *ClickHouseAuditReader) ReadAuditEvents(ctx context.Context, q AuditQuery) ([]map[string]any, bool, error) {
 	if r == nil || r.endpoint == "" {

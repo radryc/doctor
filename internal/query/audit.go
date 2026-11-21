@@ -46,6 +46,31 @@ type auditEventsResponse struct {
 
 type requestIDKey struct{}
 
+// handleAuditStatus reports aggregate audit-pipeline health without exposing
+// event content. It returns 503 when the store is unreachable, events are more
+// than 15 minutes old, or a writer chain has conflicting sequences.
+func (s *Service) handleAuditStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	reader, ok := s.auditReader.(StatusReader)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "audit status reader is not configured"})
+		return
+	}
+	status, err := reader.Status(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "audit status unavailable"})
+		return
+	}
+	code := http.StatusOK
+	if !status.OK {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, status)
+}
+
 func requestIDFromContext(r *http.Request) string {
 	if r == nil {
 		return ""
