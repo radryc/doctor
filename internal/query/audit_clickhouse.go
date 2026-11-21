@@ -1,0 +1,140 @@
+package query
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+)
+
+// ClickHouseAuditReader reads audit events from the shared audit.events table.
+// The table is append-only and owned by the emitters; this reader never writes.
+type ClickHouseAuditReader struct {
+	endpoint string
+	database string
+	user     string
+	password string
+	client   *http.Client
+}
+
+var _ AuditReader = (*ClickHouseAuditReader)(nil)
+
+// NewClickHouseAuditReaderFromEnv returns a reader when DOCTOR_AUDIT_CH_URL is
+// configured, otherwise nil (the JSONL reader remains the local-dev fallback).
+func NewClickHouseAuditReaderFromEnv() *ClickHouseAuditReader {
+	endpoint := strings.TrimSpace(os.Getenv("DOCTOR_AUDIT_CH_URL"))
+	if endpoint == "" {
+		return nil
+	}
+	database := strings.TrimSpace(os.Getenv("DOCTOR_AUDIT_CH_DATABASE"))
+	if database == "" {
+		database = "audit"
+	}
+	return &ClickHouseAuditReader{
+		endpoint: strings.TrimRight(endpoint, "/"),
+		database: database,
+		user:     strings.TrimSpace(os.Getenv("DOCTOR_AUDIT_CH_USER")),
+		password: os.Getenv("DOCTOR_AUDIT_CH_PASSWORD"),
+		client:   &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+// ReadAuditEvents implements AuditReader.
+func (r *ClickHouseAuditReader) ReadAuditEvents(ctx context.Context, q AuditQuery) ([]map[string]any, bool, error) {
+	if r == nil || r.endpoint == "" {
+		return []map[string]any{}, false, nil
+	}
+	limit := q.Limit
+	if limit <= 0 || limit > maxAuditEventsLimit {
+		limit = defaultAuditEventsLimit
+	}
+	where := make([]string, 0, 6)
+	if !q.From.IsZero() {
+		where = append(where, "timestamp >= toDateTime64('"+q.From.UTC().Format("2006-01-02 15:04:05.000000")+"', 6, 'UTC')")
+	}
+	if !q.To.IsZero() {
+		where = append(where, "timestamp <= toDateTime64('"+q.To.UTC().Format("2006-01-02 15:04:05.000000")+"', 6, 'UTC')")
+	}
+	if q.Actor != "" {
+		actor := sqlString(q.Actor)
+		where = append(where, "(actor_subject = "+actor+" OR email = "+actor+" OR actor_client_id = "+actor+")")
+	}
+	if q.Action != "" {
+		where = append(where, "action = "+sqlString(q.Action))
+	}
+	if q.Partition != "" {
+		where = append(where, "partition = "+sqlString(q.Partition))
+	}
+	if q.Decision != "" {
+		where = append(where, "decision = "+sqlString(q.Decision))
+	}
+	query := "SELECT timestamp, event_id, writer_id, seq, service, env, scope, action, decision, reason, " +
+		"resource_type, actor_subject, actor_client_id, email, groups, tenant, partition, resource, " +
+		"request_id, trace_id, method, path, status, result_count, bytes, occurrences, source_ip, " +
+		"user_agent, policy_version, detail " +
+		"FROM " + r.database + ".events"
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += fmt.Sprintf(" ORDER BY timestamp DESC LIMIT %d FORMAT JSONEachRow", limit+1)
+
+	u, err := url.Parse(r.endpoint)
+	if err != nil {
+		return nil, false, err
+	}
+	params := u.Query()
+	params.Set("query", query)
+	params.Set("date_time_output_format", "iso")
+	u.RawQuery = params.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if r.user != "" || r.password != "" {
+		req.SetBasicAuth(r.user, r.password)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("audit clickhouse query: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, false, fmt.Errorf("audit clickhouse query: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	events := make([]map[string]any, 0, limit)
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			return nil, false, fmt.Errorf("decode audit row: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(events) > limit
+	if truncated {
+		events = events[:limit]
+	}
+	return events, truncated, nil
+}
+
+func sqlString(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `'`, `\'`)
+	return "'" + value + "'"
+}
