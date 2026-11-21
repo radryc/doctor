@@ -138,8 +138,11 @@ type DashboardDocument struct {
 	// requires maintainer/admin role on every listed partition. An empty list
 	// is accepted only for legacy and built-in documents; new user-authored
 	// dashboards must set it when access enforcement is on.
-	Partitions []string       `json:"partitions,omitempty" yaml:"partitions,omitempty"`
-	Meta       *DashboardMeta `json:"meta,omitempty" yaml:"meta,omitempty"`
+	Partitions []string `json:"partitions,omitempty" yaml:"partitions,omitempty"`
+	// DisplayProfile pins the presentation vocabulary when this dashboard is
+	// opened. It never changes values, ACLs, or query execution.
+	DisplayProfile string         `json:"displayProfile,omitempty" yaml:"displayProfile,omitempty"`
+	Meta           *DashboardMeta `json:"meta,omitempty" yaml:"meta,omitempty"`
 }
 
 // DashboardBundle is a portable export of multiple dashboards.

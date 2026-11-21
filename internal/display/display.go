@@ -59,7 +59,7 @@ func NewFromEnv() *Service {
 
 // Resolve returns the compiled profile for a request. An empty requested id
 // uses the caller's default.
-func (s *Service) Resolve(ctx context.Context, subject, requested string) (*shared.CompiledProfile, string, error) {
+func (s *Service) Resolve(ctx context.Context, subjects []string, requested string) (*shared.CompiledProfile, string, error) {
 	if s == nil {
 		return nil, "", nil
 	}
@@ -68,13 +68,30 @@ func (s *Service) Resolve(ctx context.Context, subject, requested string) (*shar
 		return nil, version, err
 	}
 	if strings.TrimSpace(requested) == "" {
-		requested = strings.TrimSpace(bundle.Defaults[subject])
+		for _, subject := range subjects {
+			if id := strings.TrimSpace(bundle.Defaults[subject]); id != "" {
+				requested = id
+				break
+			}
+		}
 	}
-	profile, ok := bundle.Profile(subject, requested)
+	profile, ok := bundle.ProfileFor(subjects, requested)
 	if !ok {
 		return nil, version, fmt.Errorf("display profile %q is not available", requested)
 	}
 	return profile, version, nil
+}
+
+// TranslateQuery rewrites repo-assigned display keys to canonical query keys.
+func (s *Service) TranslateQuery(ctx context.Context, values map[string][]string) map[string][]string {
+	if s == nil {
+		return values
+	}
+	bundle, _, err := s.bundleFor(ctx)
+	if err != nil {
+		return values
+	}
+	return bundle.TranslateQuery(values)
 }
 
 // Profiles returns the compiled profiles for UI selection.

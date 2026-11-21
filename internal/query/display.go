@@ -3,6 +3,7 @@ package query
 import (
 	"bytes"
 	"net/http"
+	"net/url"
 	"strings"
 
 	doctorDisplay "github.com/radryc/doctor/internal/display"
@@ -31,6 +32,9 @@ func (s *Service) withDisplayMapping(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if translated := s.displayProfiles.TranslateQuery(r.Context(), r.URL.Query()); len(translated) > 0 {
+			r.URL.RawQuery = url.Values(translated).Encode()
+		}
 		requested := strings.TrimSpace(r.Header.Get(shared.HeaderName))
 		if requested == "" {
 			requested = strings.TrimSpace(r.URL.Query().Get(shared.QueryParam))
@@ -39,8 +43,8 @@ func (s *Service) withDisplayMapping(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		subject := displaySubject(r)
-		profile, version, err := s.displayProfiles.Resolve(r.Context(), subject, requested)
+		subjects := displaySubjects(r)
+		profile, version, err := s.displayProfiles.Resolve(r.Context(), subjects, requested)
 		if err != nil || profile == nil {
 			next.ServeHTTP(w, r)
 			return
@@ -124,7 +128,7 @@ func displaySurfaceName(path string) string {
 	return ""
 }
 
-func displaySubject(r *http.Request) string {
+func displaySubjects(r *http.Request) []string {
 	id, _ := coreauthz.IdentityFromContext(r.Context())
 	who := strings.TrimSpace(id.Email)
 	if who == "" {
@@ -134,9 +138,17 @@ func displaySubject(r *http.Request) string {
 		who = strings.TrimSpace(id.ClientID)
 	}
 	if who == "" {
-		return ""
+		return nil
 	}
-	return "user:" + who
+	out := []string{"user:" + who}
+	for _, group := range id.Groups {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		out = append(out, group, "team:"+group)
+	}
+	return out
 }
 
 // SetDisplayProfiles installs the display bundle loader. Nil disables mapping.

@@ -16,6 +16,7 @@ import {
 import { api } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import type { DashboardDocument, DashboardWidget, VariableValues } from "../types/dashboard";
+import { currentDisplayProfile, setDisplayProfile } from "../lib/display";
 import { downloadJSON } from "../lib/download";
 import { variablesToParams, variablesFromParams } from "../lib/variables";
 import DashboardVariableBar from "../components/dashboards/DashboardVariableBar";
@@ -390,6 +391,9 @@ function DashboardView({ id }: { id: string }) {
       .getDashboard(config.default_tenant, id)
       .then((d) => {
         setDoc(d);
+        if (d.displayProfile && currentDisplayProfile() !== d.displayProfile) {
+          void setDisplayProfile(d.displayProfile).finally(() => window.location.reload());
+        }
         setPartitionDraft((d.partitions ?? []).join(", "));
         // Initialize variable values: URL params override defaults.
         const fromURL = variablesFromParams(searchParamsRef.current);
