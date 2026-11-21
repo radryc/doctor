@@ -921,6 +921,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/audit/events", s.handleAuditEvents)
 	mux.HandleFunc("/v1/audit/status", s.handleAuditStatus)
 	mux.HandleFunc("/v1/display-profiles", s.handleDisplayProfiles)
+	mux.HandleFunc("/v1/display-profiles/effective", s.handleDisplayEffective)
 	mux.HandleFunc("/", s.handleUI)
 	return s.withDisplayMapping(withHTTPMetrics(withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLoggingTo(withWarningHeaders(s.guardianTokenMiddleware(mux)), s.auditLogPath)))))))
 }

@@ -135,6 +135,7 @@ func (s *Service) bundleFor(ctx context.Context) (*shared.Bundle, string, error)
 		s.mu.Unlock()
 		return nil, "", err
 	}
+	shared.SetBundleVersion(version)
 	s.mu.Lock()
 	s.bundle = bundle
 	s.version = version

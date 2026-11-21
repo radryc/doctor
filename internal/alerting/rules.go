@@ -438,20 +438,25 @@ func (s *Service) evaluateRule(ctx context.Context, group RuleGroup, rule AlertR
 			annotations[key] = val
 		}
 		lastSeen := now
+		displayProfile := ""
+		if rule.Spec != nil {
+			displayProfile = rule.Spec.DisplayProfile
+		}
 		alert := Alert{
-			Fingerprint: Fingerprint("sentinel", group.Tenant, group.Partition, labels),
-			Source:      "sentinel",
-			Tenant:      group.Tenant,
-			Partition:   group.Partition,
-			Status:      status,
-			Severity:    severity,
-			Labels:      labels,
-			Annotations: annotations,
-			StartsAt:    startsAt,
-			Value:       strconv.FormatFloat(value, 'g', -1, 64),
-			Delivery:    DeliverySentinel,
-			Notify:      append([]string(nil), rule.Notify...),
-			LastSeenAt:  &lastSeen,
+			Fingerprint:    Fingerprint("sentinel", group.Tenant, group.Partition, labels),
+			Source:         "sentinel",
+			Tenant:         group.Tenant,
+			Partition:      group.Partition,
+			Status:         status,
+			Severity:       severity,
+			Labels:         labels,
+			Annotations:    annotations,
+			StartsAt:       startsAt,
+			Value:          strconv.FormatFloat(value, 'g', -1, 64),
+			Delivery:       DeliverySentinel,
+			DisplayProfile: displayProfile,
+			Notify:         append([]string(nil), rule.Notify...),
+			LastSeenAt:     &lastSeen,
 		}
 		alert.ID = alert.Fingerprint
 		if _, err := s.Apply(ctx, alert); err != nil {

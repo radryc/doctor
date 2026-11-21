@@ -21,6 +21,7 @@ export interface Alert {
   endsAt?: string | null;
   value?: string;
   delivery: "sentinel" | "native" | string;
+  displayProfile?: string;
   notify?: string[];
   acked?: boolean;
   ackedBy?: string;
@@ -89,6 +90,7 @@ export interface AlertDefinition {
   for?: string;
   severity?: string;
   summary?: string;
+  displayProfile?: string;
   notify?: string[];
   labels?: Record<string, string>;
   annotations?: Record<string, string>;

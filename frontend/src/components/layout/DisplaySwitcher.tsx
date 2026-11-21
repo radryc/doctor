@@ -12,6 +12,18 @@ export default function DisplaySwitcher() {
 
   useEffect(() => {
     let cancelled = false;
+    if (!currentDisplayProfile()) {
+      fetch("/v1/display-profiles/effective", { headers: { Accept: "application/json" } })
+        .then((res) => (res.ok ? res.json() : { profile: "" }))
+        .then((body) => {
+          if (!cancelled && body.profile) {
+            void setDisplayProfile(body.profile).then(() => {
+              setActive(body.profile);
+            });
+          }
+        })
+        .catch(() => undefined);
+    }
     fetch("/v1/display-profiles", { headers: { Accept: "application/json" } })
       .then((res) => (res.ok ? res.json() : { profiles: [] }))
       .then((body) => {
