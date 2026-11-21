@@ -23,6 +23,7 @@ import (
 	"github.com/radryc/doctor/internal/access"
 	"github.com/radryc/doctor/internal/alerting"
 	"github.com/radryc/doctor/internal/auth"
+	doctorDisplay "github.com/radryc/doctor/internal/display"
 	"github.com/radryc/doctor/internal/federation"
 	"github.com/radryc/doctor/internal/proxy"
 	"github.com/radryc/doctor/internal/quota"
@@ -72,6 +73,7 @@ type Service struct {
 	quotaProvider          *quota.Provider
 	auditLogPath           string
 	auditReader            AuditReader
+	displayProfiles        *doctorDisplay.Service
 	ingestURL              string
 	ingestToken            string
 	ingestClient           *http.Client
@@ -826,6 +828,7 @@ func NewServiceLogEngine(c *monofsstore.LogEngineClient, defaultTenant string) *
 	if reader := NewClickHouseAuditReaderFromEnv(); reader != nil {
 		svc.auditReader = reader
 	}
+	svc.displayProfiles = doctorDisplay.NewFromEnv()
 	return svc
 }
 
@@ -917,7 +920,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/quota", s.handleQuota)
 	mux.HandleFunc("/v1/audit/events", s.handleAuditEvents)
 	mux.HandleFunc("/", s.handleUI)
-	return withHTTPMetrics(withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLoggingTo(withWarningHeaders(s.guardianTokenMiddleware(mux)), s.auditLogPath))))))
+	return s.withDisplayMapping(withHTTPMetrics(withSecurityHeaders(withBodyLimit(withRequestID(withMutationOriginCheck(withAuditLoggingTo(withWarningHeaders(s.guardianTokenMiddleware(mux)), s.auditLogPath)))))))
 }
 
 // guardianTokenKey carries the caller's OIDC token to server-side Guardian
