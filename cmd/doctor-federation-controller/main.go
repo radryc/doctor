@@ -18,9 +18,9 @@ import (
 func main() {
 	var (
 		guardianURL     = flag.String("guardian-url", envOr("DOCTOR_GUARDIAN_API_URL", ""), "Guardian API base URL")
-		guardianToken   = flag.String("guardian-token", envOr("DOCTOR_GUARDIAN_TOKEN", envOr("DOCTOR_ACCESS_POLICY_TOKEN", "")), "Guardian internal machine token")
-		monofsRouter    = flag.String("monofs-router", envOr("DOCTOR_MONOFS_ROUTER", ""), "MonoFS router address")
-		monofsToken     = flag.String("monofs-token", envOr("DOCTOR_MONOFS_TOKEN", ""), "MonoFS file-store token")
+		guardianToken   = flag.String("guardian-token", envOr("DOCTOR_GUARDIAN_TOKEN", envOr("DOCTOR_ACCESS_POLICY_TOKEN", "")), "Guardian internal machine token (env: DOCTOR_GUARDIAN_TOKEN; preferred over the flag)")
+		monofsRouter    = flag.String("monofs-router", envOr("DOCTOR_MONOFS_ROUTER", ""), "MonoFS router address (env: DOCTOR_MONOFS_ROUTER)")
+		monofsToken     = flag.String("monofs-token", envOr("DOCTOR_MONOFS_TOKEN", ""), "MonoFS file-store token (env: DOCTOR_MONOFS_TOKEN; preferred over the flag)")
 		root            = flag.String("root", "/doctor/v1/federation", "catalog snapshot root")
 		tenant          = flag.String("tenant", "default", "federation tenant")
 		interval        = flag.Duration("interval", 5*time.Minute, "rebuild interval")
@@ -38,7 +38,7 @@ func main() {
 	flag.Parse()
 
 	if strings.TrimSpace(*guardianURL) == "" || strings.TrimSpace(*monofsRouter) == "" || strings.TrimSpace(*monofsToken) == "" {
-		log.Fatal("--guardian-url, --monofs-router and --monofs-token are required")
+		log.Fatal("Guardian URL and MonoFS router/token are required (flags or DOCTOR_GUARDIAN_API_URL, DOCTOR_MONOFS_ROUTER, DOCTOR_MONOFS_TOKEN)")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

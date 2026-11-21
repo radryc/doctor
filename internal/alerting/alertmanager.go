@@ -144,7 +144,7 @@ func (a *API) handleAlertmanagerAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := a.alertmanagerTenant(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	alerts, err := a.Store.ListTenantAlerts(r.Context(), tenant)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -193,7 +193,7 @@ func (a *API) handleAlertmanagerAlertGroups(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	tenant := a.alertmanagerTenant(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	alerts, err := a.Store.ListTenantAlerts(r.Context(), tenant)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -262,7 +262,7 @@ func (a *API) handleAlertmanagerSilences(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	tenant := a.alertmanagerTenant(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	silences, err := a.Store.ListTenantSilences(r.Context(), tenant)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -317,7 +317,7 @@ func (a *API) handleAlertmanagerSilence(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	tenant := a.alertmanagerTenant(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v2/silence/"), "/")
 	if id == "" {
 		writeError(w, http.StatusNotFound, "not found")

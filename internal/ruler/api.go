@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/radryc/doctor/internal/store"
@@ -29,6 +30,13 @@ type Authorizer interface {
 	CanModify(ctx context.Context, partition, group string) bool
 }
 
+// ReadAuthorizer optionally filters reads. Authorizers that do not implement
+// it keep the pre-authorization behavior (any authenticated caller can list
+// and read rules).
+type ReadAuthorizer interface {
+	CanRead(ctx context.Context, partition string) bool
+}
+
 // AuthenticatedAuthorizer allows mutations from any authenticated caller.
 // The rules binary installs a static-token authentication middleware in front
 // of the API, so reaching this authorizer implies a valid service credential.
@@ -36,6 +44,12 @@ type AuthenticatedAuthorizer struct{}
 
 // CanModify implements Authorizer.
 func (AuthenticatedAuthorizer) CanModify(ctx context.Context, _, _ string) bool {
+	id, ok := authz.IdentityFromContext(ctx)
+	return ok && !id.IsAnonymous()
+}
+
+// CanRead implements ReadAuthorizer.
+func (AuthenticatedAuthorizer) CanRead(ctx context.Context, _ string) bool {
 	id, ok := authz.IdentityFromContext(ctx)
 	return ok && !id.IsAnonymous()
 }
@@ -59,6 +73,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/v1/rules", a.handleCollection)
 	mux.HandleFunc("/v1/rules/status", a.handleStatus)
 	mux.HandleFunc("/v1/rules/evaluate", a.handleEvaluate)
+	mux.HandleFunc("/v1/rules/backfill", a.handleBackfill)
 	mux.HandleFunc("/v1/rules/", a.handleGroup)
 	return mux
 }
@@ -99,6 +114,9 @@ func (a *API) handleCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]groupSummary, 0, len(refs))
 	for _, ref := range refs {
+		if !a.canRead(r.Context(), ref.Partition) {
+			continue
+		}
 		interval := ""
 		rules := 0
 		if ref.File != nil && len(ref.File.Groups) > 0 {
@@ -118,6 +136,10 @@ func (a *API) handleGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		if !a.canRead(r.Context(), partition) {
+			writeError(w, http.StatusForbidden, "not authorized to read this rule group")
+			return
+		}
 		file, err := a.Store.Get(r.Context(), partition, group)
 		if err != nil {
 			writeStoreError(w, err)
@@ -184,6 +206,10 @@ func (a *API) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "partition and group are required")
 		return
 	}
+	if !a.canModify(r.Context(), partition, group) {
+		writeError(w, http.StatusForbidden, "not authorized to evaluate this rule group")
+		return
+	}
 	file, err := a.Store.Get(r.Context(), partition, group)
 	if err != nil {
 		writeStoreError(w, err)
@@ -196,11 +222,105 @@ func (a *API) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
+// handleBackfill replays a rule group over an explicit time range. The
+// evaluator uses deterministic chunk IDs, so replaying a tick already written
+// does not duplicate samples.
+func (a *API) handleBackfill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	partition := strings.TrimSpace(r.URL.Query().Get("partition"))
+	groupName := strings.TrimSpace(r.URL.Query().Get("group"))
+	if partition == "" || groupName == "" {
+		writeError(w, http.StatusBadRequest, "partition and group are required")
+		return
+	}
+	if !a.canModify(r.Context(), partition, groupName) {
+		writeError(w, http.StatusForbidden, "not authorized to backfill this rule group")
+		return
+	}
+	from, err := time.Parse(time.RFC3339, strings.TrimSpace(r.URL.Query().Get("from")))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "from must be RFC3339")
+		return
+	}
+	to, err := time.Parse(time.RFC3339, strings.TrimSpace(r.URL.Query().Get("to")))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "to must be RFC3339")
+		return
+	}
+	if !to.After(from) {
+		writeError(w, http.StatusBadRequest, "to must be after from")
+		return
+	}
+
+	file, err := a.Store.Get(r.Context(), partition, groupName)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	var group *Group
+	for i := range file.Groups {
+		if file.Groups[i].Name == groupName {
+			group = &file.Groups[i]
+			break
+		}
+	}
+	if group == nil {
+		writeError(w, http.StatusNotFound, "rule group not found")
+		return
+	}
+
+	step := group.IntervalOrDefault()
+	if raw := strings.TrimSpace(r.URL.Query().Get("step")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed < 5*time.Second {
+			writeError(w, http.StatusBadRequest, "step must be a duration of at least 5s")
+			return
+		}
+		step = parsed
+	}
+	const maxBackfillTicks = 10000
+	ticks := int(to.Sub(from)/step) + 1
+	if ticks > maxBackfillTicks {
+		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
+			"backfill would evaluate %d ticks; maximum is %d (increase step or narrow the range)", ticks, maxBackfillTicks))
+		return
+	}
+
+	results := make([]EvalResult, 0, ticks*len(group.Rules))
+	for tick := from; !tick.After(to); tick = tick.Add(step) {
+		results = append(results, a.Evaluator.EvaluateGroupAt(r.Context(), *group, tick)...)
+		if r.Context().Err() != nil {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"partition": partition,
+		"group":     groupName,
+		"step":      step.String(),
+		"ticks":     ticks,
+		"results":   results,
+	})
+}
+
 func (a *API) canModify(ctx context.Context, partition, group string) bool {
 	if a.Authorizer == nil {
 		return true
 	}
 	return a.Authorizer.CanModify(ctx, partition, group)
+}
+
+func (a *API) canRead(ctx context.Context, partition string) bool {
+	if a.Authorizer == nil {
+		return true
+	}
+	reader, ok := a.Authorizer.(ReadAuthorizer)
+	if !ok {
+		return true
+	}
+	return reader.CanRead(ctx, partition)
 }
 
 // checkLimits enforces the partition's group/rule envelope before a write.

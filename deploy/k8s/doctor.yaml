@@ -2,6 +2,8 @@
 #
 # These manifests are a starting point, not a turnkey production deployment.
 # Replace image names, the MonoFS address, and the Secret before applying.
+# Images are pinned to an immutable release tag; production deployments should
+# additionally pin by digest (image@sha256:...) once a registry publishes them.
 # They deliberately run every container as non-root with a read-only root
 # filesystem and no Linux capabilities.
 apiVersion: v1
@@ -43,6 +45,7 @@ spec:
     metadata:
       labels: { app: doctor-ingest }
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -50,7 +53,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: ingest
-          image: doctor-ingest:latest
+          image: doctor-ingest:v0.1.0
           envFrom:
             - configMapRef: { name: doctor-config }
             - secretRef: { name: doctor-secrets }
@@ -70,6 +73,7 @@ spec:
             limits: { cpu: "2", memory: 1Gi }
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
@@ -102,6 +106,7 @@ spec:
     metadata:
       labels: { app: doctor-query }
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -109,7 +114,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: query
-          image: doctor-query:latest
+          image: doctor-query:v0.1.0
           envFrom:
             - configMapRef: { name: doctor-config }
             - secretRef: { name: doctor-secrets }
@@ -131,6 +136,7 @@ spec:
             limits: { cpu: "2", memory: 2Gi }
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
@@ -162,13 +168,14 @@ spec:
     metadata:
       labels: { app: doctor-rules }
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
       containers:
         - name: rules
-          image: doctor-rules:latest
+          image: doctor-rules:v0.1.0
           envFrom:
             - configMapRef: { name: doctor-config }
             - secretRef: { name: doctor-secrets }
@@ -183,6 +190,7 @@ spec:
             limits: { cpu: "1", memory: 512Mi }
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
@@ -214,13 +222,14 @@ spec:
     metadata:
       labels: { app: doctor-sentinel }
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
       containers:
         - name: sentinel
-          image: doctor-sentinel:latest
+          image: doctor-sentinel:v0.1.0
           envFrom:
             - configMapRef: { name: doctor-config }
             - secretRef: { name: doctor-secrets }
@@ -235,6 +244,7 @@ spec:
             limits: { cpu: "1", memory: 512Mi }
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
@@ -321,7 +331,12 @@ spec:
         values: [doctor-query, doctor-rules, doctor-sentinel]
   policyTypes: [Ingress]
   ingress:
-    - ports:
+    # Only ingress-controller pods in the ingress-nginx namespace may reach the
+    # UI/API ports. The podSelector is evaluated inside that namespace.
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: ingress-nginx } }
+      ports:
         - { protocol: TCP, port: 18080 }
         - { protocol: TCP, port: 18081 }
         - { protocol: TCP, port: 18082 }

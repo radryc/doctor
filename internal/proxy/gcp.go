@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/radryc/doctor/internal/segment"
@@ -127,6 +128,14 @@ type GCPUpstream struct {
 	FilterLogs      func(ctx context.Context, records []segment.LogRecord) []segment.LogRecord
 	FilterSpans     func(ctx context.Context, records []segment.TraceRecord) []segment.TraceRecord
 	FilterSummaries func(ctx context.Context, summaries []TraceSummary) []TraceSummary
+
+	// Cloud Monitoring exposes tens of thousands of metric names. Cache the
+	// __name__ label-values result briefly so Grafana autocomplete does not
+	// call the provider on every keystroke.
+	namesMu  sync.Mutex
+	names    []string
+	namesAt  time.Time
+	namesTTL time.Duration
 }
 
 // Name implements MetricsUpstream/LogsUpstream/TracesUpstream.
@@ -173,7 +182,7 @@ func (u *GCPUpstream) PromSeries(ctx context.Context, _ string, match []string, 
 	if err != nil {
 		return nil, err
 	}
-	return ExtractPrometheusSeries(resp), nil
+	return StampSeriesSource(ExtractPrometheusSeries(resp), SourceGCP), nil
 }
 
 func (u *GCPUpstream) PromLabels(ctx context.Context, _ string, match []string, start, end time.Time) ([]string, error) {
@@ -185,11 +194,40 @@ func (u *GCPUpstream) PromLabels(ctx context.Context, _ string, match []string, 
 }
 
 func (u *GCPUpstream) PromLabelValues(ctx context.Context, _, label string, match []string, start, end time.Time) ([]string, error) {
+	if label == "__name__" && len(match) == 0 {
+		if cached, ok := u.cachedMetricNames(); ok {
+			return cached, nil
+		}
+	}
 	resp, err := u.Client.PrometheusLabelValues(ctx, label, match, start, end)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractPrometheusStringList(resp), nil
+	values := ExtractPrometheusStringList(resp)
+	if label == "__name__" && len(match) == 0 {
+		u.storeMetricNames(values)
+	}
+	return values, nil
+}
+
+func (u *GCPUpstream) cachedMetricNames() ([]string, bool) {
+	ttl := u.namesTTL
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	u.namesMu.Lock()
+	defer u.namesMu.Unlock()
+	if u.names == nil || time.Since(u.namesAt) > ttl {
+		return nil, false
+	}
+	return append([]string(nil), u.names...), true
+}
+
+func (u *GCPUpstream) storeMetricNames(values []string) {
+	u.namesMu.Lock()
+	u.names = append([]string(nil), values...)
+	u.namesAt = time.Now()
+	u.namesMu.Unlock()
 }
 
 // QueryLogs implements LogsUpstream.
@@ -238,6 +276,7 @@ func (u *GCPUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 		if partition != "" {
 			resource[telemetrylabels.GuardianPartition] = partition
 		}
+		traceID, spanID := gcpTraceSpan(attrs)
 		out = append(out, segment.LogRecord{
 			Tenant:             tenant,
 			Service:            resource["service.name"],
@@ -245,6 +284,8 @@ func (u *GCPUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 			Timestamp:          record.Timestamp,
 			SeverityText:       record.Severity,
 			Body:               record.Message,
+			TraceID:            traceID,
+			SpanID:             spanID,
 			ResourceAttributes: resource,
 			Attributes:         attrs,
 		})
@@ -253,6 +294,57 @@ func (u *GCPUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 		out = u.FilterLogs(ctx, out)
 	}
 	return out, nil
+}
+
+// gcpTraceSpan resolves the trace and span IDs carried by a Cloud Logging
+// record. Cloud Logging puts the canonical trace in the top-level `trace`
+// field ("projects/<project>/traces/<id>"), while applications commonly repeat
+// it in jsonPayload as `traceId`/`trace_id`. Both are normalized to the bare
+// trace ID used by the trace APIs and the Doctor UI.
+func gcpTraceSpan(attrs map[string]string) (string, string) {
+	var traceID, spanID string
+	for _, key := range []string{"trace", "traceId", "trace_id", "logging.googleapis.com/trace"} {
+		raw := strings.TrimSpace(attrs[key])
+		if raw == "" {
+			continue
+		}
+		if id, span := normalizeGCPTraceReference(raw); id != "" {
+			traceID = id
+			if span != "" {
+				spanID = span
+			}
+			break
+		}
+	}
+	if spanID == "" {
+		for _, key := range []string{"spanId", "span_id", "logging.googleapis.com/spanId"} {
+			if raw := strings.TrimSpace(attrs[key]); raw != "" {
+				spanID = raw
+				break
+			}
+		}
+	}
+	return traceID, spanID
+}
+
+// normalizeGCPTraceReference converts the trace formats found in Cloud
+// Logging into a bare trace ID plus an optional span ID:
+//
+//	projects/<project>/traces/<trace>
+//	00-<trace>-<span>-01          (W3C traceparent)
+//	<trace>
+func normalizeGCPTraceReference(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	if idx := strings.LastIndex(raw, "/traces/"); idx >= 0 {
+		return strings.TrimSpace(raw[idx+len("/traces/"):]), ""
+	}
+	if parts := strings.Split(raw, "-"); len(parts) == 4 && len(parts[1]) == 32 && len(parts[2]) == 16 {
+		return parts[1], parts[2]
+	}
+	return raw, ""
 }
 
 // gcpLogQuery extracts a log name and a Cloud Logging filter from a LogQL

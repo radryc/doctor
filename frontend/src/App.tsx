@@ -14,6 +14,8 @@ import FleetDashboard from "./pages/FleetDashboard";
 import RecordingRulesPage from "./pages/RecordingRulesPage";
 import QuotaPage from "./pages/QuotaPage";
 import AlertsPage from "./pages/AlertsPage";
+import IncidentsPage from "./pages/IncidentsPage";
+import IncidentDetailPage from "./pages/IncidentDetailPage";
 import PartitionViewPage from "./pages/PartitionViewPage";
 import PartitionAssetsPage from "./pages/PartitionAssetsPage";
 import PartitionAssetsLegacyPage from "./pages/PartitionAssetsLegacyPage";
@@ -35,6 +37,8 @@ export default function App() {
             <Route path="/quota" element={<QuotaPage />} />
             <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/alerts/*" element={<AlertsPage />} />
+            <Route path="/incidents" element={<IncidentsPage />} />
+            <Route path="/incidents/:id" element={<IncidentDetailPage />} />
             <Route path="/traces" element={<TracesPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />

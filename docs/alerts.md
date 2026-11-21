@@ -10,26 +10,32 @@ alert state, receiver config, and the delivery outbox in MonoFS.
   (HMAC-signed with `X-Guardian-Signature`).
 - Guardian partition `Error`/`Failing`/`Invalid` and `Attention` state pulled
   from `GET /api/partitions`. This source creates `GuardianPartitionError`
-  (critical) and `GuardianPartitionAttention` (warning) alerts and resolves them
-  when the partition recovers. Locked-only drift is treated as intentional and
-  does not raise `GuardianPartitionAttention`; real errors and failing assets
-  still raise `GuardianPartitionError`. Nightwatch reads these through the
-  Sentinel API, so Guardian errors and attentions become Nightwatch incidents
-  without any Nightwatch-side change. Both alerts include a `guardian.url`
-  annotation that deep-links to the partition in the Guardian UI.
+  (critical), `GuardianPartitionAttention` (warning) and
+  `GuardianPartitionUnavailable` (warning) alerts and resolves them when the
+  partition recovers. Locked-only drift is treated as intentional and does not
+  raise `GuardianPartitionAttention`; real errors and failing assets still raise
+  `GuardianPartitionError`. A partition whose status read fails (Guardian
+  reports `Unavailable` or `context deadline exceeded`) is an observability
+  failure, not a partition failure: it raises `GuardianPartitionUnavailable`
+  instead of the critical error alert, and existing error/attention alerts are
+  left unresolved because a failed observation cannot confirm recovery.
+  Nightwatch reads these through the Sentinel API, so Guardian errors and
+  attentions become Nightwatch incidents without any Nightwatch-side change.
+  All alerts include a `guardian.url` annotation that deep-links to the
+  partition in the Guardian UI.
 - AWS CloudWatch alarms pulled through `guardian-pusher-aws`
   (`GET /v1/aws/alarms`).
+- GCP Cloud Monitoring alert policies pulled through `guardian-pusher-gcp` (`GCPSource`).
 - Alertmanager-compatible webhooks via
-  `POST /v1/alerts/intake/{source}`.
+  `POST /v1/alerts/intake/{source}` (and `POST /v1/alerts/intake/preview/{source}`).
 - Sentinel PromQL alert rules evaluated through `doctor-query`.
 - Subspace alerts for platform-wide events.
 
 The push and pull Guardian sources are independent. Enable the pull source
 (`DOCTOR_SENTINEL_GUARDIAN_ENABLED`) when Guardian's own notification evaluator
 is not already forwarding `partition.failing` events to Sentinel; otherwise the
-same incident appears under both alert names. The pull source is the recommended
-default because it also covers partitions whose Guardian notification state is
-missing or stale.
+same incident appears under both alert names. The pull source is the recommended configuration because
+it also covers partitions whose Guardian notification state is missing or stale.
 
 ## Alertmanager-compatible API
 
@@ -51,6 +57,12 @@ Grafana data source with `implementation: prometheus`, OAuth pass-through, and
 the `X-Doctor-Tenant` header. Alertmanager-managed silences are not writable
 through this API yet; phase 1 is read-only.
 
+## Incidents
+
+Alert sets turn matching alerts into incidents with ack, mitigate, and
+resolve states. Resolved incidents generate an agent-assisted postmortem. See
+[incidents.md](incidents.md).
+
 ## Delivery
 
 The pipeline is:
@@ -64,7 +76,10 @@ source -> intake -> normalize -> fingerprint/state -> route
 - `delivery: sentinel` means Sentinel owns notification delivery.
 - `delivery: native` means CloudWatch SNS or Alertmanager owns delivery;
   Sentinel imports and presents the alert only.
-- v1 channels: generic webhook, Slack, GoAlert, and PagerDuty Events API v2.
+- v1 channels: generic webhook, Slack, GoAlert, PagerDuty Events API v2,
+  Microsoft Teams, Zoom Team Chat, Android webhook receiver, and `fcb` (`fcm-bridge`). Teams,
+  Zoom, Android, and `fcb` also accept incident events; see [incidents.md](incidents.md)
+  and [receiver-plugins.md](receiver-plugins.md) for adding a channel.
 
 ## Alert authoring
 
@@ -159,8 +174,8 @@ defaultReceiver: oncall-slack
 
 This sends failing partitions to PagerDuty and attention/drift alerts to Slack,
 while anything else in the partition falls back to Slack. To route all Guardian
-alerts together, use the same receiver for both entries. Removing the explicit
-route falls back to the partition destination or default route.
+alerts together, use the same receiver for all three entries. Removing the
+explicit route falls back to the partition destination or default route.
 
 
 ## Guardian alert policy
@@ -181,11 +196,15 @@ alerts:
     for: 5m
   GuardianPartitionAttention:
     for: 30m
+  GuardianPartitionUnavailable:
+    for: 5m
 ```
 
+- Defaults: `GuardianPartitionError` and `GuardianPartitionUnavailable` wait
+  `5m`; `GuardianPartitionAttention` fires immediately.
 - `for` delays firing until the condition has been observed continuously for
   that duration. While waiting, the alert is `pending` and is not delivered.
-- `for: 0s` (or an omitted alert entry) fires on the first observation.
+- `for: 0s` overrides a default delay and fires on the first observation.
 - A condition that clears while pending resolves without notifying.
 - `alertOnLocked` defaults to `false`. Set it to `true` only for partitions
   where drift on a locked intent should raise `GuardianPartitionAttention`.
@@ -246,12 +265,16 @@ POST   /v1/alerts/rules/test
 GET    /v1/alerts/sources
 GET    /v1/alerts/sources/aws/policy
 PUT    /v1/alerts/sources/aws/policy
+GET    /v1/alerts/sources/aws/excluded
+GET    /v1/alerts/sources/gcp/policy
+PUT    /v1/alerts/sources/gcp/policy
 GET    /v1/alerts/sources/guardian/policy?tenant=&partition=
 PUT    /v1/alerts/sources/guardian/policy?tenant=&partition=
 GET    /v1/alerts/receivers?tenant=&partition=
 PUT    /v1/alerts/receivers?tenant=&partition=
 GET    /v1/alerts/routing/overview?tenant=
 GET    /v1/alerts/delivery
+GET    /v1/alerts/inventory
 GET    /v1/alerts/capabilities?tenant=&partition=
 POST   /v1/alerts/rules/compile
 POST   /v1/alerts/rules/preview
@@ -259,6 +282,8 @@ POST   /v1/alerts/rules/preview
 POST   /v1/alerts/subspace
 POST   /v1/alerts/subspace/{id}/resolve
 POST   /v1/alerts/subspace/preview
+
+POST   /v1/alerts/intake/fcb/ack     # signed device ack/nack from fcm-bridge
 ```
 
 The UI calls these through `doctor-query` at `/v1/alerts*`.
@@ -326,9 +351,8 @@ Capabilities are checked server-side. Unauthorized partitions return 404.
 - Rule editor: viewer + rule CRUD/test.
 - Admin: partition-wide silences, source policy, receivers, retries, broadcasts.
 
-`doctor-query` forwards identity headers to Sentinel. For local development,
-`DOCTOR_SENTINEL_AUTH_ALLOW_ALL=true` is available but must not be used in
-production.
+`doctor-query` forwards identity headers to Sentinel. `DOCTOR_SENTINEL_AUTH_ALLOW_ALL`
+defaults to `false` in `config.LoadSentinel`; set it to `true` only for local development.
 
 ## GoAlert receiver
 
@@ -383,6 +407,22 @@ DOCTOR_SENTINEL_AWS_ENABLED=true
 DOCTOR_SENTINEL_AWS_URL=http://guardian-awsread:19090
 DOCTOR_SENTINEL_AWS_TOKEN=...
 DOCTOR_SENTINEL_AWS_ALARM_SELECTION=managed-only
+DOCTOR_SENTINEL_GCP_ENABLED=false
+DOCTOR_SENTINEL_GCP_URL=...
+DOCTOR_SENTINEL_GCP_TOKEN=...
+DOCTOR_SENTINEL_GCP_PROJECT=...
+DOCTOR_SENTINEL_GCP_REGION=...
+DOCTOR_SENTINEL_GCP_PARTITION=...
+DOCTOR_SENTINEL_GCP_POLICY=...
+DOCTOR_SENTINEL_INCIDENTS_ENABLED=false
+DOCTOR_SENTINEL_INCIDENT_TICK=15s
+DOCTOR_SENTINEL_AGENT_URL=...
+DOCTOR_SENTINEL_AGENT_TOKEN=...
+DOCTOR_SENTINEL_FCB_ENABLED=false
+DOCTOR_SENTINEL_FCB_BACKEND_URL=...
+DOCTOR_SENTINEL_FCB_WEBHOOK_SECRET=...
+DOCTOR_SENTINEL_FCB_ACK_SECRET=...
+DOCTOR_SENTINEL_FCB_DEFAULT_TOPIC=...
 ```
 
 MonoFS uses `DOCTOR_MONOFS_LOGENGINE_ADDR` and `DOCTOR_MONOFS_TOKEN`.

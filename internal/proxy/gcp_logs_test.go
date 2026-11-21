@@ -19,6 +19,68 @@ func (f *fakeGCPLogClient) QueryLogs(context.Context, gcpstore.LogQuery) ([]gcps
 	return f.records, nil
 }
 
+func TestGCPUpstreamQueryLogsCarriesTraceIDs(t *testing.T) {
+	base := time.Date(2026, 11, 19, 13, 59, 43, 0, time.UTC)
+	traceID := "c2996ca6bcca394d097a0a067dff7df3"
+	spanID := "00f067aa0ba902b7"
+	cases := []struct {
+		name      string
+		fields    map[string]string
+		wantTrace string
+		wantSpan  string
+	}{
+		{
+			name:      "json payload traceId",
+			fields:    map[string]string{"traceId": traceID, "spanId": spanID},
+			wantTrace: traceID,
+			wantSpan:  spanID,
+		},
+		{
+			name:      "cloud logging trace resource",
+			fields:    map[string]string{"trace": "projects/strata-gcp-dev/traces/" + traceID},
+			wantTrace: traceID,
+		},
+		{
+			name:      "w3c traceparent",
+			fields:    map[string]string{"trace_id": "00-" + traceID + "-" + spanID + "-01"},
+			wantTrace: traceID,
+			wantSpan:  spanID,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &GCPUpstream{Client: &fakeGCPLogClient{records: []gcpstore.LogRecord{{
+				Timestamp: base,
+				LogGroup:  "run.googleapis.com/stdout",
+				Message:   `{"event":"request"}`,
+				Fields:    tc.fields,
+				Region:    "europe-west1",
+				Project:   "strata-gcp-dev",
+			}}}}
+			records, err := upstream.QueryLogs(
+				context.Background(),
+				"default",
+				LogPushdown{Selector: `{source="gcp"}`},
+				base.Add(-time.Hour),
+				base.Add(time.Hour),
+				10,
+			)
+			if err != nil {
+				t.Fatalf("QueryLogs: %v", err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("records = %#v", records)
+			}
+			if records[0].TraceID != tc.wantTrace {
+				t.Fatalf("trace_id = %q, want %q", records[0].TraceID, tc.wantTrace)
+			}
+			if records[0].SpanID != tc.wantSpan {
+				t.Fatalf("span_id = %q, want %q", records[0].SpanID, tc.wantSpan)
+			}
+		})
+	}
+}
+
 func TestGCPUpstreamQueryLogsUsesGuardianPartition(t *testing.T) {
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	upstream := &GCPUpstream{Client: &fakeGCPLogClient{records: []gcpstore.LogRecord{{

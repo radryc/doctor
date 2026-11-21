@@ -48,3 +48,38 @@ func TestTenantGuardSingleTenant(t *testing.T) {
 		t.Fatalf("default tenant status = %d, want 200", rec.Code)
 	}
 }
+
+func TestTenantGuardFailsClosedWithoutAllowlist(t *testing.T) {
+	guard := NewTenantGuard("X-Doctor-Tenant", "default", nil, "")
+	handler := guard.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/search?tenant=other", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/logs/search?tenant=default", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("default tenant status = %d, want 200", rec.Code)
+	}
+}
+
+func TestTenantGuardWildcardAllowsAnyTenant(t *testing.T) {
+	guard := NewTenantGuard("X-Doctor-Tenant", "default", []string{"*"}, "")
+	handler := guard.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/search?tenant=other", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}

@@ -130,6 +130,23 @@ func (g *PolicyGate) IsAdmin(id authz.Identity) bool {
 	return p != nil && p.IsAdmin(id)
 }
 
+// CanReadAudit reports whether the caller may read audit events. When policy
+// enforcement is inactive (nil gate or observe mode), access is allowed. Under
+// enforcement, only global admins (including break-glass) or callers holding
+// the "audit" group/scope are permitted (deny-by-default).
+func (g *PolicyGate) CanReadAudit(id authz.Identity) bool {
+	if g == nil || !g.enforce {
+		return true
+	}
+	if id.IsAnonymous() {
+		return false
+	}
+	if g.IsAdmin(id) {
+		return true
+	}
+	return id.HasGroup("audit")
+}
+
 // VisiblePartitions returns the partitions the caller may read for a signal.
 // Unlike record filtering, this runs even in observe mode: the SQL console is
 // a new read surface and fails closed while the policy is unavailable. Metrics

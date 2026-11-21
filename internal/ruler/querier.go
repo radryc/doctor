@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/radryc/doctor/internal/proxy"
+	"github.com/radryc/doctor/internal/tlsconfig"
 )
 
 // HTTPQuerier executes PromQL through doctor-query's Prometheus API.
@@ -21,13 +22,16 @@ type HTTPQuerier struct {
 	Client  *http.Client
 }
 
-// NewHTTPQuerier builds a querier for a doctor-query base URL.
+// NewHTTPQuerier builds a querier for a doctor-query base URL. The URL is
+// upgraded to https:// when STRATA_TLS_MODE=required, and the shared TLS
+// client is used when no explicit client is supplied.
 func NewHTTPQuerier(baseURL, token string, client *http.Client) *HTTPQuerier {
+	baseURL = tlsconfig.URL(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = tlsconfig.HTTPClient(30 * time.Second)
 	}
 	return &HTTPQuerier{
-		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		BaseURL: baseURL,
 		Token:   strings.TrimSpace(token),
 		Client:  client,
 	}

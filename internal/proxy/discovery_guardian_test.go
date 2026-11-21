@@ -92,8 +92,9 @@ func TestGuardianDiscoveryParsesPushersAndPartitions(t *testing.T) {
 	defer server.Close()
 
 	discovery := NewGuardianDiscovery(GuardianDiscoveryConfig{
-		BaseURL: server.URL,
-		Token:   "guardian-token",
+		BaseURL:   server.URL,
+		Token:     "guardian-token",
+		URLPolicy: netguard.Policy{AllowedHosts: []string{"pusher-aws", "prom-edge", "loki-shard-1", "loki-1"}},
 	})
 	if err := discovery.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
@@ -152,7 +153,7 @@ func TestGuardianDiscoveryKeepsSnapshotOnFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	discovery := NewGuardianDiscovery(GuardianDiscoveryConfig{BaseURL: server.URL})
+	discovery := NewGuardianDiscovery(GuardianDiscoveryConfig{BaseURL: server.URL, URLPolicy: netguard.Policy{AllowedHosts: []string{"a", "aws-1", "aws-2"}}})
 	if err := discovery.Refresh(context.Background()); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
@@ -225,7 +226,7 @@ func TestGuardianDiscoveryDeltaSyncUsesUpdatedSince(t *testing.T) {
 	}))
 	defer server.Close()
 
-	discovery := NewGuardianDiscovery(GuardianDiscoveryConfig{BaseURL: server.URL})
+	discovery := NewGuardianDiscovery(GuardianDiscoveryConfig{BaseURL: server.URL, URLPolicy: netguard.Policy{AllowedHosts: []string{"aws-1", "aws-2"}}})
 	if err := discovery.Refresh(context.Background()); err != nil {
 		t.Fatalf("first Refresh: %v", err)
 	}

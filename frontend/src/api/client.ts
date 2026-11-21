@@ -30,8 +30,18 @@ import type {
 } from "../types/api";
 import type { DashboardDocument, DashboardVersion, DashboardBundle } from "../types/dashboard";
 import type {
+  AlertSet,
+  AlertSetListResponse,
+  EngineListResponse,
+  Incident,
+  IncidentListResponse,
+  IncidentPolicy,
+  Postmortem,
+} from "../types/incidents";
+import type {
   Alert,
   AlertListResponse,
+  AlertInventoryResponse,
   Capabilities,
   Silence,
   SilenceListResponse,
@@ -347,6 +357,11 @@ export const api = {
   getAlerts: (params: URLSearchParams) =>
     fetchJSON<AlertListResponse>(`/v1/alerts?${params}`),
 
+  getAlertInventory: (tenant: string, partition: string) =>
+    fetchJSON<AlertInventoryResponse>(
+      `/v1/alerts/inventory?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
+    ),
+
   getAlert: (tenant: string, partition: string, fingerprint: string) =>
     fetchJSON<Alert>(
       `/v1/alerts/${encodeURIComponent(fingerprint)}?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
@@ -503,6 +518,136 @@ export const api = {
 
   putReceivers: (params: URLSearchParams, config: ReceiverConfig) =>
     fetchJSONBody<{ status: string }>(`/v1/alerts/receivers?${params}`, "PUT", config),
+
+
+  // ── Incidents ───────────────────────────────────────────────────────────────
+  getIncidents: (params: URLSearchParams) =>
+    fetchJSON<IncidentListResponse>(`/v1/incidents?${params}`),
+
+  getIncident: (tenant: string, partition: string, id: string) =>
+    fetchJSON<Incident>(
+      `/v1/incidents/${encodeURIComponent(id)}?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
+    ),
+
+  ackIncident: (tenant: string, partition: string, id: string) =>
+    fetchJSON<Incident>(
+      `/v1/incidents/${encodeURIComponent(id)}/ack?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST"
+    ),
+
+  unackIncident: (tenant: string, partition: string, id: string) =>
+    fetchJSON<Incident>(
+      `/v1/incidents/${encodeURIComponent(id)}/unack?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST"
+    ),
+
+  mitigateIncident: (
+    tenant: string,
+    partition: string,
+    id: string,
+    body: { note?: string; override?: boolean }
+  ) =>
+    fetchJSONBody<Incident>(
+      `/v1/incidents/${encodeURIComponent(id)}/mitigate?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST",
+      body
+    ),
+
+  resolveIncident: (tenant: string, partition: string, id: string, resolution: string) =>
+    fetchJSONBody<Incident>(
+      `/v1/incidents/${encodeURIComponent(id)}/resolve?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST",
+      { resolution }
+    ),
+
+  reopenIncident: (tenant: string, partition: string, id: string) =>
+    fetchJSON<Incident>(
+      `/v1/incidents/${encodeURIComponent(id)}/reopen?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST"
+    ),
+
+  noteIncident: (tenant: string, partition: string, id: string, message: string) =>
+    fetchJSONBody<Incident>(
+      `/v1/incidents/${encodeURIComponent(id)}/notes?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST",
+      { message }
+    ),
+
+  getAlertSets: (tenant: string, partition: string) =>
+    fetchJSON<AlertSetListResponse>(
+      `/v1/alert-sets?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
+    ),
+
+  createAlertSet: (tenant: string, partition: string, set: AlertSet) =>
+    fetchJSONBody<AlertSet>(
+      `/v1/alert-sets?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST",
+      set
+    ),
+
+  updateAlertSet: (tenant: string, partition: string, name: string, set: AlertSet) =>
+    fetchJSONBody<AlertSet>(
+      `/v1/alert-sets/${encodeURIComponent(name)}?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "PUT",
+      set
+    ),
+
+  deleteAlertSet: (tenant: string, partition: string, name: string) =>
+    fetchJSON<{ status: string }>(
+      `/v1/alert-sets/${encodeURIComponent(name)}?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "DELETE"
+    ),
+
+  previewAlertSet: (tenant: string, partition: string, set: AlertSet) =>
+    fetchJSONBody<{ matchedAlerts: number; groups: Array<Record<string, unknown>> }>(
+      `/v1/alert-sets/preview?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST",
+      set
+    ),
+
+  getIncidentPolicy: (tenant: string, partition: string) =>
+    fetchJSON<IncidentPolicy>(
+      `/v1/incident-policy?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
+    ),
+
+  putIncidentPolicy: (tenant: string, partition: string, policy: IncidentPolicy) =>
+    fetchJSONBody<IncidentPolicy>(
+      `/v1/incident-policy?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "PUT",
+      policy
+    ),
+
+  getIncidentPostmortem: (tenant: string, partition: string, id: string) =>
+    fetchJSON<Postmortem>(
+      `/v1/incidents/${encodeURIComponent(id)}/postmortem?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`
+    ),
+
+  updateIncidentPostmortem: (
+    tenant: string,
+    partition: string,
+    id: string,
+    markdown: string
+  ) =>
+    fetchJSONBody<Postmortem>(
+      `/v1/incidents/${encodeURIComponent(id)}/postmortem?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "PUT",
+      { markdown }
+    ),
+
+  analyzeIncidentPostmortem: (tenant: string, partition: string, id: string) =>
+    fetchJSON<Postmortem>(
+      `/v1/incidents/${encodeURIComponent(id)}/postmortem/analyze?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST"
+    ),
+
+  publishIncidentPostmortem: (tenant: string, partition: string, id: string) =>
+    fetchJSON<Postmortem>(
+      `/v1/incidents/${encodeURIComponent(id)}/postmortem/publish?tenant=${encodeURIComponent(tenant)}&partition=${encodeURIComponent(partition)}`,
+      "POST"
+    ),
+
+  getPostmortemEngines: () =>
+    fetchJSON<EngineListResponse>("/v1/postmortem-engines"),
 
   // ── Dashboards ───────────────────────────────────────────────────────────────
   listDashboards: (params: URLSearchParams) =>

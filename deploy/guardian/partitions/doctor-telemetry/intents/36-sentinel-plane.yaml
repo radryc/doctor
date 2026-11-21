@@ -35,6 +35,18 @@ spec:
           DOCTOR_SENTINEL_SERVICE_TOKEN: dev-sentinel-service-token
           DOCTOR_SENTINEL_STORE_ROOT: /doctor/v1/alerts
           DOCTOR_SENTINEL_DEFAULT_TENANT: default
+          DOCTOR_SENTINEL_INCIDENTS_ENABLED: "true"
+          DOCTOR_SENTINEL_INCIDENT_TICK: 15s
+          # On-demand postmortem analysis. The agent Nightwatch service exposes
+          # POST /v1/investigations and reuses its evidence collectors.
+          DOCTOR_SENTINEL_AGENT_URL: http://lagent-nightwatch:8091
+          DOCTOR_SENTINEL_AGENT_TOKEN: dev-nightwatch-token
+          DOCTOR_SENTINEL_AGENT_TIMEOUT: 120s
+          DOCTOR_SENTINEL_BASE_URL: http://localhost:18080
+          # Local development needs to reach docker-host webhooks. Production
+          # should keep these false and allowlist external hosts instead.
+          DOCTOR_SENTINEL_WEBHOOK_ALLOW_PRIVATE: "true"
+          DOCTOR_SENTINEL_WEBHOOK_ALLOW_LOOPBACK: "true"
           DOCTOR_MONOFS_LOGENGINE_ADDR: host.docker.internal:9090
           # Dev-only token; override in production with a Guardian-issued token
           # that may write /doctor/**.

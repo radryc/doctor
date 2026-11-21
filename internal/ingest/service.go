@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/radryc/doctor/internal/auditlog"
 	"github.com/radryc/doctor/internal/buildinfo"
 	"github.com/radryc/doctor/internal/otlp"
 	"github.com/radryc/doctor/internal/privacy"
 	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/segment"
+	"github.com/radryc/monofs/pkg/authz"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -103,6 +105,21 @@ func (s *Service) tenantAllowed(tenant string) bool {
 	return ok
 }
 
+// tenantAllowedForContext applies both the deployment-wide tenant allowlist and
+// the collector token's tenant groups. Requests without a verified identity
+// (direct callers and tests) keep the pre-token-scoping behavior; the HTTP and
+// gRPC entrypoints always attach an identity from the auth middleware.
+func (s *Service) tenantAllowedForContext(ctx context.Context, tenant string) bool {
+	if !s.tenantAllowed(tenant) {
+		return false
+	}
+	identity, ok := authz.IdentityFromContext(ctx)
+	if !ok || identity.IsAnonymous() {
+		return true
+	}
+	return IdentityTenantAllowed(identity, tenant)
+}
+
 // SetQuotaEngine installs partition quota enforcement. A nil engine disables
 // quota checks (the pre-quota behavior).
 func (s *Service) SetQuotaEngine(engine *quota.Engine) {
@@ -128,7 +145,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/metrics", s.handleHTTPMetrics)
 	mux.HandleFunc("/v1/guardian/events", s.handleGuardianEvents)
 	mux.HandleFunc("/v1/quota/usage", s.handleQuotaUsage)
-	return mux
+	return auditlog.MutationMiddleware("doctor-ingest", "/v1/guardian/events")(mux)
 }
 
 func (s *Service) handleQuotaUsage(w http.ResponseWriter, _ *http.Request) {
@@ -141,11 +158,11 @@ func (s *Service) handleQuotaUsage(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Service) ingestTraces(ctx context.Context, tenant string, req *coltracepb.ExportTraceServiceRequest) error {
-	if !s.tenantAllowed(tenant) {
+	if !s.tenantAllowedForContext(ctx, tenant) {
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenTraces(req, tenant, s.privacy)
-	if err := s.checkIngestQuota(ctx, "traces", tracePartitionCounts(records), nil); err != nil {
+	if err := s.checkIngestQuota(ctx, tenant, "traces", tracePartitionCounts(records), nil); err != nil {
 		return err
 	}
 	if s.pipeline != nil {
@@ -170,11 +187,11 @@ func (s *Service) ingestTraces(ctx context.Context, tenant string, req *coltrace
 }
 
 func (s *Service) ingestLogs(ctx context.Context, tenant string, req *collogspb.ExportLogsServiceRequest) error {
-	if !s.tenantAllowed(tenant) {
+	if !s.tenantAllowedForContext(ctx, tenant) {
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenLogs(req, tenant, s.privacy)
-	if err := s.checkIngestQuota(ctx, "logs", logPartitionCounts(records), nil); err != nil {
+	if err := s.checkIngestQuota(ctx, tenant, "logs", logPartitionCounts(records), nil); err != nil {
 		return err
 	}
 	if s.pipeline != nil {
@@ -199,11 +216,11 @@ func (s *Service) ingestLogs(ctx context.Context, tenant string, req *collogspb.
 }
 
 func (s *Service) ingestMetrics(ctx context.Context, tenant string, req *colmetricspb.ExportMetricsServiceRequest) error {
-	if !s.tenantAllowed(tenant) {
+	if !s.tenantAllowedForContext(ctx, tenant) {
 		return ErrTenantDenied
 	}
 	records := otlp.FlattenMetrics(req, tenant, s.privacy)
-	if err := s.checkIngestQuota(ctx, "metrics", metricPartitionCounts(records), records); err != nil {
+	if err := s.checkIngestQuota(ctx, tenant, "metrics", metricPartitionCounts(records), records); err != nil {
 		return err
 	}
 	if s.pipeline != nil {
@@ -361,7 +378,7 @@ func (s *Service) handleGuardianEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := s.tenantFromHeader(r)
-	if !s.tenantAllowed(tenant) {
+	if !s.tenantAllowedForContext(r.Context(), tenant) {
 		http.Error(w, ErrTenantDenied.Error(), http.StatusForbidden)
 		return
 	}
@@ -528,11 +545,12 @@ func (s *metricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetr
 }
 
 // checkIngestQuota enforces the partition envelope for a flattened batch.
-func (s *Service) checkIngestQuota(ctx context.Context, signal string, records map[string]int64, metrics []segment.MetricPointRecord) error {
+func (s *Service) checkIngestQuota(ctx context.Context, tenant, signal string, records map[string]int64, metrics []segment.MetricPointRecord) error {
 	if s == nil || s.quota == nil {
 		return nil
 	}
 	return s.quota.CheckIngest(ctx, quota.IngestBatch{
+		Tenant:  tenant,
 		Signal:  signal,
 		Bytes:   quota.RequestBytes(ctx),
 		Records: records,

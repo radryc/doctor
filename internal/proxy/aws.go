@@ -422,7 +422,7 @@ func (u *AWSUpstream) PromSeries(ctx context.Context, _ string, match []string, 
 	if err != nil {
 		return nil, err
 	}
-	return ExtractPrometheusSeries(resp), nil
+	return StampSeriesSource(ExtractPrometheusSeries(resp), SourceAWS), nil
 }
 
 // PromLabels implements MetricsUpstream.
@@ -437,10 +437,34 @@ func (u *AWSUpstream) PromLabels(ctx context.Context, _ string, match []string, 
 // PromLabelValues implements MetricsUpstream.
 func (u *AWSUpstream) PromLabelValues(ctx context.Context, _, label string, match []string, start, end time.Time) ([]string, error) {
 	resp, err := u.Client.PrometheusLabelValues(ctx, label, match, start, end)
+	values := append([]string(nil), ExtractPrometheusStringList(resp)...)
+	if label == "__name__" {
+		// CloudWatch's PromQL API has no label-values route for metric names.
+		// Fall back to ListMetrics so Grafana's metric browser is populated.
+		values = append(values, AWSMetricNames(ctx, u.Client)...)
+		return dedupeStrings(values), nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	return ExtractPrometheusStringList(resp), nil
+	return values, nil
+}
+
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // QueryLogs implements LogsUpstream.

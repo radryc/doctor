@@ -528,15 +528,23 @@ func (r *Router) traceTargetsWithCriteria(ctx context.Context, criteria selector
 		if entry.upstreams.Traces == nil {
 			continue
 		}
-		_, decision, isEnforced := r.accessDecision(ctx, backend, access.SignalTraces)
-		if isEnforced {
-			enforced++
-		}
-		if !decision.Allowed {
-			warnings = append(warnings, accessWarning(decision))
+		// When the repo-managed policy is enforced for traces, the upstream
+		// adapters already filter every span/summary by partition. The legacy
+		// endpoint OWNERS gate resolves endpoint names ("aws", "gcp"), not the
+		// partition that owns each trace, so applying it here hides every
+		// federated trace from callers who are legitimately granted the
+		// partition.
+		if !r.tracePolicyScoped.Load() {
+			_, decision, isEnforced := r.accessDecision(ctx, backend, access.SignalTraces)
 			if isEnforced {
-				denied++
-				continue
+				enforced++
+			}
+			if !decision.Allowed {
+				warnings = append(warnings, accessWarning(decision))
+				if isEnforced {
+					denied++
+					continue
+				}
 			}
 		}
 		entries = append(entries, traceTarget{upstreamEntry: entry})

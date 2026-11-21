@@ -57,6 +57,12 @@ func TestGuardianPolicyDefaultsWhenMissing(t *testing.T) {
 	if got.For(GuardianPartitionAttentionAlert) != 0 {
 		t.Fatal("default attention for is not zero")
 	}
+	if got.For(GuardianPartitionErrorAlert) != 5*time.Minute {
+		t.Fatalf("default error for = %s, want 5m", got.For(GuardianPartitionErrorAlert))
+	}
+	if got.For(GuardianPartitionUnavailableAlert) != 5*time.Minute {
+		t.Fatalf("default unavailable for = %s, want 5m", got.For(GuardianPartitionUnavailableAlert))
+	}
 }
 
 func TestGuardianPolicyRejectsNegativeDuration(t *testing.T) {

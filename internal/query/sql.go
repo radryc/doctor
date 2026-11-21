@@ -128,6 +128,12 @@ func (s *Service) duckDBScope(ctx context.Context, dataset string) ([]string, bo
 
 func duckDBSQLErrorStatus(err error) int {
 	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "permission denied") || strings.Contains(message, "unauthenticated") ||
+		strings.Contains(message, "internal-only") ||
+		strings.Contains(message, "requires an access policy") ||
+		strings.Contains(message, "access policy is not available") {
+		return http.StatusForbidden
+	}
 	for _, marker := range []string{
 		"forbidden", "only select", "single statement", "may not", "placeholders",
 		"unsupported dataset", "query is empty", "query exceeds", "time range",

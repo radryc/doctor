@@ -7,6 +7,8 @@ import {
   Copy,
   Trash2,
   ChevronLeft,
+  Eye,
+  EyeOff,
   Pencil,
   Save,
   X,
@@ -20,6 +22,7 @@ import DashboardVariableBar from "../components/dashboards/DashboardVariableBar"
 import DashboardWidgetCard from "../components/dashboards/DashboardWidgetCard";
 import ImportExportModal from "../components/dashboards/ImportExportModal";
 import WidgetEditorModal from "../components/dashboards/WidgetEditorModal";
+import { readHiddenBuiltIns, writeHiddenBuiltIns } from "../lib/hiddenDashboards";
 
 // ── Dashboard browser (list view at /dashboards) ─────────────────────────────
 
@@ -50,6 +53,8 @@ function DashboardBrowser() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [showImport, setShowImport] = useState(false);
+  const [hiddenBuiltIns, setHiddenBuiltIns] = useState<Set<string>>(new Set());
+  const [showHidden, setShowHidden] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -64,7 +69,28 @@ function DashboardBrowser() {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    setHiddenBuiltIns(readHiddenBuiltIns(config.default_tenant));
+  }, [config.default_tenant]);
+
+  const hiddenCount = docs.filter((d) => d.builtIn && hiddenBuiltIns.has(d.id)).length;
+
+  const toggleHidden = (doc: DashboardDocument) => {
+    if (!doc.builtIn) return;
+    setHiddenBuiltIns((previous) => {
+      const next = new Set(previous);
+      if (next.has(doc.id)) {
+        next.delete(doc.id);
+      } else {
+        next.add(doc.id);
+      }
+      writeHiddenBuiltIns(config.default_tenant, next);
+      return next;
+    });
+  };
+
   const filtered = docs.filter((d) => {
+    if (!showHidden && d.builtIn && hiddenBuiltIns.has(d.id)) return false;
     if (!search) return true;
     const q = search.toLowerCase();
     return (
@@ -129,6 +155,14 @@ function DashboardBrowser() {
           <button className="xp-live-btn" onClick={() => setShowImport(true)}>
             <Upload size={12} /> Import
           </button>
+          <button
+            className="xp-live-btn"
+            onClick={() => setShowHidden((value) => !value)}
+            title={showHidden ? "Hide hidden built-in dashboards again" : "Show hidden built-in dashboards"}
+          >
+            {showHidden ? <EyeOff size={12} /> : <Eye size={12} />}
+            {showHidden ? "Hide hidden" : `Show hidden${hiddenCount > 0 ? ` (${hiddenCount})` : ""}`}
+          </button>
           <button className="xp-live-btn" onClick={() => exportAll("json")}>
             <Download size={12} /> Export JSON
           </button>
@@ -159,6 +193,8 @@ function DashboardBrowser() {
                 onOpen={() => navigate(`/dashboards/${encodeURIComponent(doc.id)}`)}
                 onClone={() => void cloneDashboard(doc)}
                 onDelete={() => void deleteDashboard(doc)}
+                hidden={showHidden && !!doc.builtIn && hiddenBuiltIns.has(doc.id)}
+                onToggleHidden={() => toggleHidden(doc)}
               />
             ))}
           </div>
@@ -182,14 +218,19 @@ interface CardProps {
   onOpen: () => void;
   onClone: () => void;
   onDelete: () => void;
+  hidden?: boolean;
+  onToggleHidden?: () => void;
 }
 
-function DashboardCard({ doc, tenant, onOpen, onClone, onDelete }: CardProps) {
+function DashboardCard({ doc, tenant, onOpen, onClone, onDelete, hidden, onToggleHidden }: CardProps) {
   return (
-    <div className="dash-card" onClick={onOpen}>
+    <div className={`dash-card${hidden ? " dash-card--hidden" : ""}`} onClick={onOpen}>
       <div className="dash-card__header">
         <span className="dash-card__title">{doc.title}</span>
-        {doc.builtIn && <span className="dash-card__badge">Built-in</span>}
+        <div className="dash-card__badges">
+          {doc.builtIn && <span className="dash-card__badge">Built-in</span>}
+          {hidden && <span className="dash-card__badge dash-card__badge--muted">Hidden</span>}
+        </div>
       </div>
       {doc.description && <p className="dash-card__desc">{doc.description}</p>}
       {(doc.tags ?? []).length > 0 && (
@@ -212,6 +253,16 @@ function DashboardCard({ doc, tenant, onOpen, onClone, onDelete }: CardProps) {
         <button className="icon-btn" title="Download YAML" onClick={() => downloadDashboard(tenant, doc.id, "yaml")}>
           <Download size={12} />Y
         </button>
+        {doc.builtIn && onToggleHidden && (
+          <button
+            className="icon-btn"
+            title={hidden ? "Show this built-in dashboard again" : "Hide this built-in dashboard from the list"}
+            aria-label={hidden ? "Show built-in dashboard" : "Hide built-in dashboard"}
+            onClick={onToggleHidden}
+          >
+            {hidden ? <Eye size={12} /> : <EyeOff size={12} />}
+          </button>
+        )}
         {!doc.builtIn && (
           <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>
             <Trash2 size={12} />

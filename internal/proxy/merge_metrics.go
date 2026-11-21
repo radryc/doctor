@@ -121,6 +121,8 @@ func ExtractPrometheusStringList(response map[string]any) []string {
 
 // ExtractPrometheusSeries decodes a series-discovery response, accepting both
 // the Prometheus array-of-label-maps shape and a wrapped "result" object.
+// Provenance is stamped by the caller, which knows the backend kind; a local
+// series must not be mislabeled as AWS.
 func ExtractPrometheusSeries(response map[string]any) []map[string]string {
 	if response == nil {
 		return nil
@@ -136,9 +138,6 @@ func ExtractPrometheusSeries(response map[string]any) []map[string]string {
 			if str, ok := raw.(string); ok {
 				labels[key] = str
 			}
-		}
-		if _, exists := labels[LabelSource]; !exists {
-			labels[LabelSource] = SourceAWS
 		}
 		out = append(out, labels)
 	}

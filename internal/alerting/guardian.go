@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/radryc/doctor/internal/tlsconfig"
 )
 
 // Guardian partition alert names. The alerts are partition-scoped so Nightwatch
@@ -19,6 +21,11 @@ import (
 const (
 	GuardianPartitionErrorAlert     = "GuardianPartitionError"
 	GuardianPartitionAttentionAlert = "GuardianPartitionAttention"
+	// GuardianPartitionUnavailableAlert reports an observability failure: the
+	// partition state could not be read (for example Guardian's partition
+	// detail load hit its deadline), so the partition's health is unknown
+	// rather than failing.
+	GuardianPartitionUnavailableAlert = "GuardianPartitionUnavailable"
 )
 
 // GuardianPartitionSummary mirrors the fields Doctor needs from Guardian's
@@ -153,12 +160,14 @@ func (s *GuardianSource) PollOnce(ctx context.Context) (SourceSummary, error) {
 			}
 			state[alertStateKey(applied.Partition, applied.Fingerprint)] = *applied
 			summary.Imported++
-			resolved, err := s.resolvePartitionAlert(ctx, state, partition, GuardianPartitionAttentionAlert, now)
-			if err != nil {
-				return summary, err
-			}
-			if resolved {
-				summary.Resolved++
+			for _, name := range []string{GuardianPartitionAttentionAlert, GuardianPartitionUnavailableAlert} {
+				resolved, err := s.resolvePartitionAlert(ctx, state, partition, name, now)
+				if err != nil {
+					return summary, err
+				}
+				if resolved {
+					summary.Resolved++
+				}
 			}
 		case GuardianPartitionAttentionAlert:
 			summary.Included++
@@ -168,16 +177,29 @@ func (s *GuardianSource) PollOnce(ctx context.Context) (SourceSummary, error) {
 			}
 			state[alertStateKey(applied.Partition, applied.Fingerprint)] = *applied
 			summary.Imported++
-			resolved, err := s.resolvePartitionAlert(ctx, state, partition, GuardianPartitionErrorAlert, now)
+			for _, name := range []string{GuardianPartitionErrorAlert, GuardianPartitionUnavailableAlert} {
+				resolved, err := s.resolvePartitionAlert(ctx, state, partition, name, now)
+				if err != nil {
+					return summary, err
+				}
+				if resolved {
+					summary.Resolved++
+				}
+			}
+		case GuardianPartitionUnavailableAlert:
+			// Observability failure: Guardian could not read this partition's
+			// state. Existing error/attention alerts are left untouched because
+			// a failed observation cannot confirm recovery.
+			summary.Included++
+			applied, err := s.applyPartitionAlert(ctx, state, partition, GuardianPartitionUnavailableAlert, "warning", policy.For(GuardianPartitionUnavailableAlert), now)
 			if err != nil {
 				return summary, err
 			}
-			if resolved {
-				summary.Resolved++
-			}
+			state[alertStateKey(applied.Partition, applied.Fingerprint)] = *applied
+			summary.Imported++
 		default:
 			summary.Healthy++
-			for _, name := range []string{GuardianPartitionErrorAlert, GuardianPartitionAttentionAlert} {
+			for _, name := range []string{GuardianPartitionErrorAlert, GuardianPartitionAttentionAlert, GuardianPartitionUnavailableAlert} {
 				resolved, err := s.resolvePartitionAlert(ctx, state, partition, name, now)
 				if err != nil {
 					return summary, err
@@ -250,7 +272,7 @@ func (s *GuardianSource) fetchPartitions(ctx context.Context) ([]GuardianPartiti
 }
 
 func (s *GuardianSource) get(ctx context.Context, path string) ([]byte, int, error) {
-	endpoint := strings.TrimRight(s.BaseURL, "/") + path
+	endpoint := tlsconfig.URL(strings.TrimRight(s.BaseURL, "/") + path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, 0, err
@@ -263,7 +285,7 @@ func (s *GuardianSource) get(ctx context.Context, path string) ([]byte, int, err
 	}
 	client := s.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = tlsconfig.HTTPClient(30 * time.Second)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -292,6 +314,12 @@ func decodeGuardianPartitions(body []byte) ([]GuardianPartitionSummary, error) {
 // guardianPartitionAlertName returns the alert that should be firing for a
 // partition, or "" when the partition is healthy enough to resolve its alerts.
 func guardianPartitionAlertName(partition GuardianPartitionSummary) string {
+	// Unavailable/DeadlineExceeded means Guardian could not read the
+	// partition, so its health is unknown. Treat that as an observability
+	// failure instead of raising the critical partition error alert.
+	if guardianPartitionUnobservable(partition) {
+		return GuardianPartitionUnavailableAlert
+	}
 	if len(partition.Errors) > 0 {
 		return GuardianPartitionErrorAlert
 	}
@@ -323,10 +351,29 @@ func guardianPartitionAlertName(partition GuardianPartitionSummary) string {
 	return ""
 }
 
+// guardianPartitionUnobservable reports whether the partition summary reflects
+// a failed status read rather than a real partition failure. Guardian emits a
+// synthetic "Unavailable" status when its per-partition detail load exceeds the
+// request deadline.
+func guardianPartitionUnobservable(partition GuardianPartitionSummary) bool {
+	for _, value := range []string{partition.Status, partition.Health, partition.DisplayStatus} {
+		if strings.EqualFold(strings.TrimSpace(value), "unavailable") {
+			return true
+		}
+	}
+	for _, errText := range partition.Errors {
+		lower := strings.ToLower(errText)
+		if strings.Contains(lower, "deadline exceeded") || strings.Contains(lower, "deadlineexceeded") {
+			return true
+		}
+	}
+	return false
+}
+
 func guardianAlertNameForTokens(tokens []string) string {
 	for _, token := range tokens {
 		switch strings.ToLower(strings.TrimSpace(token)) {
-		case "invalid", "failing", "failed", "error", "unhealthy", "critical", "unavailable", "needs action":
+		case "invalid", "failing", "failed", "error", "unhealthy", "critical", "needs action":
 			return GuardianPartitionErrorAlert
 		}
 	}
@@ -435,6 +482,9 @@ func (s *GuardianSource) normalizePartitionAlert(partition GuardianPartitionSumm
 	setAnnotation(annotations, "guardian.failed_intents", intString(partition.FailedIntents))
 	setAnnotation(annotations, "guardian.drifted_intents", intString(partition.DriftedIntents))
 	setAnnotation(annotations, "guardian.url", s.partitionURL(partition.Name))
+	if alertName == GuardianPartitionUnavailableAlert {
+		annotations["guardian.failure"] = "observability"
+	}
 	alert := Alert{
 		Fingerprint: s.fingerprint(partition.Name, alertName),
 		Source:      "guardian",
@@ -471,6 +521,12 @@ func guardianAlertSeverity(alertName string) string {
 
 func guardianAlertSummary(partition GuardianPartitionSummary, alertName string) string {
 	status := guardianDisplayStatus(partition)
+	if alertName == GuardianPartitionUnavailableAlert {
+		if len(partition.Errors) > 0 {
+			return fmt.Sprintf("Guardian could not observe partition %s (observability failure): %s", partition.Name, strings.Join(partition.Errors, "; "))
+		}
+		return fmt.Sprintf("Guardian could not observe partition %s; partition health is unknown.", partition.Name)
+	}
 	if alertName == GuardianPartitionErrorAlert {
 		if len(partition.Errors) > 0 {
 			return fmt.Sprintf("Guardian partition %s has %d error(s): %s", partition.Name, len(partition.Errors), strings.Join(partition.Errors, "; "))

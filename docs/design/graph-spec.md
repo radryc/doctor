@@ -1,6 +1,6 @@
 # Doctor graph specification
 
-Status: current · Applies to Doctor `doctor-query` UI and dashboards · Last updated 2026-11-05
+Status: current · Applies to Doctor `doctor-query` UI and dashboards · Last verified 2026-11-20
 
 This document defines the durable graph formats that can be created outside Doctor
 and imported into it. It is the contract used by the `create-doctor-graphs` agent

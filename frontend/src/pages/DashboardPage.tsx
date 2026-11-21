@@ -22,6 +22,7 @@ import { useConfig } from "../context/ConfigContext";
 import { copyText } from "../lib/clipboard";
 import { guardianPartitionUrl } from "../lib/links";
 import EChart from "../components/charts/EChart";
+import ActiveIncidentsPanel from "../components/incidents/ActiveIncidentsPanel";
 import { escapeHtml, useChartTheme } from "../lib/chartTheme";
 import type { GuardianOverview } from "../types/api";
 import type { Alert } from "../types/alerts";
@@ -578,6 +579,8 @@ export default function DashboardPage() {
             </div>
           )}
         </section>
+
+        <ActiveIncidentsPanel />
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
           <section className="xl:col-span-2 glass rounded-xl p-5">

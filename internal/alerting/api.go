@@ -16,12 +16,19 @@ import (
 
 // API serves the Sentinel HTTP surface.
 type API struct {
-	Store        *Store
-	Service      *Service
-	Logger       *log.Logger
-	AllowAll     bool
-	ServiceToken string
-	Now          func() time.Time
+	Store              *Store
+	Service            *Service
+	Logger             *log.Logger
+	AllowAll           bool
+	ServiceToken       string
+	IdentityHMACSecret string
+	Now                func() time.Time
+	// FCBSecret authenticates ack callbacks from notfify/fcm-bridge. When it is
+	// empty, the callback endpoint is disabled unless AllowAll is set.
+	FCBSecret []byte
+	// AckIncident applies an acked/nacked page to an incident. Nil disables
+	// incident callbacks; alerts still work.
+	AckIncident IncidentAckFunc
 }
 
 // Handler builds the Sentinel HTTP handler.
@@ -46,7 +53,7 @@ func (a *API) handleAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "subspace") {
 		alerts, err := a.Service.ListSubspace(r.Context(), tenant, identity)
 		if err != nil {
@@ -90,6 +97,8 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "intake/guardian":
 		a.handleGuardianIntake(w, r)
+	case path == "intake/fcb/ack":
+		a.handleFCBAck(w, r)
 	case strings.HasPrefix(path, "intake/"):
 		source := strings.TrimPrefix(path, "intake/")
 		if strings.HasPrefix(source, "preview/") {
@@ -127,6 +136,8 @@ func (a *API) handleAlertRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleRoutingOverview(w, r)
 	case path == "delivery":
 		a.handleDelivery(w, r)
+	case path == "inventory":
+		a.handleInventory(w, r)
 	case path == "rules":
 		a.handleRules(w, r)
 	case path == "rules/preview":
@@ -149,7 +160,7 @@ func (a *API) handleAlertDetail(w http.ResponseWriter, r *http.Request, path str
 		return
 	}
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	fingerprint := parts[0]
 	if len(parts) == 2 && parts[1] == "ack" {
 		if r.Method != http.MethodPost && r.Method != http.MethodDelete {
@@ -193,7 +204,7 @@ func (a *API) handleGuardianIntake(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.Admin && len(a.Service.GuardianHMACKey) == 0 && !a.AllowAll {
 		// Service-to-service callers authenticate with the HMAC when one is
 		// configured. Without HMAC, only a local/admin caller may inject.
@@ -232,7 +243,7 @@ func (a *API) handleSubspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	tenant, _ := tenantPartition(r)
 	if !identity.Can(CapSubspaceWrite, tenant, "") && !a.isServiceToken(r) {
 		writeError(w, http.StatusForbidden, "subspace broadcast requires an admin or service token")
@@ -280,7 +291,7 @@ func (a *API) handleSubspaceResolve(w http.ResponseWriter, r *http.Request, rest
 		return
 	}
 	dedupeKey := strings.TrimSuffix(strings.Trim(rest, "/"), "/resolve")
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	tenant, _ := tenantPartition(r)
 	if !identity.Can(CapSubspaceWrite, tenant, "") && !a.isServiceToken(r) {
 		writeError(w, http.StatusForbidden, "subspace resolve requires an admin or service token")
@@ -296,7 +307,7 @@ func (a *API) handleSubspaceResolve(w http.ResponseWriter, r *http.Request, rest
 
 func (a *API) handleSilences(w http.ResponseWriter, r *http.Request) {
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	switch r.Method {
 	case http.MethodGet:
 		if !identity.Can(CapAlertsRead, tenant, partition) {
@@ -350,7 +361,7 @@ func (a *API) handleSilence(w http.ResponseWriter, r *http.Request, rest string)
 		writeError(w, http.StatusBadRequest, "path must be /v1/alerts/silences/{tenant}/{partition}/{id}")
 		return
 	}
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.Can(CapAlertsSilence, parts[0], parts[1]) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -368,7 +379,7 @@ func (a *API) handleAlertSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant, _ := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	summaries, err := a.Store.ListAlertSummaries(r.Context(), tenant)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -386,7 +397,7 @@ func (a *API) handleAlertSummary(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant":       tenant,
 		"partition":    partition,
@@ -408,7 +419,7 @@ func (a *API) handleSources(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *API) handleAWSPolicy(w http.ResponseWriter, r *http.Request) {
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	tenant, partition := tenantPartition(r)
 	switch r.Method {
 	case http.MethodGet:
@@ -443,7 +454,7 @@ func (a *API) handleAWSPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGCPPolicy(w http.ResponseWriter, r *http.Request) {
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	tenant, partition := tenantPartition(r)
 	switch r.Method {
 	case http.MethodGet:
@@ -478,7 +489,7 @@ func (a *API) handleGCPPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGuardianPolicy(w http.ResponseWriter, r *http.Request) {
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	tenant, partition := tenantPartition(r)
 	if tenant == "" && a.Service != nil {
 		tenant = strings.TrimSpace(a.Service.DefaultTenant)
@@ -533,7 +544,7 @@ func (a *API) handleExcluded(w http.ResponseWriter, _ *http.Request) {
 
 func (a *API) handleReceivers(w http.ResponseWriter, r *http.Request) {
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if partition == "" {
 		// Legacy, tenant-wide view. New clients always send a partition.
 		switch r.Method {
@@ -631,7 +642,7 @@ func (a *API) handleRoutingOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant, _ := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.AllowAll && !identity.Admin {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -672,7 +683,7 @@ func (a *API) handleRoutingOverview(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleDelivery(w http.ResponseWriter, r *http.Request) {
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.Can(CapDeliveryRead, tenant, partition) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -697,7 +708,7 @@ func (a *API) handleDelivery(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleRules(w http.ResponseWriter, r *http.Request) {
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.Can(CapRulesRead, tenant, partition) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -758,7 +769,7 @@ func (a *API) handleRule(w http.ResponseWriter, r *http.Request, rest string) {
 		return
 	}
 	tenant, partition, group := parts[0], parts[1], parts[2]
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	switch r.Method {
 	case http.MethodGet:
 		if !identity.Can(CapRulesRead, tenant, partition) {
@@ -823,7 +834,7 @@ func (a *API) handleRuleCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.Can(CapRulesRead, tenant, partition) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -853,7 +864,7 @@ func (a *API) handleRulePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant, partition := tenantPartition(r)
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.Can(CapRulesRead, tenant, partition) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -925,7 +936,7 @@ func (a *API) handleRuleTest(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant, partition := tenantPartition(r)
 	group := strings.TrimSpace(r.URL.Query().Get("group"))
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.Can(CapRulesRead, tenant, partition) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -974,12 +985,12 @@ func (a *API) now() time.Time {
 	return time.Now().UTC()
 }
 
+func (a *API) identity(r *http.Request) Identity {
+	return IdentityFromRequestWithAuth(r, a.AllowAll, a.IdentityHMACSecret, a.ServiceToken)
+}
+
 func (a *API) isServiceToken(r *http.Request) bool {
-	if strings.TrimSpace(a.ServiceToken) == "" {
-		return false
-	}
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	return strings.EqualFold(auth, "Bearer "+a.ServiceToken)
+	return validServiceToken(r, a.ServiceToken)
 }
 
 func tenantPartition(r *http.Request) (string, string) {

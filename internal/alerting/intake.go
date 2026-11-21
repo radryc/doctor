@@ -33,7 +33,7 @@ func (a *API) handleGenericIntake(w http.ResponseWriter, r *http.Request, source
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	identity := IdentityFromRequest(r, a.AllowAll)
+	identity := a.identity(r)
 	if !identity.Admin && !a.AllowAll && !a.isServiceToken(r) {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return

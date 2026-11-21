@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -12,6 +14,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/radryc/doctor/internal/privacy"
 	"github.com/radryc/doctor/internal/quota"
 	"github.com/radryc/doctor/internal/telemetry"
+	"github.com/radryc/doctor/internal/tlsconfig"
 	"github.com/radryc/doctor/internal/wal"
 	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -39,6 +43,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	tlsEnv, err := tlsconfig.Load()
+	if err != nil {
+		log.Fatalf("load STRATA_TLS_* configuration: %v", err)
+	}
 
 	// Set a soft memory limit below the container limit so GC runs
 	// aggressively before the kernel OOM killer fires. Operators can override
@@ -48,7 +56,7 @@ func main() {
 		log.Printf("GOMEMLIMIT set to %dMiB", cfg.MemoryLimitBytes>>20)
 	}
 
-	if cfg.DebugAddr != "" {
+	if cfg.DebugEnabled && cfg.DebugAddr != "" {
 		go func() {
 			log.Printf("pprof debug server listening on %s", cfg.DebugAddr)
 			debugServer := &http.Server{
@@ -90,16 +98,26 @@ func main() {
 			}
 		}()
 	}
-	privacyEngine, err := privacy.New(cfg.Privacy.HMACKey)
+	// LoadFromEnv honours DOCTOR_PRIVACY_KEY_ID and DOCTOR_PRIVACY_KEYS_JSON
+	// so rotated keys and historical token verification work. Fall back to the
+	// single configured HMAC key for local/dev deployments.
+	privacyEngine, err := privacy.LoadFromEnv()
 	if err != nil {
-		log.Fatal(err)
+		if strings.TrimSpace(cfg.Privacy.HMACKey) == "" {
+			log.Fatal(err)
+		}
+		log.Printf("privacy: falling back to DOCTOR_PRIVACY_HMAC_KEY: %v", err)
+		privacyEngine, err = privacy.New(cfg.Privacy.HMACKey)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	// Build the writer backend: logengine is the only supported path.
 	if cfg.MonoFSLogEngineAddr == "" {
 		log.Fatal("DOCTOR_MONOFS_LOGENGINE_ADDR is required (logengine is the only supported storage backend)")
 	}
-	mw, err := ingest.NewMonoFSWriter(ctx, cfg.MonoFSLogEngineAddr)
+	mw, err := ingest.NewMonoFSWriterWithToken(ctx, cfg.MonoFSLogEngineAddr, cfg.MonoFSToken)
 	if err != nil {
 		log.Fatalf("connect to monofs logengine at %s: %v", cfg.MonoFSLogEngineAddr, err)
 	}
@@ -185,7 +203,21 @@ func main() {
 
 	var pipeline *ingest.Pipeline
 	if cfg.Pipeline.Enabled {
-		pipeline = ingest.NewPipeline(writer, ingest.PipelineConfig{
+		buffered := traceBuffer != nil || logBuffer != nil || metricBuffer != nil
+		if !buffered {
+			message := "ingest pipeline has no WAL buffers enabled: accepted records are written directly to MonoFS and a transient outage returns 500"
+			if cfg.Pipeline.DurableRequired {
+				log.Fatalf("DOCTOR_INGEST_REQUIRE_DURABLE=true but no trace/log/metric buffer is enabled")
+			}
+			log.Printf("WARNING: %s", message)
+		}
+		pipelineWriter := ingest.Flusher(writer)
+		if buffered {
+			// Stage accepted records in the WAL buffers, then let their
+			// background loops retry MonoFS. Submit* returns after the append.
+			pipelineWriter = ingest.NewBufferedWriter(writer, traceBuffer, logBuffer, metricBuffer)
+		}
+		pipeline = ingest.NewPipeline(pipelineWriter, ingest.PipelineConfig{
 			QueueSize: cfg.Pipeline.QueueSize,
 			Workers:   cfg.Pipeline.Workers,
 		})
@@ -205,17 +237,90 @@ func main() {
 			Logger:      log.Default(),
 		})
 		go provider.Run(ctx)
-		service.SetQuotaEngine(quota.NewEngine(provider, cfg.Quota.Replicas, log.Default()))
-		log.Printf("partition quota enabled (policy=%q replicas=%d enforce=%v observe-first=%v)",
-			cfg.Quota.PolicyURL, cfg.Quota.Replicas, cfg.Quota.Enforce, !cfg.Quota.Enforce)
+		engine := quota.NewEngine(provider, cfg.Quota.Replicas, log.Default())
+		tracker, err := buildStorageTracker(ctx, cfg)
+		if err != nil {
+			log.Fatalf("configure storage quota state: %v", err)
+		}
+		engine.SetStorageTracker(tracker)
+		go tracker.Run(ctx, cfg.Quota.StateFlushInterval)
+		service.SetQuotaEngine(engine)
+		log.Printf("partition quota enabled (policy=%q replicas=%d enforce=%v observe-first=%v storage-state=%s)",
+			cfg.Quota.PolicyURL, cfg.Quota.Replicas, cfg.Quota.Enforce, !cfg.Quota.Enforce, tracker.Mode())
 	} else {
 		log.Printf("partition quota disabled: set DOCTOR_QUOTA_POLICY_URL or DOCTOR_QUOTA_ENABLED=true")
 	}
 
-	verifier := authz.NewStaticTokenVerifier()
-	verifier.Add(cfg.AuthToken, authz.Identity{Subject: "telemetry-ingest", ClientID: "telemetry-ingest"})
+	// Collector mTLS is optional (see CollectorTLSConfig above): bearer tokens
+	// continue to bind collectors to tenants, and mTLS adds transport-level
+	// client authentication. TODO(security): OIDC workload identity as an
+	// alternative to client certificates.
+	verifiers := make([]authz.TokenVerifier, 0, 2)
+	if strings.TrimSpace(cfg.AuthTokensFile) != "" {
+		scoped, err := ingest.LoadTokenFile(cfg.AuthTokensFile)
+		if err != nil {
+			log.Fatalf("load ingest token file: %v", err)
+		}
+		verifiers = append(verifiers, scoped)
+		log.Printf("ingest token file loaded from %s (%d collector credentials; tenant-scoped=%v)",
+			cfg.AuthTokensFile, scoped.TokenCount(), scoped.Scoped())
+	}
+	if strings.TrimSpace(cfg.AuthToken) != "" {
+		legacy := authz.NewStaticTokenVerifier()
+		legacy.Add(cfg.AuthToken, ingest.LegacyIdentity(cfg.AllowedTenants))
+		verifiers = append(verifiers, legacy)
+		log.Printf("legacy DOCTOR_INGEST_AUTH_TOKEN enabled (scoped to tenants %v); "+
+			"migrate to DOCTOR_INGEST_TOKENS_FILE for per-collector identity", cfg.AllowedTenants)
+	}
+	verifier := authz.NewChainVerifier(verifiers...)
 	ingestAuth := auth.NewMiddleware(verifier, true, []string{"/healthz", "/metrics"}, log.Default())
 	grpcAuth := authz.NewAuthenticator(verifier, nil, true)
+
+	var grpcTLS, httpTLS *tls.Config
+	if tlsEnv.Enabled() {
+		// STRATA_TLS_* is the primary contract and takes precedence over the
+		// legacy DOCTOR_*_MTLS_* settings. Optional mode keeps the OTLP
+		// listeners plaintext so the local collector can keep exporting
+		// without client certificates; required mode enables TLS for both.
+		if tlsEnv.Required() {
+			serverTLS, err := tlsEnv.ServerTLS("", "")
+			if err != nil {
+				log.Fatalf("configure collector TLS: %v", err)
+			}
+			grpcTLS, httpTLS = serverTLS, serverTLS
+		}
+	} else {
+		// Legacy path: DOCTOR_GRPC_TLS_* / DOCTOR_TLS_* with
+		// DOCTOR_GRPC_MTLS_* / DOCTOR_HTTP_MTLS_* unchanged.
+		grpcTLS, err = ingest.CollectorTLSConfig(cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile, ingest.CollectorMTLS{
+			Mode:   cfg.GRPCMTLSMode,
+			CAFile: cfg.GRPCMTLSCAFile,
+		})
+		if err != nil {
+			log.Fatalf("configure gRPC collector TLS: %v", err)
+		}
+		httpTLS, err = ingest.CollectorTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, ingest.CollectorMTLS{
+			Mode:   cfg.HTTPMTLSMode,
+			CAFile: cfg.HTTPMTLSCAFile,
+		})
+		if err != nil {
+			log.Fatalf("configure HTTP collector TLS: %v", err)
+		}
+	}
+	if grpcTLS != nil {
+		if tlsEnv.Enabled() {
+			log.Printf("OTLP gRPC TLS enabled (STRATA_TLS_MODE=%s)", tlsEnv.Mode())
+		} else {
+			log.Printf("OTLP gRPC TLS enabled (mTLS mode=%s)", cfg.GRPCMTLSMode)
+		}
+	}
+	if httpTLS != nil {
+		if tlsEnv.Enabled() {
+			log.Printf("OTLP HTTP TLS enabled (STRATA_TLS_MODE=%s)", tlsEnv.Mode())
+		} else {
+			log.Printf("OTLP HTTP TLS enabled (mTLS mode=%s)", cfg.HTTPMTLSMode)
+		}
+	}
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
@@ -234,12 +339,8 @@ func main() {
 			return authInterceptor(ctx, req, info, handler)
 		}),
 	}
-	if cfg.GRPCTLSCertFile != "" || cfg.GRPCTLSKeyFile != "" {
-		creds, credsErr := credentials.NewServerTLSFromFile(cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile)
-		if credsErr != nil {
-			log.Fatalf("load gRPC TLS credentials: %v", credsErr)
-		}
-		grpcServerOptions = append(grpcServerOptions, grpc.Creds(creds))
+	if grpcTLS != nil {
+		grpcServerOptions = append(grpcServerOptions, grpc.Creds(credentials.NewTLS(grpcTLS)))
 	}
 	grpcServer := grpc.NewServer(grpcServerOptions...)
 	if telemetryHandle.Enabled() {
@@ -252,6 +353,7 @@ func main() {
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           ingestAuth.Wrap(service.Handler()),
+		TLSConfig:         httpTLS,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       2 * time.Minute,
 		WriteTimeout:      2 * time.Minute,
@@ -266,8 +368,10 @@ func main() {
 		errCh <- grpcServer.Serve(lis)
 	}()
 	go func() {
-		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
-			errCh <- httpServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if httpServer.TLSConfig != nil {
+			// The certificate is supplied by TLSConfig (legacy files are loaded
+			// into Certificates; STRATA_TLS_* uses GetCertificate).
+			errCh <- httpServer.ListenAndServeTLS("", "")
 			return
 		}
 		errCh <- httpServer.ListenAndServe()
@@ -283,6 +387,37 @@ func main() {
 
 	grpcServer.GracefulStop()
 	_ = httpServer.Shutdown(context.Background())
+}
+
+func buildStorageTracker(ctx context.Context, cfg config.IngestConfig) (*quota.StorageTracker, error) {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Quota.StateMode))
+	switch mode {
+	case "", "memory":
+		return quota.NewStorageTracker(), nil
+	case "file":
+		tracker, err := quota.NewFileStorageTracker(ctx, cfg.Quota.StateDir, cfg.Quota.StateReplicaID)
+		if err != nil {
+			return nil, err
+		}
+		tracker.SetLogger(log.Default())
+		return tracker, nil
+	case "shared":
+		tracker, err := quota.NewMonoFSStorageTracker(ctx,
+			cfg.MonoFSRouterAddr,
+			cfg.MonoFSToken,
+			cfg.MonoFSClientID,
+			cfg.Quota.StateSharedRoot,
+			cfg.Quota.StateReserveBytes,
+			cfg.Quota.StateFailMode,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tracker.SetLogger(log.Default())
+		return tracker, nil
+	default:
+		return nil, fmt.Errorf("unknown DOCTOR_QUOTA_STATE_MODE %q (want memory, file, or shared)", mode)
+	}
 }
 
 func logMemStats(label string) {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/radryc/doctor/internal/netguard"
+	"github.com/radryc/doctor/internal/tlsconfig"
 )
 
 const (
@@ -72,14 +73,14 @@ func NewGuardianDiscovery(cfg GuardianDiscoveryConfig) *GuardianDiscovery {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = tlsconfig.HTTPClient(15 * time.Second)
 	}
 	ownersRoot := strings.TrimRight(strings.TrimSpace(cfg.OwnersRoot), "/")
 	if ownersRoot == "" {
 		ownersRoot = "/doctor/v1/endpoints"
 	}
 	return &GuardianDiscovery{
-		baseURL:    strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
+		baseURL:    tlsconfig.URL(strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")),
 		token:      cfg.Token,
 		interval:   interval,
 		ownersRoot: ownersRoot,

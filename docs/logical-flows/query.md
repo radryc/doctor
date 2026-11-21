@@ -7,7 +7,7 @@
 1. `config.LoadQuery`, OTel telemetry, heartbeat.
 2. Required MonoFS log-engine address → `LogEngineClient`.
 3. `query.NewServiceLogEngine`, then `SetTraceDiscoveryCacheTTL`, `SetTraceDiscoveryWindow`,
-   `SetTenantHeader`, Guardian URLs, default partition, rules URL.
+   `SetTenantHeader`, Guardian URLs, default partition, rules URL/token/identity secret, Sentinel URL.
 4. Shared file store:
    - if `DOCTOR_MONOFS_TOKEN` is set, connect `GRPCClient` (writable) and use it for dashboards;
    - if a file token is configured, a MonoFS connection failure is fatal;
@@ -15,14 +15,15 @@
 5. Optional repo policy gate from `DOCTOR_ACCESS_POLICY_URL`/`_FILE`; `SetPolicyGate` wraps the log
    backend with `policyBackend`.
 6. Federation token resolver (env/Guardian/bundle).
-7. Optional AWS:
-   - federation enabled: load inline JSON → MonoFS snapshot → file fallback; build catalog, manager,
-     metrics, optional reloader, `go manager.Run`; `svc.SetAWSBackend(manager)`;
-   - legacy AWS: `store/aws.Client`, `svc.SetAWSBackend(client)`.
+7. Optional AWS and GCP:
+   - federation enabled: load inline JSON → MonoFS snapshot → file fallback; build catalog, manager(s) for AWS and GCP,
+     metrics, optional reloader, `go manager.Run`; `svc.SetAWSBackend` / `svc.SetGCPBackend`;
+   - legacy single backends: `store/aws.Client`, `store/gcp.Client`.
 8. `setupSecurity`: verifier (OIDC + break-glass), auth middleware, browser login, access resolver,
    legacy `access.Gate`.
-9. Optional proxy router: static registry and/or Guardian discovery, local backend, AWS backend.
-10. Handler chain and HTTP server.
+9. `setupProxyRouter`: always wires `proxy.Router` with the local MonoFS backend, optional AWS/GCP
+   backends, and (when `DOCTOR_PROXY_ENABLED=true`) static registry and/or Guardian discovery.
+10. Optional `quota.Engine` (`DOCTOR_QUOTA_ENABLED`), `TenantGuard`, and HTTP server.
 
 ## 2. Middleware and request identity
 
@@ -32,26 +33,32 @@ Execution order from the outside in:
 flowchart LR
   A[HTTP request] --> B[WebAuthenticator.Handler]
   B --> C[TenantTrust.Wrap]
-  C --> D[auth.Middleware.Wrap]
-  D --> E[PolicyGate.Middleware]
-  E --> F[withWarningHeaders]
-  F --> G[guardianTokenMiddleware]
-  G --> H[query.Service.Handler mux]
+  C --> D[TenantGuard.Wrap]
+  D --> E[auth.Middleware.Wrap]
+  E --> F[PolicyGate.Middleware]
+  F --> G[quota.Engine.Middleware]
+  G --> H[withWarningHeaders]
+  H --> I[guardianTokenMiddleware]
+  I --> J[query.Service.Handler mux]
 ```
 
 | Layer | Behavior |
 |---|---|
 | `WebAuthenticator` | resolves `doctor_session` cookie (JWT verified, then opaque session fallback) or bearer; optionally redirects anonymous browser navigations to login; mounts `/auth/login`, `/auth/callback`, `/auth/logout` |
 | `TenantTrust` | if no verified identity and tenant header/query param exists, attaches `ClientID=tenant:<name>`, group `doctor:tenant`; verified identity wins |
+| `TenantGuard` | enforces `DOCTOR_QUERY_ALLOWED_TENANTS` or forces `DOCTOR_QUERY_SINGLE_TENANT` when configured |
 | `auth.Middleware` | re-verifies bearer if present; if `AuthRequire` and not exempt, rejects anonymous with 401; attaches identity |
 | `PolicyGate.Middleware` | under enforcement, rejects whole log/trace requests when the policy denies or is not loaded; metrics paths pass |
+| `quota.Engine.Middleware` | enforces per-partition/subject query rate, concurrency, and cost budgets |
+| `withHTTPMetrics`, `withSecurityHeaders`, `withBodyLimit`, `withRequestID`, `withMutationOriginCheck`, `withAuditLogging` | applied by `Service.Handler`: per-route metrics, CSP/security headers, request size cap, `X-Request-ID`, cross-origin mutation rejection, and audit events |
 | `withWarningHeaders` | attaches `proxy.WarningCollector` and federation `RequestMeta`; emits `X-Doctor-Partial*` headers |
 | `guardianTokenMiddleware` | copies the caller's bearer or `doctor_session` cookie into context for server-side Guardian reads |
 | mux | route handlers |
 
-Exempt paths (when no custom list is set): `/healthz`, `/ready`, `/api/echo`, `/metrics`,
-`/api/v1`. The `/api/v1` prefix exempts the entire Prometheus API. The UI and native `/v1` APIs are
-not exempt.
+Exempt paths (when no custom list is set): `/healthz`, `/ready`, `/api/echo`, `/metrics`, and
+`/api/v1/status/buildinfo`. The Prometheus API is **not** exempt, so Grafana must send a bearer token
+when a verifier is configured. Metrics are globally visible to authenticated callers; Doctor does
+not apply per-partition metric scoping.
 
 ## 3. Route map
 
@@ -62,6 +69,7 @@ not exempt.
 | GET | `/healthz` | `handleHealth` | constant `{"status":"ok"}` |
 | GET | `/ready` | `handleLokiReady` | 200 when log engine is configured and enforced policy is loaded; otherwise 503 |
 | GET | `/metrics` | `promhttp.Handler()` | Prometheus scrape endpoint |
+| GET | `/debug/pprof/*` | `net/http/pprof` | registered on the query HTTP listener (no separate localhost guard) |
 | GET | `/v1/ui/config` | `handleUIConfig` | default tenant, Guardian URL, default partition |
 | GET | `/v1/ui/user` | `handleUIUser` | identity fields |
 | GET | `/` and unknown non-API paths | `handleUI` | embedded SPA; API-prefixed missing routes → 404 |
@@ -130,6 +138,12 @@ not exempt.
 | GET | `/v1/federation/plan` | planner debug (admin-only when policy enforced) |
 | GET | `/v1/proxy/endpoints` | proxy backend inventory/health |
 | GET/POST | `/v1/rules`, `/v1/rules/*` | rules list/detail/evaluate proxy |
+| ANY | `/v1/alerts`, `/v1/alerts/*` | Sentinel alerts/rules/silences/routing proxy |
+| ANY | `/v1/incidents`, `/v1/incidents/*`, `/v1/alert-sets*`, `/v1/incident-policy`, `/v1/postmortem-engines` | Sentinel incidents/postmortems proxy |
+| ANY | `/api/v2/*` | Alertmanager-compatible v2 API proxy to Sentinel |
+| POST | `/v1/sql/query` | read-only DuckDB/ClickHouse SQL console |
+| GET | `/v1/audit/events` | query-plane audit events (requires audit or admin scope when a policy gate is configured) |
+| GET | `/v1/quota` | partition and subject quota limits and usage |
 | GET/POST/PUT/DELETE | `/v1/dashboards*` | dashboard CRUD, versions, import/export |
 | GET | `/v1/guardian/topology` | Guardian topology projection |
 | GET | `/v1/guardian/events` | Guardian timeline projection |
@@ -184,31 +198,37 @@ Local engine details:
 - A `?timeout=` duration is honored up to 5 minutes; otherwise the engine uses 30s or the caller
   deadline, whichever is longer.
 
-AWS-only behavior when no proxy router:
+Provider selection:
 
-- `source="aws"` is detected and stripped before forwarding to CloudWatch.
-- If the local result is empty and AWS is ready, the original selector is forwarded verbatim as a
-  transparent fallback.
-- Local + AWS results are merged with `source` labels.
+- `source="aws"`, `source="gcp"`, and `source=~"...|..."` select the matching provider backend and
+  are stripped before forwarding.
+- If the local result is empty and a fallback backend is ready, the original selector is forwarded
+  verbatim.
+- Local + remote results are merged with `source` labels.
 
-Proxy behavior:
+Router behavior:
 
 - `Router.MetricsInstant/Range` selects backends, prunes by query labels (account/region/cluster/
   partition/backend/log group), applies circuit breakers, runs local first, then primary remotes, then
   fallback backends if the local result is empty.
 - Results are merged; collisions get `shard`; partial failures become warnings.
+- An associative outer aggregate (`sum`, `min`, `max`, `count`, `group`) is pushed down as its inner
+  expression and applied once across the merged result. The response carries
+  `X-Doctor-Federation-Aggregation: global|per-shard`. A partial fleet never produces a global
+  aggregate; it returns per-shard data with a warning. `topk`, `quantile`, `stddev`, `stdvar`, and
+  mixed-provider `source=~` queries remain per-shard.
 
 ### 4.2 Discovery endpoints
 
-- `/api/v1/labels`, `/label/{name}/values`, `/series`, `/metadata` use either the proxy router or the
-  local `doctorPromQuerier` discovery methods.
+- `/api/v1/labels`, `/label/{name}/values`, `/series`, `/metadata` use `proxy.Router`, so local,
+  static Prometheus, Guardian-discovered, AWS, and GCP backends contribute to Grafana autocomplete.
 - Local discovery first tries the manifest-backed modes (`__doctor_discovery__=metric_names`,
   `label_names`, `label_values:<name>`), then falls back to sample or series-index scans.
 - Discovery range is clamped to 15 minutes; 10k records / 200k series caps.
 - AWS discovery adds `source` and uses `ListMetrics` for `__name__` when CloudWatch's Prometheus API
   has no label-values route.
 - `/api/v1/query_exemplars` scans stored points for `trace_id`/`span_id`, capped at 500 series, 100
-  exemplars/series, 5k total.
+  exemplars/series, 5k total. It remains local-only.
 
 ## 5. Loki flow
 
@@ -265,10 +285,10 @@ Volume/index endpoints:
 `GET /api/search` parses either `q` (TraceQL) or `tags`/time/limit/minDuration/maxDuration.
 
 - If a proxy router exists:
-  - if any backend implements `TraceQLUpstream`, **only those backends are queried** for a TraceQL
-    query; local and AWS backends are skipped even if they could evaluate the subset;
-  - otherwise `ApplyTraceQL` folds the subset into tag matchers and all backends are searched.
-- Without a proxy router, local and AWS search results are merged.
+  - backends implementing `TraceQLUpstream` receive native TraceQL;
+  - non-capable backends (local, AWS, GCP) receive the supported TraceQL subset folded into tag
+    matchers via `ApplyTraceQL`, with warnings when a query uses unsupported constructs.
+- Local and remote backends are merged by the router.
 - `spss` requests span sets; failures are non-fatal enrichment failures.
 - Results are deduplicated by trace ID, newest first.
 
@@ -310,13 +330,13 @@ Unsupported TraceQL constructs return 400.
 `/v1/traces/recent`:
 
 - parses service, partition/intent/asset, from/to, limit (default 100, max 500), cursor;
-- `queryLocalTracePage` scans up to 8 batches of 5k spans, builds trace summaries, and only emits a
+- `queryLocalTracePage` scans up to 8 batches of 2k spans, builds trace summaries, and only emits a
   trace once the scan watermark is below its earliest span start (so the summary is complete);
 - `queryAWSTracePage` reads up to 200 X-Ray summaries, applies the same cursor/partition rules;
 - `mergeTracePages` deduplicates by canonical trace ID, applies the cursor and limit;
 - returns `{returned, traces, has_more, next_cursor, page_size}`.
 
-`/v1/traces/{id}` resolves latest magics, then uses the proxy router or local store; returns
+`/v1/traces/{id}` resolves latest magics, then uses the proxy router; returns
 `{trace_id, spans}` sorted by start time.
 
 `/v1/spans/search` searches by service and/or trace ID; with a router it first searches summaries
@@ -328,9 +348,7 @@ and hydrates each trace, then filters by service.
 
 - tenant, partition, intent, asset, service, free text, log group, from/to, limit 1–1000;
 - rejects broad live-AWS searches with 422 if the federation planner cannot scope them;
-- with a proxy router, calls `Router.Logs`; if the router does not own AWS, optionally merges the
-  direct AWS result;
-- without a router, uses `QueryLogsRaw` if supported, otherwise `QueryLogs`;
+- calls `Router.Logs`; the router owns AWS/GCP and the local backend;
 - applies service/identity filters, sorts newest first, returns `{results, returned, ...}`.
 
 `/v1/logs/services` scans 2k logs (and optionally traces) to build components, partitions,
@@ -352,7 +370,8 @@ onto the base family name, and stored help/unit are returned.
 
 `/v1/services/discover`:
 
-- scans up to 5k traces, 5k logs, and 10k metric points over a window;
+- scans up to 5k traces, 5k logs, and 10k metric points over a window; with a policy catalog
+  it scans each partition with a 1k-record budget and falls back to the single global scan;
 - builds a catalog of service name, canonical full name, alias, kind (runtime/asset), asset type,
   identity kind, partitions, intents, assets, cluster, pusher, last seen, trace/log counts, error
   rate, metric names, suggested dashboards;
@@ -377,8 +396,8 @@ See [rules-dashboards.md](rules-dashboards.md).
 
 ### Guardian
 
-- topology: fetch per-partition topology from Guardian, or all partitions concurrently (unbounded
-  goroutines); map to Doctor node/edge shape with health scores.
+- topology: fetch per-partition topology from Guardian, or all partitions concurrently (capped at 8
+  concurrent fetches); map to Doctor node/edge shape with health scores.
 - events: fetch history per partition, filter by window/intent, sort newest first, cap limit.
 - health: aggregate history into success/failure/drift counts and a score/recommendation.
 - overview: raw proxy with 1 MiB cap.
@@ -394,17 +413,20 @@ flowchart LR
   S --> C[static config backends]
   S --> G[Guardian-discovered backends]
   S --> A[AWS federated backend]
+  S --> GC[GCP federated backend]
   L --> LE[LogEngineClient]
   C --> U[Prom/Loki/Tempo/ES/BQ adapters]
   G --> U
   A --> FM[federation.Manager]
+  GC --> GM[federation.Manager]
   FM --> P[selected pusher targets]
+  GM --> P
 ```
 
 Target selection for remote backends uses `parseSelectorCriteria` on PromQL/LogQL/TraceQL text:
 equality/alternation matchers for region, account, cluster, partition, backend/shard/pusher, and
-Guardian log-group names. Federated AWS backends skip this pruning because their planner owns target
-selection.
+Guardian log-group names. Federated AWS/GCP backends skip this pruning because their planner owns
+target selection.
 
 Fan-out is bounded by `MaxInflight` and `MaxFanoutBackends`; local failures are fatal, remote failures
 become warnings. Merge rules:
@@ -434,9 +456,8 @@ The repo policy gate also:
 - hides service catalog entries by partition;
 - filters Guardian probes by partition.
 
-Metrics are always allowed. This is intentional: metrics dashboards are a supported use case and
-`/api/v1` is exempt by default. Deployments that need metric confidentiality must enforce it at an
-external gateway or network layer.
+Metrics require authentication and are globally visible to any authenticated caller; Doctor does
+not partition-scope metric data. Unless the caller authenticates, `/api/v1` is not reachable.
 
 ## 10. Error and response conventions
 
@@ -459,5 +480,5 @@ Access enforcement maps to 403; planner scope errors map to 422 in Prometheus/qu
 - `handlePrometheusMetadata` reports stored metric types; AWS-only metrics remain `untyped`.
 - `handlePrometheusRules` always returns no groups, even when doctor-rules has rules.
 - `/ready` checks the log engine and enforced policy state, but not federation freshness or Guardian.
-- The legacy direct and proxy paths can both query AWS unless `SetAWSViaRouter(true)` is used; the
-  main binary sets it when a proxy router and AWS client exist.
+- `proxy.Router` is always installed; `DOCTOR_PROXY_ENABLED` only controls external registry
+  discovery. Legacy direct branches remain as unreachable rollback code.

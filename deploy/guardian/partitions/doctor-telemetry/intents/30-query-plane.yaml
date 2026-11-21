@@ -28,7 +28,7 @@ spec:
           DOCTOR_GUARDIAN_DISCOVERY_ENABLED: "false"
           DOCTOR_ACCESS_RESOLVER: owners
           DOCTOR_ACCESS_MODE: observe
-          DOCTOR_AUTH_REQUIRE: "false"
+          DOCTOR_AUTH_REQUIRE: "true"
         ports:
           - name: http
             containerPort: 18080

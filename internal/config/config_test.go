@@ -26,11 +26,138 @@ func TestLoadRulesHonorsDisableSwitch(t *testing.T) {
 	}
 }
 
+func TestLoadSentinelFCBIsOptional(t *testing.T) {
+	t.Setenv("DOCTOR_SENTINEL_FCB_BACKEND_URL", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_ENABLED", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_WEBHOOK_SECRET", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_ACK_SECRET", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_DEFAULT_TOPIC", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_TIMEOUT", "")
+	t.Setenv("DOCTOR_FCB_BACKEND_URL", "")
+	t.Setenv("DOCTOR_FCB_ENABLED", "")
+	t.Setenv("DOCTOR_FCB_WEBHOOK_SECRET", "")
+	t.Setenv("DOCTOR_FCB_ACK_SECRET", "")
+	t.Setenv("DOCTOR_FCB_DEFAULT_TOPIC", "")
+	t.Setenv("DOCTOR_FCB_TIMEOUT", "")
+
+	cfg := LoadSentinel("doctor-sentinel")
+	if cfg.FCBEnabled {
+		t.Fatal("FCBEnabled = true, want false when no backend URL is configured")
+	}
+	if cfg.FCBDefaultTopic != "" {
+		t.Fatalf("FCBDefaultTopic = %q, want empty", cfg.FCBDefaultTopic)
+	}
+	if cfg.FCBAckSecret != "" {
+		t.Fatalf("FCBAckSecret = %q, want empty", cfg.FCBAckSecret)
+	}
+	if cfg.FCBTimeout != 10*time.Second {
+		t.Fatalf("FCBTimeout = %v", cfg.FCBTimeout)
+	}
+}
+
+func TestLoadSentinelFCBEnablesWithBackendURL(t *testing.T) {
+	t.Setenv("DOCTOR_SENTINEL_FCB_BACKEND_URL", "http://doctor-fcm-bridge:8080/webhook")
+	t.Setenv("DOCTOR_SENTINEL_FCB_ENABLED", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_WEBHOOK_SECRET", "shared-secret")
+	t.Setenv("DOCTOR_SENTINEL_FCB_ACK_SECRET", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_DEFAULT_TOPIC", "doctor-alerts")
+	t.Setenv("DOCTOR_SENTINEL_FCB_TIMEOUT", "3s")
+
+	cfg := LoadSentinel("doctor-sentinel")
+	if !cfg.FCBEnabled {
+		t.Fatal("FCBEnabled = false, want true when a backend URL is configured")
+	}
+	if cfg.FCBBackendURL != "http://doctor-fcm-bridge:8080/webhook" {
+		t.Fatalf("FCBBackendURL = %q", cfg.FCBBackendURL)
+	}
+	if cfg.FCBWebhookSecret != "shared-secret" {
+		t.Fatalf("FCBWebhookSecret = %q", cfg.FCBWebhookSecret)
+	}
+	if cfg.FCBAckSecret != "shared-secret" {
+		t.Fatalf("FCBAckSecret = %q, want webhook secret fallback", cfg.FCBAckSecret)
+	}
+	if cfg.FCBTimeout != 3*time.Second {
+		t.Fatalf("FCBTimeout = %v", cfg.FCBTimeout)
+	}
+}
+
+func TestLoadSentinelFCBAckSecretOverride(t *testing.T) {
+	t.Setenv("DOCTOR_SENTINEL_FCB_WEBHOOK_SECRET", "shared-secret")
+	t.Setenv("DOCTOR_SENTINEL_FCB_ACK_SECRET", "ack-secret")
+
+	cfg := LoadSentinel("doctor-sentinel")
+	if cfg.FCBAckSecret != "ack-secret" {
+		t.Fatalf("FCBAckSecret = %q, want explicit override", cfg.FCBAckSecret)
+	}
+}
+
+func TestLoadSentinelFCBAliasEnv(t *testing.T) {
+	t.Setenv("DOCTOR_SENTINEL_FCB_BACKEND_URL", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_ENABLED", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_WEBHOOK_SECRET", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_DEFAULT_TOPIC", "")
+	t.Setenv("DOCTOR_SENTINEL_FCB_TIMEOUT", "")
+	t.Setenv("DOCTOR_FCB_ENABLED", "")
+	t.Setenv("DOCTOR_FCB_DEFAULT_TOPIC", "")
+	t.Setenv("DOCTOR_FCB_TIMEOUT", "")
+	t.Setenv("DOCTOR_FCB_BACKEND_URL", "http://doctor-fcm-bridge:8080/webhook")
+	t.Setenv("DOCTOR_FCB_WEBHOOK_SECRET", "alias-secret")
+
+	cfg := LoadSentinel("doctor-sentinel")
+	if !cfg.FCBEnabled || cfg.FCBBackendURL != "http://doctor-fcm-bridge:8080/webhook" {
+		t.Fatalf("FCB alias config = %#v", cfg)
+	}
+	if cfg.FCBWebhookSecret != "alias-secret" {
+		t.Fatalf("FCBWebhookSecret = %q", cfg.FCBWebhookSecret)
+	}
+}
+
 func TestLoadIngestRequiresAuthToken(t *testing.T) {
 	t.Setenv("DOCTOR_PRIVACY_HMAC_KEY", "test-hmac-key")
 	t.Setenv("DOCTOR_INGEST_AUTH_TOKEN", "")
 	if _, err := LoadIngest("doctor-ingest"); err == nil {
 		t.Fatal("LoadIngest() succeeded without DOCTOR_INGEST_AUTH_TOKEN")
+	}
+}
+
+func TestLoadIngestAcceptsCollectorTokenFile(t *testing.T) {
+	t.Setenv("DOCTOR_PRIVACY_HMAC_KEY", "test-hmac-key")
+	t.Setenv("DOCTOR_INGEST_AUTH_TOKEN", "")
+	t.Setenv("DOCTOR_INGEST_TOKENS_FILE", "/etc/doctor/ingest-tokens.yaml")
+	cfg, err := LoadIngest("doctor-ingest")
+	if err != nil {
+		t.Fatalf("LoadIngest() error = %v", err)
+	}
+	if cfg.AuthTokensFile != "/etc/doctor/ingest-tokens.yaml" {
+		t.Fatalf("AuthTokensFile = %q", cfg.AuthTokensFile)
+	}
+	if len(cfg.AllowedTenants) != 0 {
+		t.Fatalf("AllowedTenants = %v, want no implicit default with a token file", cfg.AllowedTenants)
+	}
+}
+
+func TestLoadIngestMTLSConfiguration(t *testing.T) {
+	t.Setenv("DOCTOR_PRIVACY_HMAC_KEY", "test-hmac-key")
+	t.Setenv("DOCTOR_INGEST_AUTH_TOKEN", "test-ingest-token")
+	t.Setenv("DOCTOR_INGEST_MTLS_MODE", "require")
+	t.Setenv("DOCTOR_INGEST_MTLS_CA_FILE", "/etc/doctor/collectors-ca.pem")
+	t.Setenv("DOCTOR_HTTP_MTLS_MODE", "off")
+	t.Setenv("DOCTOR_HTTP_MTLS_CA_FILE", "")
+
+	cfg, err := LoadIngest("doctor-ingest")
+	if err != nil {
+		t.Fatalf("LoadIngest: %v", err)
+	}
+	if cfg.GRPCMTLSMode != "require" || cfg.GRPCMTLSCAFile != "/etc/doctor/collectors-ca.pem" {
+		t.Fatalf("grpc mTLS = %q / %q", cfg.GRPCMTLSMode, cfg.GRPCMTLSCAFile)
+	}
+	if cfg.HTTPMTLSMode != "off" {
+		t.Fatalf("http mTLS = %q, want explicit override", cfg.HTTPMTLSMode)
+	}
+
+	t.Setenv("DOCTOR_INGEST_MTLS_CA_FILE", "")
+	if _, err := LoadIngest("doctor-ingest"); err == nil {
+		t.Fatal("expected require mode without a CA file to fail")
 	}
 }
 
@@ -73,5 +200,49 @@ func TestLoadIngestUsesLowLatencyBufferDefaults(t *testing.T) {
 	}
 	if len(cfg.AllowedTenants) != 1 || cfg.AllowedTenants[0] != "default" {
 		t.Fatalf("allowed tenants = %#v, want [default]", cfg.AllowedTenants)
+	}
+}
+
+func TestLoadSentinelSecurityDefaults(t *testing.T) {
+	t.Setenv("DOCTOR_SENTINEL_AUTH_ALLOW_ALL", "")
+	t.Setenv("DOCTOR_SENTINEL_IDENTITY_SECRET", "sentinel-hmac")
+
+	cfg := LoadSentinel("doctor-sentinel")
+	if cfg.AuthAllowAll {
+		t.Fatal("AuthAllowAll = true, want false by default")
+	}
+	if cfg.IdentityHMACSecret != "sentinel-hmac" {
+		t.Fatalf("IdentityHMACSecret = %q, want sentinel-hmac", cfg.IdentityHMACSecret)
+	}
+}
+
+func TestLoadQuerySecurityDefaults(t *testing.T) {
+	t.Setenv("DOCTOR_BACKEND_ALLOW_PRIVATE", "")
+	cfg := LoadQuery("doctor-query")
+	if cfg.BackendAllowPrivate {
+		t.Fatal("BackendAllowPrivate = true, want false by default")
+	}
+}
+
+func TestLoadIngestDebugDisabledByDefault(t *testing.T) {
+	t.Setenv("DOCTOR_PRIVACY_HMAC_KEY", "test-hmac-key")
+	t.Setenv("DOCTOR_INGEST_AUTH_TOKEN", "test-ingest-token")
+	t.Setenv("DOCTOR_DEBUG_ENABLED", "")
+
+	cfg, err := LoadIngest("doctor-ingest")
+	if err != nil {
+		t.Fatalf("LoadIngest() error = %v", err)
+	}
+	if cfg.DebugEnabled {
+		t.Fatal("DebugEnabled = true, want false by default")
+	}
+
+	t.Setenv("DOCTOR_DEBUG_ENABLED", "true")
+	cfg, err = LoadIngest("doctor-ingest")
+	if err != nil {
+		t.Fatalf("LoadIngest() error = %v", err)
+	}
+	if !cfg.DebugEnabled {
+		t.Fatal("DebugEnabled = false, want true when DOCTOR_DEBUG_ENABLED=true")
 	}
 }

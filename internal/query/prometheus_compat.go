@@ -1505,6 +1505,10 @@ func (s *Service) handlePrometheusQueryRange(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request) {
+	if s.proxyRouter != nil {
+		s.handlePrometheusLabelsViaRouter(w, r)
+		return
+	}
 	partition := partitionFromRequest(r)
 	matchValues := requestParams(r, "match[]")
 	hasAWS, forwardedMatches := awsMatches(matchValues)
@@ -1567,6 +1571,10 @@ func (s *Service) handlePrometheusLabels(w http.ResponseWriter, r *http.Request)
 func (s *Service) handlePrometheusLabelValues(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasSuffix(r.URL.Path, "/values") {
 		http.NotFound(w, r)
+		return
+	}
+	if s.proxyRouter != nil {
+		s.handlePrometheusLabelValuesViaRouter(w, r)
 		return
 	}
 
@@ -1859,6 +1867,10 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 		writePrometheusError(w, http.StatusBadRequest, "bad_data", "at least one match[] selector is required")
 		return
 	}
+	if s.proxyRouter != nil {
+		s.handlePrometheusSeriesViaRouter(w, r)
+		return
+	}
 	partition := partitionFromRequest(r)
 	hasAWS, forwardedMatches := awsMatches(matchValues)
 	awsEnabled := s.awsDiscoveryReady(r.Context()) && (partition == "" || s.awsPartitionVisible(r.Context(), partition))
@@ -1927,6 +1939,22 @@ func (s *Service) handlePrometheusSeries(w http.ResponseWriter, r *http.Request)
 
 func (s *Service) handlePrometheusMetadata(w http.ResponseWriter, r *http.Request) {
 	metricNames := make(map[string]struct{})
+	if s.proxyRouter != nil {
+		start, end := prometheusDiscoveryRange(r)
+		values, warnings, err := s.proxyRouter.MetricsLabelValues(
+			r.Context(), s.tenantFromRequest(r), promlabels.MetricName, nil,
+			start, end, partitionFromRequest(r))
+		if err != nil {
+			writePrometheusDiscoveryError(w, err)
+			return
+		}
+		writeProxyWarnings(w, warnings)
+		for _, value := range values {
+			if value.Value != "" {
+				metricNames[value.Value] = struct{}{}
+			}
+		}
+	}
 	if querier, err := s.discoveryPrometheusQuerier(r); err == nil {
 		names, _, labelErr := querier.LabelValues(r.Context(), promlabels.MetricName, nil)
 		_ = querier.Close()

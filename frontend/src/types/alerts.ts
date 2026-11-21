@@ -63,6 +63,46 @@ export interface AlertListResponse {
   returned: number;
 }
 
+export interface AlertInstanceCounts {
+  firing: number;
+  pending: number;
+  silenced: number;
+  resolved: number;
+  no_data: number;
+  error: number;
+  total: number;
+}
+
+/**
+ * AlertDefinition is one alert that can fire for a partition. Defined entries
+ * come from Sentinel PromQL/guided rules, Guardian built-ins, or the AWS/GCP
+ * source policies. Unmanaged entries are source alerts with no rule definition
+ * (for example source=test), included so they are never invisible.
+ */
+export interface AlertDefinition {
+  name: string;
+  engine: string;
+  source: string;
+  group?: string;
+  mode?: string;
+  expr?: string;
+  for?: string;
+  severity?: string;
+  summary?: string;
+  notify?: string[];
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  spec?: AlertSpec | null;
+  defined: boolean;
+  instances: AlertInstanceCounts;
+}
+
+export interface AlertInventoryResponse {
+  tenant: string;
+  partition: string;
+  definitions: AlertDefinition[];
+}
+
 export interface SilenceListResponse {
   silences: Silence[];
 }
@@ -145,10 +185,16 @@ export interface Receiver {
   name: string;
   type: string;
   description?: string;
+  /** Transport-specific destination; for `fcb` this is the FCM topic. */
+  target?: string;
   url?: string;
+  urlEnv?: string;
   secretEnv?: string;
   headers?: Record<string, string>;
   timeout?: string;
+  events?: string[];
+  format?: Record<string, string>;
+  templates?: Record<string, string>;
 }
 
 export interface Route {

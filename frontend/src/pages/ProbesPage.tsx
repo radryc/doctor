@@ -244,6 +244,17 @@ export default function ProbesPage() {
                 status === "stale" && downPushers.has(probe.pusher || "unknown");
               const statusLabel =
                 status === "passing" ? "Up" : status === "failing" ? "Down" : pusherDown ? "Not connected" : "Stale";
+              // Auto-discovered probes have a generated name such as
+              // "auto-tcp-address". Lead with the service identity instead and
+              // keep the generated probe name as quiet metadata.
+              const identityPrimary = auto
+                ? probe.fullName || probe.service || probe.name
+                : probe.name || probe.fullName || probe.service;
+              const identitySecondary = auto
+                ? probe.name
+                : [probe.service, probe.fullName && probe.fullName !== probe.service ? probe.fullName : ""]
+                    .filter(Boolean)
+                    .join(" · ");
               return (
                 <div key={probe.probeID} className={`probe-row probe-row--${status} probe-row--${kind}`}>
                   <span
@@ -260,8 +271,8 @@ export default function ProbesPage() {
                     {statusLabel}
                   </span>
                   <span className="probe-row__identity">
-                    <strong>{probe.name || probe.service}</strong>
-                    <small>{probe.service}{probe.fullName && probe.fullName !== probe.service ? ` · ${probe.fullName}` : ""}</small>
+                    <strong>{identityPrimary}</strong>
+                    {identitySecondary ? <small>{identitySecondary}</small> : null}
                   </span>
                   <span className="probe-row__target" title={probe.target}>
                     {kind === "journey" ? (

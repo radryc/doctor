@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,5 +82,18 @@ func TestHandleDuckDBSQLRejectsOversizedRange(t *testing.T) {
 	svc.handleDuckDBSQL(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized range status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDuckDBSQLErrorStatusMapsPolicyDenials(t *testing.T) {
+	cases := []error{
+		fmt.Errorf("rpc error: code = PermissionDenied desc = telemetry SQL requires an access policy"),
+		fmt.Errorf("telemetry SQL is internal-only"),
+		fmt.Errorf("access policy is not available"),
+	}
+	for _, err := range cases {
+		if got := duckDBSQLErrorStatus(err); got != http.StatusForbidden {
+			t.Fatalf("duckDBSQLErrorStatus(%v) = %d, want 403", err, got)
+		}
 	}
 }

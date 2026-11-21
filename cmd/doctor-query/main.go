@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	gcpstore "github.com/radryc/doctor/internal/store/gcp"
 	monofsstore "github.com/radryc/doctor/internal/store/monofs"
 	"github.com/radryc/doctor/internal/telemetry"
+	"github.com/radryc/doctor/internal/tlsconfig"
 	"github.com/radryc/monofs/pkg/authz"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -36,6 +38,10 @@ func main() {
 	defer stop()
 
 	cfg := config.LoadQuery("doctor-query")
+	tlsEnv, err := tlsconfig.Load()
+	if err != nil {
+		log.Fatalf("load STRATA_TLS_* configuration: %v", err)
+	}
 	telemetryCfg, err := telemetry.LoadConfig("doctor-query")
 	if err != nil {
 		log.Fatal(err)
@@ -94,6 +100,7 @@ func main() {
 	svc.SetDefaultPartition(cfg.DefaultPartition)
 	svc.SetRulesURL(cfg.RulesURL)
 	svc.SetRulesToken(cfg.RulesAPIToken)
+	svc.SetRulesIdentitySecret(cfg.InternalIdentitySecret)
 	if strings.TrimSpace(cfg.RulesURL) != "" && strings.TrimSpace(cfg.RulesAPIToken) == "" {
 		log.Printf("rules proxy is configured without DOCTOR_RULES_API_TOKEN; doctor-rules requires it and proxy requests will fail")
 	}
@@ -101,8 +108,16 @@ func main() {
 		log.Printf("recording rules UI enabled via %s", cfg.RulesURL)
 	}
 	svc.SetSentinelURL(cfg.SentinelURL)
+	svc.SetSentinelToken(cfg.SentinelServiceToken)
+	svc.SetSentinelIdentitySecret(cfg.SentinelIdentitySecret)
 	if strings.TrimSpace(cfg.SentinelURL) != "" {
 		log.Printf("sentinel UI enabled via %s", cfg.SentinelURL)
+		if strings.TrimSpace(cfg.SentinelServiceToken) == "" {
+			log.Printf("sentinel proxy is configured without DOCTOR_SENTINEL_SERVICE_TOKEN; sentinel rejects unsigned callers when its service token is set")
+		}
+		if strings.TrimSpace(cfg.SentinelIdentitySecret) == "" {
+			log.Printf("sentinel proxy is configured without DOCTOR_SENTINEL_IDENTITY_SECRET; per-user identity forwarding is disabled and unsigned requests will fail closed")
+		}
 	}
 
 	// Shared CAS file store: MonoFS when a token is set, in-memory fallback for
@@ -179,6 +194,7 @@ func main() {
 		}
 		opts := federation.Options{
 			MaxFanout:            cfg.FederationMaxFanout,
+			DiscoveryLimit:       cfg.FederationDiscoveryLimit,
 			MaxInflight:          cfg.FederationMaxInflight,
 			MaxConcurrentTargets: cfg.FederationMaxConcurrentTargets,
 			MaxAttempts:          cfg.FederationMaxAttempts,
@@ -285,14 +301,16 @@ func main() {
 	if cleanup != nil {
 		defer cleanup()
 	}
-	if cfg.ProxyEnabled {
-		setupProxyRouter(ctx, cfg, svc, awsClient, awsBackendEnabled, awsFederated, gcpClient, gcpFederated, gate, telemetryEngine)
-		if awsBackendEnabled {
-			svc.SetAWSViaRouter(true)
-		}
-		if gcpClient != nil {
-			svc.SetGCPViaRouter(true)
-		}
+	// The router is the only query execution path. DOCTOR_PROXY_ENABLED now
+	// controls only external registry discovery (static backends and Guardian
+	// pushers); local storage and the AWS/GCP federation backends are always
+	// registered so there is one merge/aggregation implementation.
+	setupProxyRouter(ctx, cfg, svc, awsClient, awsBackendEnabled, awsFederated, gcpClient, gcpFederated, gate, telemetryEngine)
+	if awsBackendEnabled {
+		svc.SetAWSViaRouter(true)
+	}
+	if gcpClient != nil {
+		svc.SetGCPViaRouter(true)
 	}
 
 	handler := svc.Handler()
@@ -353,6 +371,15 @@ func main() {
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
+	serverTLS, err := tlsEnv.ServerTLSHTTP(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		log.Fatalf("configure HTTP TLS: %v", err)
+	}
+	server.TLSConfig = serverTLS
+	if serverTLS != nil {
+		log.Printf("doctor-query HTTP TLS enabled (STRATA_TLS_MODE=%s, client certs=%v)",
+			tlsEnv.Mode(), serverTLS.ClientAuth != tls.NoClientCert)
+	}
 	if telemetryHandle.Enabled() {
 		server.Handler = otelhttp.NewHandler(server.Handler, "doctor-query-http")
 	}
@@ -361,8 +388,9 @@ func main() {
 		_ = server.Shutdown(context.Background())
 	}()
 	var serveErr error
-	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
-		serveErr = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if serverTLS != nil {
+		// The certificate is supplied by TLSConfig (hot-reloading GetCertificate).
+		serveErr = server.ListenAndServeTLS("", "")
 	} else {
 		serveErr = server.ListenAndServe()
 	}
@@ -398,7 +426,8 @@ func setupSecurity(ctx context.Context, cfg config.QueryConfig) (*access.Gate, *
 	if verifier != nil {
 		log.Printf("authentication enabled (issuer=%q require=%v)", cfg.OIDCIssuer, cfg.AuthRequire)
 	} else {
-		log.Printf("authentication disabled: set DOCTOR_OIDC_ISSUER/AUDIENCE or DOCTOR_BREAK_GLASS_TOKEN")
+		log.Printf("WARNING: authentication disabled; telemetry APIs (including /api/v1) are PUBLIC. " +
+			"Set DOCTOR_OIDC_ISSUER/AUDIENCE or DOCTOR_BREAK_GLASS_TOKEN to require authentication")
 	}
 	middleware := auth.NewMiddleware(verifier, cfg.AuthRequire, cfg.AuthExemptPaths, log.Default())
 
@@ -501,35 +530,39 @@ func setupProxyRouter(ctx context.Context, cfg config.QueryConfig, svc *query.Se
 		AllowedHosts:  cfg.BackendAllowedHosts,
 	}
 	registries := make([]proxy.Registry, 0, 2)
-	if cfg.ProxyBackendsFile != "" {
-		static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
-			Path:      cfg.ProxyBackendsFile,
-			Interval:  cfg.ProxyRegistryInterval,
-			Logger:    log.Default(),
-			URLPolicy: urlPolicy,
-		})
-		if err != nil {
-			log.Fatalf("load proxy backends: %v", err)
-		}
-		registries = append(registries, static)
-		go static.Run(ctx)
-		log.Printf("proxy backends loaded from %s", cfg.ProxyBackendsFile)
-	}
-	if cfg.GuardianDiscoveryEnabled {
-		if cfg.GuardianAPIURL == "" {
-			log.Printf("guardian discovery enabled but DOCTOR_GUARDIAN_API_URL is unset; discovery disabled")
-		} else {
-			discovery := proxy.NewGuardianDiscovery(proxy.GuardianDiscoveryConfig{
-				BaseURL:   cfg.GuardianAPIURL,
-				Token:     cfg.GuardianToken,
-				Interval:  cfg.GuardianDiscoveryInterval,
-				URLPolicy: urlPolicy,
+	if cfg.ProxyEnabled {
+		if cfg.ProxyBackendsFile != "" {
+			static, err := proxy.NewStaticRegistry(proxy.StaticRegistryConfig{
+				Path:      cfg.ProxyBackendsFile,
+				Interval:  cfg.ProxyRegistryInterval,
 				Logger:    log.Default(),
+				URLPolicy: urlPolicy,
 			})
-			registries = append(registries, discovery)
-			go discovery.Run(ctx)
-			log.Printf("guardian backend discovery enabled via %s", cfg.GuardianAPIURL)
+			if err != nil {
+				log.Fatalf("load proxy backends: %v", err)
+			}
+			registries = append(registries, static)
+			go static.Run(ctx)
+			log.Printf("proxy backends loaded from %s", cfg.ProxyBackendsFile)
 		}
+		if cfg.GuardianDiscoveryEnabled {
+			if cfg.GuardianAPIURL == "" {
+				log.Printf("guardian discovery enabled but DOCTOR_GUARDIAN_API_URL is unset; discovery disabled")
+			} else {
+				discovery := proxy.NewGuardianDiscovery(proxy.GuardianDiscoveryConfig{
+					BaseURL:   cfg.GuardianAPIURL,
+					Token:     cfg.GuardianToken,
+					Interval:  cfg.GuardianDiscoveryInterval,
+					URLPolicy: urlPolicy,
+					Logger:    log.Default(),
+				})
+				registries = append(registries, discovery)
+				go discovery.Run(ctx)
+				log.Printf("guardian backend discovery enabled via %s", cfg.GuardianAPIURL)
+			}
+		}
+	} else {
+		log.Printf("proxy registry discovery disabled (DOCTOR_PROXY_ENABLED=false); local/AWS/GCP backends still use the router")
 	}
 
 	router := proxy.NewRouter(proxy.RouterConfig{

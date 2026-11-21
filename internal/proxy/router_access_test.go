@@ -101,3 +101,43 @@ func TestTraceTargetsKeepLocalWhenRemoteDenied(t *testing.T) {
 		t.Fatal("expected a warning for the denied remote backend")
 	}
 }
+
+func TestTraceTargetsUsePartitionPolicyForRemoteBackends(t *testing.T) {
+	gate := access.NewGate(
+		access.NewStatic("", "", ""),
+		map[access.Signal]bool{access.SignalTraces: true, access.SignalLogs: true},
+		nil,
+		nil,
+	)
+	local := Backend{
+		Name: "monofs", Kind: KindMonoFS, Origin: "local",
+		Signals: []Signal{SignalTraces},
+	}
+	remote := Backend{
+		Name: "aws", Kind: KindAWS, Origin: "aws-federated",
+		Signals: []Signal{SignalTraces},
+	}
+	router := newTestRouter(t,
+		map[string]Backend{"monofs": local, "aws": remote},
+		map[string]Upstreams{
+			"monofs": {Traces: &fakeTracesUpstream{name: "monofs"}},
+			"aws":    {Traces: &fakeTracesUpstream{name: "aws"}},
+		},
+	)
+	router.access = gate
+	router.localPolicyScoped.Store(true)
+	// The enforced repo policy filters spans/summaries per partition, so the
+	// endpoint OWNERS gate must not suppress remote trace backends.
+	router.tracePolicyScoped.Store(true)
+
+	targets, warnings, err := router.traceTargets(context.Background())
+	if err != nil {
+		t.Fatalf("traceTargets: %v (warnings=%#v)", err, warnings)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("targets = %#v, want local + aws", targets)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", warnings)
+	}
+}

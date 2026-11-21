@@ -45,12 +45,20 @@ func TestMiddlewareRequiresTokenOutsideExemptPaths(t *testing.T) {
 		t.Fatalf("logs status = %d, want 401", rec.Code)
 	}
 
-	// Prometheus metrics stay public.
+	// Telemetry (including the Prometheus API) is not public.
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("metrics status = %d, want 401", rec.Code)
+	}
+
+	// Build info is public so Grafana can probe the datasource.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/status/buildinfo", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("metrics status = %d, want 200", rec.Code)
+		t.Fatalf("buildinfo status = %d, want 200", rec.Code)
 	}
 
 	// Health stays public.
@@ -118,5 +126,32 @@ func TestNewVerifierDisabled(t *testing.T) {
 	verifier, err := NewVerifier(Config{})
 	if err != nil || verifier != nil {
 		t.Fatalf("verifier = %#v, err = %v", verifier, err)
+	}
+}
+
+func TestMiddlewareFailsClosedWithoutVerifier(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := NewMiddleware(nil, true, nil, nil).Wrap(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("non-exempt status without verifier = %d, want 401", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exempt status without verifier = %d, want 200", rec.Code)
+	}
+
+	passThrough := NewMiddleware(nil, false, nil, nil).Wrap(next)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
+	rec = httptest.NewRecorder()
+	passThrough.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("require=false status without verifier = %d, want 200", rec.Code)
 	}
 }

@@ -41,6 +41,10 @@ type LogRecord struct {
 }
 ```
 
+Cloud Logging records read through the GCP upstream populate `TraceID`/`SpanID` from the canonical
+`projects/<project>/traces/<id>` reference, `traceId`/`trace_id`, a W3C `traceparent`, and
+`spanId`/`logging.googleapis.com/spanId` so log-to-trace links work for federated GCP data.
+
 ### MetricPointRecord
 
 ```go
@@ -190,8 +194,8 @@ The service discovery catalog aggregates identity from logs, traces, metrics, an
 This is a lossy boundary. Query-side records are reconstructed from storage; fields absent from the
 log-engine response are empty.
 
-Chunk IDs are `chunk-<unix-nano>-<unix-nano>` for ingest and `rules-<unix-nano>-<count>` for the
-ruler.
+Chunk IDs are `chunk-<unix-nano>-<unix-nano>` for ingest and `rules-<sha256-prefix>` for the
+ruler (derived from the record content so retries and backfills overwrite the same chunk).
 
 ### Local WAL buffers
 
@@ -241,7 +245,7 @@ read-only.
 version: 1
 groups:
   - name: group
-    tenant: default
+    partition: default
     interval: 30s
     evaluation_delay: 0s
     rules:
@@ -252,7 +256,7 @@ groups:
         merge: sum|max|min|last|keep
 ```
 
-Stored at `/doctor/v1/rules/<tenant>/<group>.yaml`.
+Stored at `/doctor/v1/rules/<partition>/<group>.yaml`.
 
 ### Federation snapshot
 
@@ -262,9 +266,10 @@ Stored at `/doctor/v1/rules/<tenant>/<group>.yaml`.
   "generated_at": "...",
   "targets": [
     {
-      "id": "aws-<account>-<region>",
+      "id": "<provider>-<account>-<region>",
       "account": "...",
       "region": "...",
+      "provider": "aws",
       "partitions": ["..."],
       "endpoint": "https://...",
       "token_ref": "guardian-pusher://...",
@@ -338,10 +343,13 @@ Doctor has a **tenant label**, not a tenant isolation boundary:
 - tenant is read from `tenant` query parameter or `X-Doctor-Tenant` header (native APIs) and from
   HTTP header or gRPC metadata (ingest);
 - ingest restricts tenants to `DOCTOR_INGEST_ALLOWED_TENANTS` (default: the configured default
-  tenant), but the collector token is shared;
-- query accepts any tenant; there is no tenant allowlist on the query plane;
+  tenant) and supports per-collector tenant scopes via `DOCTOR_INGEST_TOKENS_FILE`;
+- query enforces `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` via `TenantGuard`
+  when configured, and otherwise accepts any requested tenant;
 - MonoFS log-engine ignores the tenant parameter entirely;
-- dashboards and rules use tenant as a path segment, with no per-tenant authorization;
+- dashboards and rules use tenant/partition as a path segment; `doctor-rules` enforces per-partition
+  token scopes (`DOCTOR_RULES_TOKENS_FILE`), and dashboards apply partition-role checks when the
+  policy gate is enforcing, but neither has a per-tenant ACL;
 - the repo policy is partition-based, not tenant-based;
 - metrics are globally readable by design, and metrics-based dashboards are an intended use case.
 
@@ -361,9 +369,7 @@ Observed issues:
    projections prefer canonical but preserve aliases.
 5. **AWS partition fallback**: when no policy binding matches, region is used as the partition, which
    can collide with a real partition name.
-6. **Federation `byTrace` index is dead**: the map is read by `Catalog.ByTrace` but never written, so
-   trace-ID planning always falls back to a full/small-catalog fan-out.
-7. **AWS dimension-only metrics** are kept even when a partition filter is active; they can reveal
-   metrics outside the selected partition.
-8. **Trace discovery cache** entries are keyed by tenant+identity+tag and never globally evicted on
-   expiry; a large user population accumulates entries.
+6. **Federation trace-ID planning**: trace IDs are intentionally unindexed in the catalog, so
+   trace-ID planning uses a bounded catalog fallback.
+7. **Trace discovery cache** entries are keyed by tenant+identity+tag, capped at 10,000 entries per
+   map with expired-entry pruning.

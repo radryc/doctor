@@ -5,7 +5,7 @@ Federation has two planes:
 - **control plane** (`doctor-federation-controller` / build / publish): Guardian + pusher metadata →
   catalog snapshot + token bundle in MonoFS;
 - **query plane** (`doctor-query` + `federation.Manager`): catalog snapshot → planner → bounded
-  fan-out to AWS pushers → merged results.
+  fan-out to AWS/GCP pushers → merged results.
 
 ## 1. Control-plane sync
 
@@ -57,7 +57,7 @@ sequenceDiagram
 
 `GuardianFeed.Pushers`:
 
-- `GET /api/m2m/pushers?limit=2000` with cursor pagination;
+- `GET /api/m2m/pushers?limit=2000&includeTokens=1` with cursor pagination;
 - each pusher yields name, account, region, observed API URL, token/tokenEnv, version, priority,
   status, last heartbeat;
 - tokens are returned in a separate map; the catalog snapshot never includes them;
@@ -68,8 +68,10 @@ sequenceDiagram
 - `GET /api/m2m/federation/partitions?limit=2000` with cursor pagination;
 - name, provider, account, region, labels.
 
-Both requests use `X-Guardian-Internal-Token` when configured. A controller without a token relies on
-Guardian allowing the machine endpoint.
+Both requests use `X-Guardian-Internal-Token` when configured. The pusher feed also sends
+`includeTokens=1`; Guardian returns raw pusher tokens only to a request that presents the internal
+token, so a token-less controller still receives the catalog but cannot resolve `guardian-pusher://`
+references. A controller without a token relies on Guardian allowing the machine endpoint.
 
 ### 1.3 Pusher metadata
 
@@ -98,20 +100,22 @@ A failed fetch keeps the old metadata and emits a warning. The cache is saved to
 `BuildCatalog`:
 
 1. reject empty partition input;
-2. index pushers by `(account, region)`, dropping incomplete entries;
+2. index pushers by `(provider, account, region)`, dropping incomplete entries;
 3. sort pushers per key by health score, priority, then name;
-4. group AWS partitions by `(account, region)`; skip non-AWS or incomplete partitions with warnings;
+4. group AWS and GCP partitions by `(provider, account, region)`; skip other providers or
+   incomplete partitions with warnings;
 5. for each group:
    - choose the best pusher;
-   - create target `aws-<account>-<region>` with endpoint, token ref/env, provider `aws`, all three
-     capabilities, health, version, priority;
+   - create target `<provider>-<account>-<region>` with endpoint, token ref/env, the partition
+     provider, all three capabilities, health, version, priority;
    - merge partition labels (conflicts become warnings, first value wins);
-   - add each partition's `log_group` plus the convention
+   - add each partition's `log_group`, and for AWS also the convention
      `guardian/<account>/<region>/<partition>/app`;
-   - attach discovery metadata keyed by `account/region` or pusher name;
+   - attach discovery metadata keyed by `account/region` or pusher name (AWS only; GCP metadata is
+     discovered lazily by the read API);
    - dedupe/sort all string lists;
-6. if no targets, fail; otherwise assign a version (`controller-<unix-nano>` or input version) and
-   timestamp.
+6. if no targets, fail; otherwise use the input version (the controller supplies
+   `controller-<unix-nano>`) or a bare unix-nano fallback, and set the generation timestamp.
 
 Service partition mapping is not populated by the builder; `Target.ServicePartitions` is only
 available from a hand-written/static catalog.
@@ -179,7 +183,8 @@ defaults:
 
 - max fanout 32, inflight 64, concurrent targets 8, attempts 2;
 - client pool 10k, idle TTL 15m;
-- breaker threshold 5, cooldown 30s;
+- breaker threshold 5, cooldown 30s when an option is unset; `doctor-query` always passes
+  `DOCTOR_FEDERATION_BREAKER_THRESHOLD` / `_COOLDOWN`, whose defaults are 2 and 15s;
 - metadata TTL 1h, call timeout 5s.
 
 `Run` periodically prunes idle clients. `Reload` swaps the state and prunes clients whose endpoint or
@@ -193,7 +198,7 @@ Default `auto` chain order: **env → Guardian → MonoFS bundle**.
 | Resolver | Behavior |
 |---|---|
 | `EnvTokenResolver` | returns `target.Token` or reads `target.TokenEnv`; unsupported when only `TokenRef` is set |
-| `GuardianTokenResolver` | `GET /api/m2m/pushers/<name>` with `X-Guardian-Internal-Token`; caches token/error with positive/negative TTL; single-flight per pusher; invalidates on 401 |
+| `GuardianTokenResolver` | `GET /api/m2m/pushers/<name>?includeTokens=1` with `X-Guardian-Internal-Token`; caches token/error with positive/negative TTL; single-flight per pusher; invalidates on 401 |
 | `BundleTokenResolver` | reads sharded MonoFS bundle; single-flight per shard; caches shard; `TokenNotFound` if missing |
 | `ChainTokenResolver` | first success wins; unsupported/not-found fall through; other errors also fall through |
 
@@ -228,6 +233,12 @@ an AWS client with a `targetTokenSource` backed by the resolver. The AWS client 
 `CheckScope` wraps rejections in `ScopeError` carrying matched/max fanout; HTTP handlers map them to
 422.
 
+The fan-out cap is a safety invariant, not a bug. Associative aggregates are merged globally (see
+Query), but an arbitrary query over 5,000 accounts still needs a rollup tier: precompute the required
+aggregate with recording rules (or a dedicated rollup store) and query the derived metric instead of
+raising `DOCTOR_FEDERATION_MAX_FANOUT`.
+
+
 ## 4. Fan-out
 
 `fanoutTargets`:
@@ -252,9 +263,15 @@ Breaker behavior:
 
 ## 5. Query operations
 
+`federation.Multi` aggregates status and target listings across AWS and GCP managers, but its
+Prometheus/CloudWatch methods query the AWS manager only. GCP owns a separate `gcp` backend in
+`proxy.Router`; making `Multi` query all managers would duplicate every GCP series and label it as
+AWS.
+
+
 | Method | Planning | Fan-out | Merge |
 |---|---|---|---|
-| `ListMetrics` | none unless cached names missing | all targets if ≤ max fanout | dedupe by namespace/name/region |
+| `ListMetrics` | none; cached descriptor index | live discovery only when the index is empty and targets ≤ max fanout | dedupe by account/region/namespace/name; capped at `DOCTOR_FEDERATION_DISCOVERY_LIMIT` |
 | `ListServices` | none | only targets with stale/missing metadata, if ≤ max fanout | dedupe by name/account/region; 1h cache |
 | `ListLogGroups` | none | all targets if ≤ max fanout | string dedupe |
 | `ResolveLogGroups` | catalog regex | fallback to list | regex filter |
@@ -271,9 +288,11 @@ Potential issues:
 
 - `PrometheusSeries/Labels/LabelValues` build the plan from stripped selectors but forward the
   original selectors to targets; Doctor-only labels can make CloudWatch reject the request.
-- `ListMetrics` dedupe omits account, so the same namespace/metric/region in multiple accounts
-  collapses.
-- `ListMetrics` can return every cached metric name for a 50k-target catalog in one response.
+- `ListMetrics` uses a per-catalog descriptor index. With descriptor metadata it preserves
+  namespace identity; legacy `metric_names` metadata has no namespace and is deduped by
+  account/region/name.
+- `ListMetrics` is capped by `DOCTOR_FEDERATION_DISCOVERY_LIMIT` (default 10k); callers should use
+  the namespace/metric filters for large catalogs.
 - Trace IDs are intentionally unindexed; trace-ID planning is a bounded catalog scan/fallback.
 
 ## 6. Status and admin views
@@ -293,7 +312,8 @@ Potential issues:
 - never includes tokens.
 
 `DebugPlan` returns the planner decision without fan-out. It is exposed at
-`/v1/federation/plan`; only admin-gated when the repo policy is enforcing.
+`/v1/federation/plan`; it is admin-only whenever a repo policy gate is configured, regardless of
+observe/enforce mode.
 
 ## 7. Failure modes
 
@@ -317,21 +337,22 @@ Potential issues:
 # Build a snapshot from an input document
 doctor-federation-build --input catalog-input.yaml --out snapshot.json
 
-# Publish a snapshot (optionally verify by reading it back)
+# Publish a snapshot (optionally verify by reading it back).
+# Tokens and the router come from the environment by default; flags remain
+# available for compatibility but leak secrets into the process table.
+export DOCTOR_MONOFS_ROUTER_ADDR=monofs-router:9000
+export DOCTOR_MONOFS_TOKEN=...
 doctor-federation-publish \
   --file snapshot.json \
-  --monofs-router monofs-router:9000 \
-  --monofs-token "$DOCTOR_MONOFS_TOKEN" \
   --root /doctor/v1/federation \
   --tenant default \
   --expected-version controller-... \
   --verify
 
 # Run one controller sync (CronJob/CI)
+export DOCTOR_GUARDIAN_TOKEN=...
 doctor-federation-controller --once --dry-run \
-  --guardian-url https://guardian.example \
-  --monofs-router monofs-router:9000 \
-  --monofs-token "$DOCTOR_MONOFS_TOKEN"
+  --guardian-url https://guardian.example
 ```
 
 `--expected-version` empty means “latest/absent” in `doctor-federation-publish`; the controller

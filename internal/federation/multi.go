@@ -11,8 +11,13 @@ import (
 )
 
 // Multi combines one manager per provider for status and target listings while
-// delegating AWS queries to the AWS manager. It lets the federation UI and
-// /v1/federation endpoints show AWS and GCP targets from a single snapshot.
+// delegating Prometheus/CloudWatch queries to the AWS manager only.
+//
+// GCP is intentionally not queried here: doctor-query registers the GCP manager
+// as its own "gcp" proxy backend (see setupProxyRouter). Fanning this facade out
+// to every manager would return each GCP series twice and label it as AWS.
+// Multi therefore owns status/target aggregation; provider query ownership
+// stays one backend per provider in proxy.Router.
 type Multi struct {
 	AWS      proxy.AWSClient
 	Managers []*Manager

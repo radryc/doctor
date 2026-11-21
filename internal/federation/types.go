@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/radryc/doctor/internal/proxy"
+	awsstore "github.com/radryc/doctor/internal/store/aws"
 )
 
 // Signal is one telemetry signal exposed by a federation target.
@@ -58,10 +59,13 @@ type Target struct {
 	MetadataFetchedAt time.Time `json:"metadata_fetched_at,omitempty" yaml:"metadata_fetched_at,omitempty"`
 
 	// Cached discovery metadata. These are derived from /v1/aws/meta and are
-	// optional in a static catalog.
-	MetricNames  []string `json:"metric_names,omitempty" yaml:"metric_names,omitempty"`
-	LogGroups    []string `json:"log_groups,omitempty" yaml:"log_groups,omitempty"`
-	XrayServices []string `json:"xray_services,omitempty" yaml:"xray_services,omitempty"`
+	// optional in a static catalog. MetricDescriptors preserves namespace
+	// identity when the pusher reports it; MetricNames stays for older
+	// pushers that only expose names.
+	MetricNames       []string                    `json:"metric_names,omitempty" yaml:"metric_names,omitempty"`
+	MetricDescriptors []awsstore.MetricDescriptor `json:"metric_descriptors,omitempty" yaml:"metric_descriptors,omitempty"`
+	LogGroups         []string                    `json:"log_groups,omitempty" yaml:"log_groups,omitempty"`
+	XrayServices      []string                    `json:"xray_services,omitempty" yaml:"xray_services,omitempty"`
 }
 
 // Snapshot is the serializable catalog document.

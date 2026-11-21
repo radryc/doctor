@@ -1,6 +1,10 @@
 package alerting
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"net/http"
 	"strings"
 )
@@ -36,9 +40,116 @@ type Identity struct {
 	Partitions map[string]bool
 }
 
+// identitySigV2Prefix marks a signature that also covers the caller's
+// partition scope. Legacy signatures omit the prefix and never bind the
+// X-Doctor-Partition-Access header.
+const identitySigV2Prefix = "v2:"
+
+// SignIdentity computes the legacy HMAC-SHA256 hex signature over
+// user + "|" + admin + "|" + groups for X-Doctor-Identity-Sig.
+//
+// It does not bind partition access. New callers that set
+// X-Doctor-Partition-Access must use SignIdentityWithPartitions.
+func SignIdentity(secret, user, admin, groups string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(strings.TrimSpace(user) + "|" + strings.TrimSpace(admin) + "|" + strings.TrimSpace(groups)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// SignIdentityWithPartitions computes an HMAC-SHA256 signature over
+// user + "|" + admin + "|" + groups + "|" + partitions and prefixes it with
+// "v2:". The partition header is included so a signature cannot be replayed
+// with a wider X-Doctor-Partition-Access scope.
+func SignIdentityWithPartitions(secret, user, admin, groups, partitions string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(strings.TrimSpace(user) + "|" + strings.TrimSpace(admin) + "|" + strings.TrimSpace(groups) + "|" + strings.TrimSpace(partitions)))
+	return identitySigV2Prefix + hex.EncodeToString(mac.Sum(nil))
+}
+
+func verifyIdentitySig(secret, user, admin, groups, partitions, sig string) bool {
+	if strings.TrimSpace(secret) == "" {
+		return false
+	}
+	sig = strings.TrimSpace(sig)
+	sig = strings.TrimPrefix(sig, "sha256=")
+	if sig == "" {
+		return false
+	}
+	if strings.HasPrefix(strings.ToLower(sig), identitySigV2Prefix) {
+		want := SignIdentityWithPartitions(secret, user, admin, groups, partitions)
+		return hmac.Equal([]byte(strings.ToLower(sig)), []byte(want))
+	}
+	// Legacy signatures did not cover partition access. Refuse them when the
+	// request carries a partition scope so an old token cannot widen it.
+	if strings.TrimSpace(partitions) != "" {
+		return false
+	}
+	want := SignIdentity(secret, user, admin, groups)
+	return hmac.Equal([]byte(strings.ToLower(sig)), []byte(want))
+}
+
+func validServiceToken(r *http.Request, serviceToken string) bool {
+	serviceToken = strings.TrimSpace(serviceToken)
+	if serviceToken == "" {
+		return false
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(auth) < len("Bearer ") || !strings.EqualFold(auth[:len("Bearer ")], "Bearer ") {
+		return false
+	}
+	token := strings.TrimSpace(auth[len("Bearer "):])
+	return subtle.ConstantTimeCompare([]byte(token), []byte(serviceToken)) == 1
+}
+
 // IdentityFromRequest reads the trusted identity headers. Direct anonymous
-// access is allowed only when allowAll is true (local development).
+// access is allowed only when allowAll is true (local development). When
+// allowAll is false, unsigned identity headers are ignored.
 func IdentityFromRequest(r *http.Request, allowAll bool) Identity {
+	return IdentityFromRequestWithAuth(r, allowAll, "", "")
+}
+
+// IdentityFromRequestWithAuth reads identity headers when allowAll is true, a
+// valid serviceToken is presented, or X-Doctor-Identity-Sig matches
+// HMAC-SHA256(identityHMACSecret, user + "|" + admin + "|" + groups).
+func IdentityFromRequestWithAuth(r *http.Request, allowAll bool, identityHMACSecret, serviceToken string) Identity {
+	identity := Identity{
+		AllowAll:   allowAll,
+		Partitions: map[string]bool{},
+	}
+	if !allowAll {
+		isSvc := validServiceToken(r, serviceToken)
+		userHdr := r.Header.Get("X-Doctor-User")
+		adminHdr := r.Header.Get("X-Doctor-Admin")
+		groupsHdr := r.Header.Get("X-Doctor-Groups")
+		partitionsHdr := r.Header.Get("X-Doctor-Partition-Access")
+		sigOK := verifyIdentitySig(identityHMACSecret, userHdr, adminHdr, groupsHdr, partitionsHdr, r.Header.Get("X-Doctor-Identity-Sig"))
+		if !isSvc && !sigOK {
+			return identity
+		}
+		// A service token authenticates the service, not an arbitrary end
+		// user. If identity headers are asserted they must also be signed, so
+		// a compromised service credential cannot forge a wider partition
+		// scope for a named operator.
+		hasIdentityHeaders := userHdr != "" || adminHdr != "" || groupsHdr != "" || partitionsHdr != ""
+		if isSvc && hasIdentityHeaders && !sigOK {
+			return identity
+		}
+		identity = parseIdentityHeaders(r, allowAll)
+		if isSvc && identity.User == "" && !identity.Admin {
+			identity.User = "service"
+			identity.Admin = true
+		}
+		return identity
+	}
+	identity = parseIdentityHeaders(r, allowAll)
+	if identity.User == "" && identity.AllowAll {
+		identity.User = "local-dev"
+		identity.Admin = true
+	}
+	return identity
+}
+
+func parseIdentityHeaders(r *http.Request, allowAll bool) Identity {
 	identity := Identity{
 		User:       strings.TrimSpace(r.Header.Get("X-Doctor-User")),
 		Admin:      strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Doctor-Admin")), "true"),
@@ -56,10 +167,6 @@ func IdentityFromRequest(r *http.Request, allowAll bool) Identity {
 		case "sentinel-admin", "sentinel-admins", "doctor-admin", "doctor-admins":
 			identity.Admin = true
 		}
-	}
-	if identity.User == "" && identity.AllowAll {
-		identity.User = "local-dev"
-		identity.Admin = true
 	}
 	return identity
 }

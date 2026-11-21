@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/radryc/doctor/internal/tlsconfig"
 )
 
 var (
@@ -173,10 +175,10 @@ func NewGuardianTokenResolver(opts GuardianTokenResolverOptions) *GuardianTokenR
 	}
 	client := opts.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = tlsconfig.HTTPClient(10 * time.Second)
 	}
 	return &GuardianTokenResolver{
-		baseURL:     strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/"),
+		baseURL:     tlsconfig.URL(strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/")),
 		token:       strings.TrimSpace(opts.Token),
 		httpClient:  client,
 		cacheTTL:    cacheTTL,
@@ -270,7 +272,7 @@ func (r *GuardianTokenResolver) fetch(ctx context.Context, name string) (string,
 	if r.baseURL == "" {
 		return "", fmt.Errorf("%w: guardian API URL is not configured", ErrTokenNotFound)
 	}
-	requestURL := r.baseURL + "/api/m2m/pushers/" + url.PathEscape(name)
+	requestURL := r.baseURL + "/api/m2m/pushers/" + url.PathEscape(name) + "?includeTokens=1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return "", err

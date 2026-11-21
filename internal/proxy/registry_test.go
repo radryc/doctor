@@ -91,7 +91,7 @@ backends:
   - {name: prom-a, kind: prometheus, baseUrl: http://a, signals: [metrics]}
 `)
 
-	registry, err := NewStaticRegistry(StaticRegistryConfig{Path: path})
+	registry, err := NewStaticRegistry(StaticRegistryConfig{Path: path, URLPolicy: netguard.Policy{AllowedHosts: []string{"a", "b"}}})
 	if err != nil {
 		t.Fatalf("NewStaticRegistry: %v", err)
 	}

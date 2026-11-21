@@ -26,13 +26,16 @@ type LogEngineClient struct {
 // bearerToken attaches the MonoFS service token to gRPC calls. The MonoFS
 // router authenticates gRPC callers from the authorization metadata; without
 // it the SQL console sees an anonymous identity and denies every partition.
-type bearerToken string
-
-func (t bearerToken) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
-	return map[string]string{"authorization": "Bearer " + string(t)}, nil
+type bearerToken struct {
+	token      string
+	requireTLS bool
 }
 
-func (bearerToken) RequireTransportSecurity() bool { return false }
+func (b bearerToken) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + b.token}, nil
+}
+
+func (b bearerToken) RequireTransportSecurity() bool { return b.requireTLS }
 
 // DuckDBSQLResult is the row result returned by one MonoFS node.
 type DuckDBSQLResult struct {
@@ -65,12 +68,22 @@ func NewLogEngineClient(ctx context.Context, routerAddr string) (*LogEngineClien
 // NewLogEngineClientWithToken dials the monofs router with a service bearer
 // token so the router can apply the caller's partition scope.
 func NewLogEngineClientWithToken(ctx context.Context, routerAddr, token string) (*LogEngineClient, error) {
+	return newLogEngineClientWithOptions(ctx, routerAddr, token)
+}
+
+// newLogEngineClientWithOptions is the internal dial path. Tests inject a
+// bufconn dialer through extraOpts to assert the bearer is attached without a
+// live router.
+func newLogEngineClientWithOptions(ctx context.Context, routerAddr, token string, extraOpts ...grpc.DialOption) (*LogEngineClient, error) {
 	if routerAddr == "" {
 		return nil, fmt.Errorf("monofs router address is required")
 	}
 	creds, err := TLSConfigFromEnv().Credentials()
 	if err != nil {
 		return nil, fmt.Errorf("configure monofs logengine TLS: %w", err)
+	}
+	if err := ensureBearerTransport(token, creds); err != nil {
+		return nil, err
 	}
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
@@ -80,8 +93,12 @@ func NewLogEngineClientWithToken(ctx context.Context, routerAddr, token string) 
 			grpc.MaxCallSendMsgSize(256*1024*1024),
 		),
 	}
+	opts = append(opts, extraOpts...)
 	if strings.TrimSpace(token) != "" {
-		opts = append(opts, grpc.WithPerRPCCredentials(bearerToken(strings.TrimSpace(token))))
+		opts = append(opts, grpc.WithPerRPCCredentials(bearerToken{
+			token:      strings.TrimSpace(token),
+			requireTLS: creds.Info().SecurityProtocol == "tls",
+		}))
 	}
 	conn, err := grpc.NewClient(routerAddr, opts...)
 	if err != nil {

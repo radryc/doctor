@@ -25,6 +25,11 @@ func TestGuardianSourceEmitsErrorAndAttentionAlerts(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
 	service := &Service{Store: store, DefaultTenant: "default"}
+	if err := store.PutGuardianPolicy(ctx, "default", "payments", GuardianPolicy{
+		Alerts: map[string]GuardianAlertPolicy{GuardianPartitionErrorAlert: {For: 0}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	server := guardianPartitionServer(t, []GuardianPartitionSummary{
 		{Name: "payments", Status: "Failing", DisplayStatus: "Needs action", FailedIntents: 2},
 		{Name: "billing", Status: "Attention", DisplayStatus: "Attention", DriftedIntents: 1},
@@ -124,6 +129,11 @@ func TestGuardianSourceAttentionToFailingReplacesAlert(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
 	service := &Service{Store: store, DefaultTenant: "default"}
+	if err := store.PutGuardianPolicy(ctx, "default", "payments", GuardianPolicy{
+		Alerts: map[string]GuardianAlertPolicy{GuardianPartitionErrorAlert: {For: 0}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	var mu sync.Mutex
 	partitions := []GuardianPartitionSummary{{Name: "payments", Status: "Attention", DisplayStatus: "Attention"}}
@@ -171,6 +181,193 @@ func TestGuardianSourceErrorsTakePrecedence(t *testing.T) {
 	}
 	if got := guardianPartitionAlertName(partition); got != GuardianPartitionErrorAlert {
 		t.Fatalf("alert name = %q, want %q", got, GuardianPartitionErrorAlert)
+	}
+}
+
+func TestGuardianSourceUnobservableIsObservabilityFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		partition GuardianPartitionSummary
+	}{
+		{
+			name: "unavailable status",
+			partition: GuardianPartitionSummary{
+				Name:          "doctor",
+				Status:        "Error",
+				DisplayStatus: "Unavailable",
+				Health:        "failing",
+				Errors:        []string{"context deadline exceeded"},
+			},
+		},
+		{
+			name: "unavailable without errors",
+			partition: GuardianPartitionSummary{
+				Name:          "doctor",
+				Status:        "Error",
+				DisplayStatus: "Unavailable",
+				Health:        "failing",
+			},
+		},
+		{
+			name: "deadline error without unavailable status",
+			partition: GuardianPartitionSummary{
+				Name:   "doctor",
+				Status: "Error",
+				Errors: []string{"rpc error: code = DeadlineExceeded desc = context deadline exceeded"},
+			},
+		},
+	} {
+		if got := guardianPartitionAlertName(tc.partition); got != GuardianPartitionUnavailableAlert {
+			t.Fatalf("%s: alert name = %q, want %q", tc.name, got, GuardianPartitionUnavailableAlert)
+		}
+	}
+
+	realFailure := GuardianPartitionSummary{
+		Name:          "payments",
+		Status:        "Failing",
+		DisplayStatus: "Needs action",
+		Errors:        []string{"invalid manifest"},
+	}
+	if got := guardianPartitionAlertName(realFailure); got != GuardianPartitionErrorAlert {
+		t.Fatalf("alert name = %q, want %q for a real failure", got, GuardianPartitionErrorAlert)
+	}
+}
+
+func TestGuardianSourceUnavailableEmitsWarningAlert(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	service := &Service{Store: store, DefaultTenant: "default"}
+	if err := store.PutGuardianPolicy(ctx, "default", "doctor", GuardianPolicy{
+		Alerts: map[string]GuardianAlertPolicy{GuardianPartitionUnavailableAlert: {For: 0}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := guardianPartitionServer(t, []GuardianPartitionSummary{{
+		Name:          "doctor",
+		Status:        "Error",
+		DisplayStatus: "Unavailable",
+		Health:        "failing",
+		Errors:        []string{"context deadline exceeded"},
+	}})
+	defer server.Close()
+
+	source := &GuardianSource{BaseURL: server.URL, Tenant: "default", Service: service, Store: store}
+	summary, err := source.PollOnce(ctx)
+	if err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if summary.Included != 1 || summary.Imported != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	alerts, err := store.ListAlerts(ctx, "default", "doctor")
+	if err != nil || len(alerts) != 1 {
+		t.Fatalf("alerts = %+v err=%v, want one observability alert", alerts, err)
+	}
+	alert := alerts[0]
+	if alert.Labels["alertname"] != GuardianPartitionUnavailableAlert || alert.Severity != "warning" {
+		t.Fatalf("alert = %+v, want %s/warning", alert, GuardianPartitionUnavailableAlert)
+	}
+	if alert.Annotations["guardian.failure"] != "observability" {
+		t.Fatalf("failure annotation = %q", alert.Annotations["guardian.failure"])
+	}
+	if alert.Annotations["guardian.errors"] != "context deadline exceeded" {
+		t.Fatalf("errors annotation = %q", alert.Annotations["guardian.errors"])
+	}
+}
+
+func TestGuardianSourceUnavailableKeepsExistingErrorAlert(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	now := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	service := &Service{Store: store, DefaultTenant: "default", Now: nowFn}
+	source := &GuardianSource{BaseURL: "http://guardian.invalid", Tenant: "default", Service: service, Store: store, Now: nowFn}
+
+	seeded := source.normalizePartitionAlert(
+		GuardianPartitionSummary{Name: "doctor", Status: "Failing", DisplayStatus: "Needs action"},
+		GuardianPartitionErrorAlert,
+		"critical",
+		now,
+	)
+	if err := store.SaveAlert(ctx, seeded, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	server := guardianPartitionServer(t, []GuardianPartitionSummary{{
+		Name:          "doctor",
+		Status:        "Error",
+		DisplayStatus: "Unavailable",
+		Health:        "failing",
+		Errors:        []string{"context deadline exceeded"},
+	}})
+	defer server.Close()
+	source.BaseURL = server.URL
+	if err := store.PutGuardianPolicy(ctx, "default", "doctor", GuardianPolicy{
+		Alerts: map[string]GuardianAlertPolicy{GuardianPartitionUnavailableAlert: {For: 0}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := source.PollOnce(ctx)
+	if err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if summary.Resolved != 0 {
+		t.Fatalf("summary = %+v, a failed observation must not resolve the error alert", summary)
+	}
+	alerts, err := store.ListAlerts(ctx, "default", "doctor")
+	if err != nil || len(alerts) != 2 {
+		t.Fatalf("alerts = %+v err=%v, want error and unavailable", alerts, err)
+	}
+	statuses := map[string]string{}
+	for _, alert := range alerts {
+		statuses[alert.Labels["alertname"]] = alert.Status
+	}
+	if statuses[GuardianPartitionErrorAlert] != StatusFiring || statuses[GuardianPartitionUnavailableAlert] != StatusFiring {
+		t.Fatalf("alert statuses = %#v", statuses)
+	}
+}
+
+func TestGuardianDefaultPolicyDelaysPartitionError(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(NewMemoryStore(), "token", "/doctor/v1/alerts")
+	now := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	service := &Service{Store: store, DefaultTenant: "default", Now: nowFn}
+	server := guardianPartitionServer(t, []GuardianPartitionSummary{
+		{Name: "payments", Status: "Failing", DisplayStatus: "Needs action", FailedIntents: 1},
+	})
+	defer server.Close()
+	source := &GuardianSource{BaseURL: server.URL, Tenant: "default", Service: service, Store: store, Now: nowFn}
+
+	// The default policy waits 5 minutes before firing a partition error.
+	if _, err := source.PollOnce(ctx); err != nil {
+		t.Fatalf("first PollOnce: %v", err)
+	}
+	alerts, err := store.ListAlerts(ctx, "default", "payments")
+	if err != nil || len(alerts) != 1 || alerts[0].Status != StatusPending {
+		t.Fatalf("alerts after first poll = %+v err=%v, want pending", alerts, err)
+	}
+
+	now = now.Add(4 * time.Minute)
+	if _, err := source.PollOnce(ctx); err != nil {
+		t.Fatalf("second PollOnce: %v", err)
+	}
+	alerts, _ = store.ListAlerts(ctx, "default", "payments")
+	if alerts[0].Status != StatusPending {
+		t.Fatalf("alert after 4m = %+v, want still pending", alerts[0])
+	}
+
+	now = now.Add(2 * time.Minute)
+	if _, err := source.PollOnce(ctx); err != nil {
+		t.Fatalf("third PollOnce: %v", err)
+	}
+	alerts, _ = store.ListAlerts(ctx, "default", "payments")
+	if len(alerts) != 1 || alerts[0].Status != StatusFiring {
+		t.Fatalf("alert after 6m = %+v, want firing", alerts)
+	}
+	if !alerts[0].StartsAt.Equal(time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("firing alert startsAt = %s, want the first observation", alerts[0].StartsAt)
 	}
 }
 

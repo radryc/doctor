@@ -107,11 +107,12 @@ func NewWebAuthenticator(ctx context.Context, cfg Config, verifier authz.TokenVe
 	return authz.NewWebAuthenticator(ctx, webCfg)
 }
 
-// DefaultExemptPaths are always reachable without a bearer token. Metrics
-// endpoints stay public by design; logs and traces are gated by the access
-// layer instead.
+// DefaultExemptPaths are always reachable without a bearer token. Telemetry
+// (including the Prometheus /api/v1 API) is never public: metrics are globally
+// visible to authenticated callers, but authentication is required. The
+// scrape endpoint and health probes remain public for Kubernetes.
 func DefaultExemptPaths() []string {
-	return []string{"/healthz", "/ready", "/api/echo", "/metrics", "/api/v1"}
+	return []string{"/healthz", "/ready", "/api/echo", "/metrics", "/api/v1/status/buildinfo"}
 }
 
 // Middleware attaches identity to requests and optionally rejects anonymous
@@ -122,15 +123,19 @@ type Middleware struct {
 	exempt        []string
 }
 
-// NewMiddleware builds the authentication middleware. A nil verifier returns a
-// pass-through middleware.
+// NewMiddleware builds the authentication middleware. When verifier is nil and
+// require is true, non-exempt requests fail closed with 401 Unauthorized; when
+// require is false, a nil verifier returns a pass-through middleware.
 func NewMiddleware(verifier authz.TokenVerifier, require bool, exemptPaths []string, logger *log.Logger) *Middleware {
-	if verifier == nil {
-		return &Middleware{}
-	}
 	exempt := exemptPaths
 	if len(exempt) == 0 {
 		exempt = DefaultExemptPaths()
+	}
+	if verifier == nil {
+		return &Middleware{
+			require: require,
+			exempt:  exempt,
+		}
 	}
 	return &Middleware{
 		authenticator: authz.NewAuthenticator(verifier, nil, false),
@@ -139,18 +144,34 @@ func NewMiddleware(verifier authz.TokenVerifier, require bool, exemptPaths []str
 	}
 }
 
+func writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(`{"status":"error","errorType":"unauthorized"}`))
+}
+
 // Wrap implements the HTTP middleware.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
-	if m == nil || m.authenticator == nil {
+	if m == nil {
 		return next
+	}
+	if m.authenticator == nil {
+		if !m.require {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !m.isExempt(r.URL.Path) {
+				writeUnauthorized(w)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 	return m.authenticator.HTTPMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if m.require && !m.isExempt(r.URL.Path) {
 			if identity, ok := authz.IdentityFromContext(r.Context()); !ok || identity.IsAnonymous() {
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				w.Header().Set("Content-Type", "application/json; charset=utf-8")
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"status":"error","errorType":"unauthorized"}`))
+				writeUnauthorized(w)
 				return
 			}
 		}

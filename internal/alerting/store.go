@@ -785,6 +785,32 @@ func (s *Store) ListOutboxAll(ctx context.Context) ([]OutboxRecord, error) {
 	return out, nil
 }
 
+// OutboxWrites materializes pending records as CAS path writes, including the
+// flat pending-index markers. Other domains (incidents) use it to write their
+// own state and notifications in a single atomic batch, so the dispatcher sees
+// new work through the same index alerts use.
+func (s *Store) OutboxWrites(ctx context.Context, records []OutboxRecord) ([]doctorstore.PathWrite, error) {
+	writes := make([]doctorstore.PathWrite, 0, len(records)*2)
+	for i := range records {
+		record := &records[i]
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = time.Now().UTC()
+		}
+		record.UpdatedAt = time.Now().UTC()
+		payload, err := yaml.Marshal(record)
+		if err != nil {
+			return nil, fmt.Errorf("alerting: encode outbox: %w", err)
+		}
+		path := s.outboxPath(record.Tenant, record.Partition, record.ID)
+		writes = append(writes, doctorstore.PathWrite{
+			LogicalPath:       path,
+			Content:           payload,
+			ExpectedVersionID: s.latestVersion(ctx, path),
+		}, s.outboxMarkerWrite(*record))
+	}
+	return writes, nil
+}
+
 // PutOutbox updates one outbox record.
 func (s *Store) PutOutbox(ctx context.Context, record OutboxRecord) error {
 	record.UpdatedAt = time.Now().UTC()
