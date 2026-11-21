@@ -62,12 +62,16 @@ import type {
 
 // trackedFetch emits request start/end events so the shell can display a
 // consistent refresh indicator on every page.
+import { displayHeaders } from "../lib/display";
+
 async function trackedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event("doctor:request-start"));
   }
+  const headers = new Headers(init?.headers ?? {});
+  for (const [key, value] of Object.entries(displayHeaders())) headers.set(key, value);
   try {
-    return await globalThis.fetch(input, init);
+    return await globalThis.fetch(input, { ...init, headers });
   } finally {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event("doctor:request-end"));

@@ -10,6 +10,22 @@ import (
 	shared "github.com/radryc/monofs/pkg/display"
 )
 
+func (s *Service) handleDisplayProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	profiles, version, err := s.displayProfiles.Profiles(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "display bundle unavailable"})
+		return
+	}
+	if version != "" {
+		w.Header().Set(shared.VersionHeader, version)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"profiles": profiles, "version": version})
+}
+
 func (s *Service) withDisplayMapping(next http.Handler) http.Handler {
 	if s == nil || s.displayProfiles == nil {
 		return next
@@ -33,7 +49,12 @@ func (s *Service) withDisplayMapping(next http.Handler) http.Handler {
 		next.ServeHTTP(buffer, r)
 		body := buffer.body.Bytes()
 		if buffer.status >= 200 && buffer.status < 300 && strings.Contains(buffer.header.Get("Content-Type"), "json") {
-			if mapped, mapErr := shared.MapJSON(body, profile, displaySurfaceName(r.URL.Path)); mapErr == nil {
+			keepCanonical := strings.EqualFold(strings.TrimSpace(r.Header.Get(shared.KeepCanonicalHeader)), "1") ||
+				strings.EqualFold(strings.TrimSpace(r.Header.Get(shared.KeepCanonicalHeader)), "true")
+			if mapped, mapErr := shared.MapJSONWithOptions(body, profile, shared.MapOptions{
+				Surface:       displaySurfaceName(r.URL.Path),
+				KeepCanonical: keepCanonical,
+			}); mapErr == nil {
 				body = mapped
 			}
 		}

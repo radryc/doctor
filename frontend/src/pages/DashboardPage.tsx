@@ -1,3 +1,4 @@
+import { displayKey } from "../lib/display";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { EChartsCoreOption } from "echarts/core";
@@ -797,7 +798,7 @@ export default function DashboardPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-gray-500 text-xs uppercase tracking-wide">
-                  <th className="px-5 py-2.5">Partition</th>
+                  <th className="px-5 py-2.5">{displayKey("partition")}</th>
                   <th className="px-4 py-2.5">Health</th>
                   <th className="px-4 py-2.5 text-right">Assets</th>
                   <th className="px-4 py-2.5 text-right">Failing</th>

@@ -1,3 +1,4 @@
+import { displayKey } from "../lib/display";
 import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
@@ -427,7 +428,7 @@ export default function RecordingRulesPage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-900/60">
-                  <th className="text-left px-4 py-2.5 font-medium">Partition</th>
+                  <th className="text-left px-4 py-2.5 font-medium">{displayKey("partition")}</th>
                   <th className="text-left px-4 py-2.5 font-medium">Group</th>
                   <th className="text-left px-4 py-2.5 font-medium">Interval</th>
                   <th className="text-right px-4 py-2.5 font-medium">Rules</th>

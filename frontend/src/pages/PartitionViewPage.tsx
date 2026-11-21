@@ -1,3 +1,4 @@
+import { displayKey } from "../lib/display";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Activity, AlertTriangle, Clock3, Copy, ExternalLink, RefreshCw } from "lucide-react";
@@ -46,8 +47,8 @@ function EventsTable({ events }: { events: GuardianEventRecord[] }) {
             <th>Time</th>
             <th>Kind</th>
             <th>Status</th>
-            <th>Intent</th>
-            <th>Asset</th>
+            <th>{displayKey("intent")}</th>
+            <th>{displayKey("asset")}</th>
             <th>Message</th>
           </tr>
         </thead>

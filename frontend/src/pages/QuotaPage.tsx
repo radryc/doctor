@@ -1,3 +1,4 @@
+import { displayKey } from "../lib/display";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -433,7 +434,7 @@ export default function QuotaPage() {
                 <table className="quota-table">
                   <thead>
                     <tr>
-                      <th>Partition</th>
+                      <th>{displayKey("partition")}</th>
                       <th>Mode</th>
                       <th>Ingest / Query / Rules</th>
                       <th>Usage (per replica)</th>
