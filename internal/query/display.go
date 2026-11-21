@@ -1,0 +1,126 @@
+package query
+
+import (
+	"bytes"
+	"net/http"
+	"strings"
+
+	doctorDisplay "github.com/radryc/doctor/internal/display"
+	coreauthz "github.com/radryc/monofs/pkg/authz"
+	shared "github.com/radryc/monofs/pkg/display"
+)
+
+func (s *Service) withDisplayMapping(next http.Handler) http.Handler {
+	if s == nil || s.displayProfiles == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested := strings.TrimSpace(r.Header.Get(shared.HeaderName))
+		if requested == "" {
+			requested = strings.TrimSpace(r.URL.Query().Get(shared.QueryParam))
+		}
+		if requested == "" || !displaySurface(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		subject := displaySubject(r)
+		profile, version, err := s.displayProfiles.Resolve(r.Context(), subject, requested)
+		if err != nil || profile == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		buffer := &displayBuffer{header: make(http.Header)}
+		next.ServeHTTP(buffer, r)
+		body := buffer.body.Bytes()
+		if buffer.status >= 200 && buffer.status < 300 && strings.Contains(buffer.header.Get("Content-Type"), "json") {
+			if mapped, mapErr := shared.MapJSON(body, profile, displaySurfaceName(r.URL.Path)); mapErr == nil {
+				body = mapped
+			}
+		}
+		for key, values := range buffer.header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.Header().Del("Content-Length")
+		w.Header().Set(shared.HeaderName, profile.ID)
+		if version != "" {
+			w.Header().Set(shared.VersionHeader, version)
+		}
+		w.Header().Add("Vary", shared.HeaderName)
+		w.Header().Set("Cache-Control", "private")
+		status := buffer.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	})
+}
+
+type displayBuffer struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (b *displayBuffer) Header() http.Header { return b.header }
+func (b *displayBuffer) WriteHeader(status int) {
+	if b.status == 0 {
+		b.status = status
+	}
+}
+func (b *displayBuffer) Write(data []byte) (int, error) {
+	if b.status == 0 {
+		b.status = http.StatusOK
+	}
+	return b.body.Write(data)
+}
+
+func displaySurface(path string) bool {
+	if strings.HasPrefix(path, "/v1/audit") || strings.HasPrefix(path, "/v1/display") {
+		return false
+	}
+	for _, prefix := range []string{"/v1/", "/loki/", "/api/", "/api/v2/"} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func displaySurfaceName(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/api/v1/"):
+		return "metrics"
+	case strings.HasPrefix(path, "/loki/"):
+		return "logs"
+	case strings.HasPrefix(path, "/api/v2/"):
+		return "traces"
+	case strings.HasPrefix(path, "/v1/sql"):
+		return "sql"
+	}
+	return ""
+}
+
+func displaySubject(r *http.Request) string {
+	id, _ := coreauthz.IdentityFromContext(r.Context())
+	who := strings.TrimSpace(id.Email)
+	if who == "" {
+		who = strings.TrimSpace(id.Subject)
+	}
+	if who == "" {
+		who = strings.TrimSpace(id.ClientID)
+	}
+	if who == "" {
+		return ""
+	}
+	return "user:" + who
+}
+
+// SetDisplayProfiles installs the display bundle loader. Nil disables mapping.
+func (s *Service) SetDisplayProfiles(service *doctorDisplay.Service) {
+	if s != nil {
+		s.displayProfiles = service
+	}
+}
