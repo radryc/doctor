@@ -6,7 +6,7 @@ same query surface runs on either backend:
 
 | Backend | When | Semantics |
 |---|---|---|
-| DuckDB over Parquet | default `--spanengine=duckdb` | each MonoFS node scans its local chunks; results are per-node partials |
+| DuckDB over Parquet | default `--spanengine=logengine` | each MonoFS node scans its local chunks; results are per-node partials |
 | ClickHouse | `--spanengine=clickhouse` | tables are shared; the router runs the statement once |
 
 Both backends use standard SQL string/identifier quoting, so most queries are
@@ -16,8 +16,8 @@ portable. Backend-specific functions (JSON, time) are called out below.
 
 - One statement only. `SELECT` and `WITH ... SELECT` are allowed; DDL, DML,
   `COPY`, external file functions, and redefining a view are rejected.
-- Queries are limited to the selected time range (maximum 7 days), 5,000 rows,
-  and 32 KiB of SQL. The console clamps these; the API returns an error when the
+- Queries are limited to the selected time range (maximum 7 days), 5,000 rows
+  (default 1,000), and 32 KiB of SQL. The console clamps these; the API returns an error when the
   range is invalid.
 - `from`/`to` are applied to `timestamp` before your SQL runs, so you do not
   need to repeat the time filter unless you want a narrower slice.
@@ -183,6 +183,6 @@ or date functions on `time` are not portable.
 |---|---|---|
 | `Unknown expression or function identifier` | text in double quotes | use `'single quotes'` |
 | `Referenced column ... not found` | double-quoted string or misspelled column | check the dataset columns above |
-| `query time range is limited to 168h0m0s` | range over 7 days | shorten the range |
-| `only SELECT statements are allowed` | DDL/DML or multiple statements | run one read-only statement |
+| `time range is limited to 7 days` | range over 7 days | shorten the range |
+| `only SELECT and WITH queries are allowed` | DDL/DML or multiple statements | run one read-only statement |
 | results differ per node | DuckDB chunks are shard-local | aggregate on the dedicated pages, or use ClickHouse |

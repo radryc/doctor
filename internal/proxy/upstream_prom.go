@@ -72,7 +72,7 @@ func (u *PromHTTPUpstream) PromSeries(ctx context.Context, _ string, match []str
 	}
 	setTimeRange(form, start, end)
 	var response map[string]any
-	if err := u.do(ctx, "/api/v1/series", form, &response); err != nil {
+	if err := u.doGET(ctx, "/api/v1/series", form, &response); err != nil {
 		return nil, err
 	}
 	return ExtractPrometheusSeries(response), nil
@@ -86,7 +86,7 @@ func (u *PromHTTPUpstream) PromLabels(ctx context.Context, _ string, match []str
 	}
 	setTimeRange(form, start, end)
 	var response map[string]any
-	if err := u.do(ctx, "/api/v1/labels", form, &response); err != nil {
+	if err := u.doGET(ctx, "/api/v1/labels", form, &response); err != nil {
 		return nil, err
 	}
 	return ExtractPrometheusStringList(response), nil
@@ -100,7 +100,7 @@ func (u *PromHTTPUpstream) PromLabelValues(ctx context.Context, _, label string,
 	}
 	setTimeRange(form, start, end)
 	var response map[string]any
-	if err := u.do(ctx, "/api/v1/label/"+url.PathEscape(label)+"/values", form, &response); err != nil {
+	if err := u.doGET(ctx, "/api/v1/label/"+url.PathEscape(label)+"/values", form, &response); err != nil {
 		return nil, err
 	}
 	return ExtractPrometheusStringList(response), nil
@@ -113,6 +113,40 @@ func setTimeRange(form url.Values, start, end time.Time) {
 	if !end.IsZero() {
 		form.Set("end", strconv.FormatInt(end.Unix(), 10))
 	}
+}
+
+// doGET queries the read-only metadata endpoints. Prometheus returns
+// 405 Method Not Allowed for POST on /api/v1/labels and
+// /api/v1/label/<name>/values, so those must use GET with query parameters.
+func (u *PromHTTPUpstream) doGET(ctx context.Context, path string, form url.Values, out any) error {
+	target := u.baseURL + path
+	if encoded := form.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	if u.token != "" {
+		req.Header.Set("Authorization", "Bearer "+u.token)
+	}
+	if u.tenant != "" {
+		req.Header.Set("X-Scope-OrgID", u.tenant)
+	}
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("prometheus %s: %w", u.name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("prometheus %s: HTTP %d: %s", u.name, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(out); err != nil {
+		return fmt.Errorf("prometheus %s: decode response: %w", u.name, err)
+	}
+	return nil
 }
 
 func (u *PromHTTPUpstream) do(ctx context.Context, path string, form url.Values, out any) error {

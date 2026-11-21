@@ -50,6 +50,7 @@ flowchart LR
 | `auth.Middleware` | re-verifies bearer if present; if `AuthRequire` and not exempt, rejects anonymous with 401; attaches identity |
 | `PolicyGate.Middleware` | under enforcement, rejects whole log/trace requests when the policy denies or is not loaded; metrics paths pass |
 | `quota.Engine.Middleware` | enforces per-partition/subject query rate, concurrency, and cost budgets |
+| `withHTTPMetrics`, `withSecurityHeaders`, `withBodyLimit`, `withRequestID`, `withMutationOriginCheck`, `withAuditLogging` | applied by `Service.Handler`: per-route metrics, CSP/security headers, request size cap, `X-Request-ID`, cross-origin mutation rejection, and audit events |
 | `withWarningHeaders` | attaches `proxy.WarningCollector` and federation `RequestMeta`; emits `X-Doctor-Partial*` headers |
 | `guardianTokenMiddleware` | copies the caller's bearer or `doctor_session` cookie into context for server-side Guardian reads |
 | mux | route handlers |
@@ -68,6 +69,7 @@ not apply per-partition metric scoping.
 | GET | `/healthz` | `handleHealth` | constant `{"status":"ok"}` |
 | GET | `/ready` | `handleLokiReady` | 200 when log engine is configured and enforced policy is loaded; otherwise 503 |
 | GET | `/metrics` | `promhttp.Handler()` | Prometheus scrape endpoint |
+| GET | `/debug/pprof/*` | `net/http/pprof` | registered on the query HTTP listener (no separate localhost guard) |
 | GET | `/v1/ui/config` | `handleUIConfig` | default tenant, Guardian URL, default partition |
 | GET | `/v1/ui/user` | `handleUIUser` | identity fields |
 | GET | `/` and unknown non-API paths | `handleUI` | embedded SPA; API-prefixed missing routes → 404 |
@@ -140,6 +142,7 @@ not apply per-partition metric scoping.
 | ANY | `/v1/incidents`, `/v1/incidents/*`, `/v1/alert-sets*`, `/v1/incident-policy`, `/v1/postmortem-engines` | Sentinel incidents/postmortems proxy |
 | ANY | `/api/v2/*` | Alertmanager-compatible v2 API proxy to Sentinel |
 | POST | `/v1/sql/query` | read-only DuckDB/ClickHouse SQL console |
+| GET | `/v1/audit/events` | query-plane audit events (requires audit or admin scope when a policy gate is configured) |
 | GET | `/v1/quota` | partition and subject quota limits and usage |
 | GET/POST/PUT/DELETE | `/v1/dashboards*` | dashboard CRUD, versions, import/export |
 | GET | `/v1/guardian/topology` | Guardian topology projection |
@@ -327,7 +330,7 @@ Unsupported TraceQL constructs return 400.
 `/v1/traces/recent`:
 
 - parses service, partition/intent/asset, from/to, limit (default 100, max 500), cursor;
-- `queryLocalTracePage` scans up to 8 batches of 5k spans, builds trace summaries, and only emits a
+- `queryLocalTracePage` scans up to 8 batches of 2k spans, builds trace summaries, and only emits a
   trace once the scan watermark is below its earliest span start (so the summary is complete);
 - `queryAWSTracePage` reads up to 200 X-Ray summaries, applies the same cursor/partition rules;
 - `mergeTracePages` deduplicates by canonical trace ID, applies the cursor and limit;
@@ -367,7 +370,8 @@ onto the base family name, and stored help/unit are returned.
 
 `/v1/services/discover`:
 
-- scans up to 5k traces, 5k logs, and 10k metric points over a window;
+- scans up to 5k traces, 5k logs, and 10k metric points over a window; with a policy catalog
+  it scans each partition with a 1k-record budget and falls back to the single global scan;
 - builds a catalog of service name, canonical full name, alias, kind (runtime/asset), asset type,
   identity kind, partitions, intents, assets, cluster, pusher, last seen, trace/log counts, error
   rate, metric names, suggested dashboards;
@@ -409,17 +413,20 @@ flowchart LR
   S --> C[static config backends]
   S --> G[Guardian-discovered backends]
   S --> A[AWS federated backend]
+  S --> GC[GCP federated backend]
   L --> LE[LogEngineClient]
   C --> U[Prom/Loki/Tempo/ES/BQ adapters]
   G --> U
   A --> FM[federation.Manager]
+  GC --> GM[federation.Manager]
   FM --> P[selected pusher targets]
+  GM --> P
 ```
 
 Target selection for remote backends uses `parseSelectorCriteria` on PromQL/LogQL/TraceQL text:
 equality/alternation matchers for region, account, cluster, partition, backend/shard/pusher, and
-Guardian log-group names. Federated AWS backends skip this pruning because their planner owns target
-selection.
+Guardian log-group names. Federated AWS/GCP backends skip this pruning because their planner owns
+target selection.
 
 Fan-out is bounded by `MaxInflight` and `MaxFanoutBackends`; local failures are fatal, remote failures
 become warnings. Merge rules:

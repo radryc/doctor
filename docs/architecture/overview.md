@@ -5,8 +5,8 @@
 Doctor is a self-hosted observability **data plane and query gateway**. It receives OpenTelemetry
 telemetry, stores it through MonoFS's log-engine, and exposes the resulting data through
 Prometheus-, Loki-, and Tempo-compatible HTTP APIs plus an embedded React UI. It also federates
-CloudWatch/X-Ray data from a fleet of Guardian-managed AWS pushers and can proxy arbitrary
-Prometheus/Loki/Tempo/Elasticsearch/BigQuery backends.
+CloudWatch/X-Ray and Cloud Monitoring/Trace data from a fleet of Guardian-managed pushers and can
+proxy arbitrary Prometheus/Loki/Tempo/Elasticsearch/BigQuery backends.
 
 Doctor is not a collector agent and not the source of truth for deployment state. Guardian owns
 partitions, intents, assets, pushers, probe execution, and access policy. MonoFS owns file storage,
@@ -16,7 +16,7 @@ catalog versions, and the log-engine. Doctor consumes and projects those systems
 flowchart LR
   subgraph Producers
     OTel[OTLP producers / collectors]
-    G[Guardian pushers<br/>CloudWatch + X-Ray]
+    G[Guardian pushers<br/>AWS CloudWatch/X-Ray<br/>GCP Monitoring/Trace]
     GP[Guardian control plane]
   end
 
@@ -43,7 +43,7 @@ flowchart LR
   MF -->|stream queries + file CAS| Q
   Q -->|Prom/Loki/Tempo APIs| Graf
   Q -->|native APIs + static UI| Browser
-  Q -->|/api/* proxy fan-out| GP
+  Q -->|/api/* proxy fan-out| G
   G -->|read API| Q
   GP -->|pusher registry| Q
   GP -->|partitions + pushers| FC
@@ -193,8 +193,9 @@ These are the assumptions the implementation actually relies on:
    explicit opt-out for validation. Without a policy source there is nothing to enforce.
 5. **Query and control-plane state is versioned through MonoFS CAS.** Dashboards, rules, federation
    manifests, leases, token shards, and the metadata cache all use expected-version writes.
-6. **Federation identity is account+region.** A catalog target is one pusher read API per AWS
-   account/region; partitions are labels/indexes on that target.
+6. **Federation identity is provider+account+region.** A catalog target is one pusher read API per
+   provider account/region (AWS account or GCP project, per region); partitions are labels/indexes
+   on that target.
 7. **The compatibility APIs are the product contract.** Grafana's provisioned datasources call
    Prometheus/Loki/Tempo routes; the Doctor UI mostly calls native `/v1` routes but also uses the
    compatibility APIs for metrics, Tempo search, and Loki volume.
@@ -224,7 +225,7 @@ flowchart LR
   subgraph External
     IAM[OIDC provider]
     GUARD2[Guardian API]
-    PUSH[guardian-pusher-aws x N]
+    PUSH[guardian-pusher-aws/gcp x N]
     GF[Grafana]
     OTLP[OTLP producers]
   end
@@ -244,8 +245,10 @@ Observed deployment assumptions:
 
 - every process connects to the **MonoFS router**; node addresses are discovered through
   `GetClusterInfo`;
-- `doctor-query` and `doctor-rules` need a write-capable MonoFS file token;
-- `doctor-ingest` does not use the file store, only the log-engine router;
+- `doctor-query` (for dashboards) and `doctor-rules` need a write-capable MonoFS file token when
+  server-side state is enabled; query falls back to an in-memory dashboard store without one;
+- `doctor-ingest` does not use the file store for telemetry, only the log-engine router (plus the
+  MonoFS router for shared quota state when `DOCTOR_QUOTA_STATE_MODE=shared`);
 - the frontend and API share one origin;
 - Guardian is reached server-side using the caller's OIDC token (query reads) or an internal
   machine token (controller/token resolver).
@@ -276,13 +279,17 @@ A full variable list with defaults is in
 
 ## 7. Observability of Doctor itself
 
-- All services call `telemetry.Setup` and can export OTLP traces, metrics, and logs to an endpoint.
+- `doctor-ingest`, `doctor-query`, `doctor-rules`, and `doctor-federation-controller` call
+  `telemetry.Setup` and can export OTLP traces, metrics, and logs to an endpoint;
+  `doctor-sentinel`, `doctor-loadgen`, and the federation build/publish CLIs do not emit Doctor
+  self-telemetry.
 - `doctor-ingest`, `doctor-query`, and `doctor-rules` register a `doctor.component.up` gauge where
   applicable.
 - Ingest exposes accepted-request/record counters and buffer gauges through the OTel meter API.
 - Federation exposes catalog, planner, fan-out, circuit, and token gauges/counters.
-- Each binary registers `/metrics` with `promhttp`; it exposes Go/process metrics, not the OTel
-  instruments unless a Prometheus reader is added.
+- `doctor-ingest`, `doctor-query`, `doctor-rules`, and `doctor-loadgen` register `/metrics` with
+  `promhttp`; `doctor-sentinel` exposes only `/healthz` and `/ready`. The scrape output carries
+  Go/process metrics, not the OTel instruments unless a Prometheus reader is added.
 - `doctor-rules` initializes OTel telemetry and exposes scheduler/lease status.
 - Query health is `/healthz`; `/ready` returns 503 when the log engine is missing or enforced policy
   is not loaded. It does not check federation catalog age or OIDC.
@@ -294,7 +301,8 @@ These are expanded in the internal documents:
 - three duplicated per-signal WAL/buffer implementations (`trace_buffer`, `log_buffer`, `metric_buffer`);
 - three access-control models (OIDC gate, legacy resolver gate, repo policy gate);
 - duplicate LogQL/TraceQL parsing and duplicate trace search/summary logic;
-- MonoFS transport supports TLS/mTLS (`DOCTOR_MONOFS_TLS_*`), though it defaults to plaintext when unconfigured;
+- MonoFS transport supports TLS/mTLS (`DOCTOR_MONOFS_TLS_*`), is required by default once a MonoFS
+  token is set, and otherwise falls back to plaintext when nothing is configured;
 - tenant is a label, not a storage isolation boundary (MonoFS log-engine ignores the tenant field), though `TenantGuard` and per-collector tokens restrict tenant claims;
 - `doctor-rules` supports per-partition token scopes and signed caller identities; the dashboard
   plane still has no per-user authorization.

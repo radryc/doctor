@@ -41,6 +41,10 @@ type LogRecord struct {
 }
 ```
 
+Cloud Logging records read through the GCP upstream populate `TraceID`/`SpanID` from the canonical
+`projects/<project>/traces/<id>` reference, `traceId`/`trace_id`, a W3C `traceparent`, and
+`spanId`/`logging.googleapis.com/spanId` so log-to-trace links work for federated GCP data.
+
 ### MetricPointRecord
 
 ```go
@@ -190,8 +194,8 @@ The service discovery catalog aggregates identity from logs, traces, metrics, an
 This is a lossy boundary. Query-side records are reconstructed from storage; fields absent from the
 log-engine response are empty.
 
-Chunk IDs are `chunk-<unix-nano>-<unix-nano>` for ingest and `rules-<unix-nano>-<count>` for the
-ruler.
+Chunk IDs are `chunk-<unix-nano>-<unix-nano>` for ingest and `rules-<sha256-prefix>` for the
+ruler (derived from the record content so retries and backfills overwrite the same chunk).
 
 ### Local WAL buffers
 
@@ -241,7 +245,7 @@ read-only.
 version: 1
 groups:
   - name: group
-    tenant: default
+    partition: default
     interval: 30s
     evaluation_delay: 0s
     rules:
@@ -252,7 +256,7 @@ groups:
         merge: sum|max|min|last|keep
 ```
 
-Stored at `/doctor/v1/rules/<tenant>/<group>.yaml`.
+Stored at `/doctor/v1/rules/<partition>/<group>.yaml`.
 
 ### Federation snapshot
 
@@ -262,9 +266,10 @@ Stored at `/doctor/v1/rules/<tenant>/<group>.yaml`.
   "generated_at": "...",
   "targets": [
     {
-      "id": "aws-<account>-<region>",
+      "id": "<provider>-<account>-<region>",
       "account": "...",
       "region": "...",
+      "provider": "aws",
       "partitions": ["..."],
       "endpoint": "https://...",
       "token_ref": "guardian-pusher://...",
@@ -343,7 +348,8 @@ Doctor has a **tenant label**, not a tenant isolation boundary:
   when configured, and otherwise accepts any requested tenant;
 - MonoFS log-engine ignores the tenant parameter entirely;
 - dashboards and rules use tenant/partition as a path segment; `doctor-rules` enforces per-partition
-  token scopes (`DOCTOR_RULES_TOKENS_FILE`), while dashboards have no per-tenant authorization;
+  token scopes (`DOCTOR_RULES_TOKENS_FILE`), and dashboards apply partition-role checks when the
+  policy gate is enforcing, but neither has a per-tenant ACL;
 - the repo policy is partition-based, not tenant-based;
 - metrics are globally readable by design, and metrics-based dashboards are an intended use case.
 

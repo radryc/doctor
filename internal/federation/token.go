@@ -272,7 +272,7 @@ func (r *GuardianTokenResolver) fetch(ctx context.Context, name string) (string,
 	if r.baseURL == "" {
 		return "", fmt.Errorf("%w: guardian API URL is not configured", ErrTokenNotFound)
 	}
-	requestURL := r.baseURL + "/api/m2m/pushers/" + url.PathEscape(name)
+	requestURL := r.baseURL + "/api/m2m/pushers/" + url.PathEscape(name) + "?includeTokens=1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return "", err

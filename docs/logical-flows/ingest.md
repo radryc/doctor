@@ -51,7 +51,8 @@ bytes mapping expects base64.
 - map `ErrBufferFull` to `codes.ResourceExhausted`; other errors pass through as `Unknown`.
 
 The gRPC server accepts up to 256 MiB per message. A unary auth interceptor validates the same static
-bearer token as HTTP; there is no rate limiting or per-collector authorization beyond that token.
+bearer token as HTTP; per-collector tokens can be scoped to tenants, and the quota engine adds
+per-partition ingest byte/record/series admission when enabled.
 
 ## 4. Flattening and privacy
 

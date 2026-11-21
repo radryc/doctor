@@ -65,13 +65,13 @@ Details:
   because adding a partial shard set would produce an incorrect total.
 - `Evaluator.EvaluateGroupAt` evaluates at an explicit timestamp. `/v1/rules/backfill` replays a
   bounded range (`from`, `to`, optional `step`, max 10k ticks).
-- Recording-rule chunk IDs are derived from record content, so retries and repeated backfills do not
-  write duplicate samples.
+- Recording-rule chunk IDs are derived from record content (`rules-<sha256-prefix>`), so retries and
+  repeated backfills do not write duplicate samples.
 - Derived records set:
   - `Service` = a `service` label if present, else `"recording"`;
   - `Attributes` = rule labels + merged metric labels + `source="recording"`, `rule_group`, `rule`;
   - `MetricName` = `record`; `Type="gauge"`; `HasValue=true`.
-- Writes go through `LogEngineWriter` with chunk ID `rules-<unix-nano>-<record-count>`.
+- Writes go through `LogEngineWriter` with chunk ID `rules-<sha256-prefix>` derived from the records.
 
 ### 1.3 Rule API
 
@@ -104,8 +104,7 @@ proxied mutations are authorized against the caller's partition scopes.
 
 ### 1.5 Known gaps
 
-- TODO(security): add OIDC identities so partition ownership can come from the IdP instead of a
-  static token file;
+- partition ownership comes from the static token file, not OIDC identities;
 - no partition validation beyond the URL path;
 - no dry-run/backtest API;
 - no rule evaluation history/audit;
@@ -127,7 +126,7 @@ proxied mutations are authorized against the caller's partition scopes.
 - widget queries with datasource (`prometheus`, `loki`, `tempo`, `native_logs`, `native_traces`);
 - visualization options (line/area/bars, stacked, exemplars, unit, decimals, thresholds, markdown).
 
-Seven built-in presets are compiled into the binary:
+Eight built-in presets are compiled into the binary:
 
 1. Strata & Guardian Fleet Overview
 2. Service RED Overview (APM template)
@@ -136,6 +135,7 @@ Seven built-in presets are compiled into the binary:
 5. ClickHouse - Health & Status
 6. Doctor Self-Observability
 7. AWS CloudWatch & X-Ray Federation
+8. GCP Cloud Monitoring & Trace Federation
 
 Built-ins are read-only and take precedence over stored documents with the same ID. The UI “clone”
 action creates an editable copy with `builtIn:false`.
@@ -158,7 +158,8 @@ flowchart LR
   CAS write; map conflict to `ErrConflict`.
 - `Delete`: refuse built-in; expected latest version; CAS delete; `ErrNotFound` if absent.
 - `ListVersions`: returns file version history.
-- Import: accepts a single document or a bundle; writes each with empty expected version (latest).
+- Import: accepts a single document or a bundle; writes each with `absent` for new IDs or the
+  existing latest version ID as the CAS precondition.
 - Export: returns a bundle JSON/YAML with optional ID filter.
 
 ### 2.3 HTTP handlers
@@ -173,9 +174,11 @@ flowchart LR
 | POST | `/v1/dashboards/import` | import document/bundle |
 | GET | `/v1/dashboards/export` | export bundle |
 
-Dashboard storage still has no per-tenant or per-user authorization: any caller that passes the
-general auth middleware can read or write any tenant path. Writes are attributed to
-`doctor-query`, not the end user. (Recording rules are separately scoped per partition.)
+Dashboard storage has no per-tenant or per-user ACL: the tenant path is not an authorization
+boundary. When the repo policy gate is enforcing, reads require partition visibility and writes
+require maintainer/admin on every effective partition; legacy documents without `partitions` stay
+readable and are writable only by an admin. Writes are attributed to `doctor-query`, not the end user.
+(Recording rules are separately scoped per partition.)
 
 ### 2.4 UI render flow
 
@@ -197,8 +200,8 @@ general auth middleware can read or write any tenant path. Writes are attributed
 
 ### 2.5 Known gaps
 
-- no per-user dashboard permissions or audit;
-- import uses no CAS precondition, so concurrent imports can overwrite;
+- no per-user dashboard permissions or audit of individual saves (partition RBAC only);
+- bundle import preflights authorization but can partially fail on a mid-import CAS conflict;
 - built-in preset IDs cannot be overridden by stored documents;
 - dashboard save is attributed to the service principal;
 - no server-side dashboard rendering/templating; all interpolation is client-side;

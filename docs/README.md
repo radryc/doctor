@@ -95,7 +95,7 @@ Runtime requirements observed in code:
 
 | Service | Required configuration | Listens on |
 |---|---|---|
-| `doctor-ingest` | `DOCTOR_MONOFS_LOGENGINE_ADDR`, `DOCTOR_PRIVACY_HMAC_KEY`, `DOCTOR_INGEST_TOKENS_FILE` (or `DOCTOR_INGEST_AUTH_TOKEN`) | gRPC `:4317`, HTTP `:4318`, pprof `127.0.0.1:6060` |
+| `doctor-ingest` | `DOCTOR_MONOFS_LOGENGINE_ADDR`, `DOCTOR_PRIVACY_HMAC_KEY`, `DOCTOR_INGEST_TOKENS_FILE` (or `DOCTOR_INGEST_AUTH_TOKEN`) | gRPC `:4317`, HTTP `:4318`, pprof `127.0.0.1:6060` when enabled |
 | `doctor-query` | `DOCTOR_MONOFS_LOGENGINE_ADDR` | HTTP `:18080` |
 | `doctor-rules` | `DOCTOR_MONOFS_LOGENGINE_ADDR`, `DOCTOR_MONOFS_TOKEN`, `DOCTOR_RULES_TOKENS_FILE` (or `DOCTOR_RULES_API_TOKEN`) | HTTP `:18081` |
 | `doctor-sentinel` | none for in-memory dev; `DOCTOR_MONOFS_LOGENGINE_ADDR` + `DOCTOR_MONOFS_TOKEN` for durable MonoFS state | HTTP `:18082` |

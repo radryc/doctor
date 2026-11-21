@@ -34,9 +34,8 @@ alert state, receiver config, and the delivery outbox in MonoFS.
 The push and pull Guardian sources are independent. Enable the pull source
 (`DOCTOR_SENTINEL_GUARDIAN_ENABLED`) when Guardian's own notification evaluator
 is not already forwarding `partition.failing` events to Sentinel; otherwise the
-same incident appears under both alert names. The pull source is the recommended
-default because it also covers partitions whose Guardian notification state is
-missing or stale.
+same incident appears under both alert names. The pull source is the recommended configuration because
+it also covers partitions whose Guardian notification state is missing or stale.
 
 ## Alertmanager-compatible API
 
@@ -353,8 +352,7 @@ Capabilities are checked server-side. Unauthorized partitions return 404.
 - Admin: partition-wide silences, source policy, receivers, retries, broadcasts.
 
 `doctor-query` forwards identity headers to Sentinel. `DOCTOR_SENTINEL_AUTH_ALLOW_ALL`
-defaults to `true` in `config.LoadSentinel` for local development; set it to `false` in
-production.
+defaults to `false` in `config.LoadSentinel`; set it to `true` only for local development.
 
 ## GoAlert receiver
 

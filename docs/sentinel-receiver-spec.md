@@ -1,6 +1,6 @@
 # Sentinel receiver integration spec
 
-Status: current as of Doctor `v0.6.0`
+Status: current wire contract for Doctor Sentinel.
 Audience: teams building an HTTP endpoint that receives Doctor/Sentinel alerts.
 
 This document is the contract between Doctor Sentinel (producer) and a receiver
@@ -11,7 +11,8 @@ This document is the contract between Doctor Sentinel (producer) and a receiver
 ## 1. What you are building
 
 A receiver is an HTTP endpoint that accepts a JSON `Alert` document, verifies
-its signature, and returns `2xx`.
+its signature, and returns `2xx`. Incident-capable receivers receive
+`doctor.incident/v1` events through the same endpoint and signature scheme.
 
 Doctor ships eight built-in receiver types (`webhook`, `slack`, `goalert`, `pagerduty`, `teams`, `zoom`, `android`, `fcb`); the primary alert-webhook and push transports are:
 
@@ -367,31 +368,19 @@ curl -i -X POST http://localhost:8080/sentinel \
 
 If your team owns Sentinel and needs a transport other than `webhook`:
 
-1. Add a case in `internal/alerting/delivery.go`:
+1. Add a sender under `internal/delivery/` implementing `delivery.Sender`
+   (`Type`, `Kinds`, `Validate`, `Send`). See [receiver-plugins.md](receiver-plugins.md).
+2. Register it in `delivery.DefaultRegistry()` or from an `init()` with
+   `delivery.Register(...)`.
+3. Add the type to `docs/alerts.md` and a unit test under `internal/delivery/`.
 
-   ```go
-   func (d *Dispatcher) send(ctx context.Context, receiver Receiver, alert Alert) error {
-       switch strings.ToLower(strings.TrimSpace(receiver.Type)) {
-       // …
-       case "myproto":
-           return d.sendMyProto(ctx, receiver, alert)
-       }
-   }
-   ```
+The dispatcher resolves the sender from the registry, so no switch in
+`internal/alerting/delivery.go` needs to change. Use `Runtime.postSigned` (or
+`postSignedTo` for runtime-configured endpoints) so timeout, body limits, and
+HMAC headers stay consistent; it resolves `secretEnv` through
+`receiver.SecretValue()`.
 
-2. Implement:
-
-   ```go
-   func (d *Dispatcher) sendMyProto(ctx context.Context, receiver Receiver, alert Alert) error
-   ```
-
-   Use `receiverSecret(receiver)` for the secret, `d.do(req)` for the request so
-   timeout, body limits, and error formatting stay consistent.
-
-3. Add the type to `docs/alerts.md` and a unit test alongside the other
-   `sendX` tests.
-
-The receiver-side contract for a new type is whatever `sendMyProto` emits; the
+The receiver-side contract for a new type is whatever the sender emits; the
 rest of this spec (retry, signatures where applicable, at-least-once) still
 applies.
 

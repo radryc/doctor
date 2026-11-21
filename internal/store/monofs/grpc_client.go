@@ -131,6 +131,7 @@ func NewGRPCClient(ctx context.Context, cfg ClientConfig) (*GRPCClient, error) {
 	conn, err := grpc.NewClient(
 		cfg.RouterAddr,
 		grpc.WithTransportCredentials(creds),
+		grpc.WithPerRPCCredentials(bearerToken{token: cfg.Token}),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(256*1024*1024),
 			grpc.MaxCallSendMsgSize(256*1024*1024),
@@ -633,6 +634,7 @@ func (c *GRPCClient) refreshNodes(ctx context.Context) error {
 		nodeConn, dialErr := grpc.NewClient(
 			address,
 			grpc.WithTransportCredentials(c.creds),
+			grpc.WithPerRPCCredentials(bearerToken{token: c.token}),
 			grpc.WithDefaultCallOptions(
 				grpc.MaxCallRecvMsgSize(256*1024*1024),
 				grpc.MaxCallSendMsgSize(256*1024*1024),

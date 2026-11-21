@@ -12,6 +12,7 @@ main.tsx
      -> HashRouter
         -> AppLayout
            -> TimeRangeProvider
+           -> RequestActivityProvider
            -> InspectorProvider
            -> Sidebar / TopBar / CommandPalette / InspectorDrawer
            -> route element
@@ -24,8 +25,8 @@ main.tsx
   `refreshTick`.
 - `InspectorProvider` opens a right-hand drawer for traces, logs, services, or rollouts.
 - `AppLayout` installs keyboard shortcuts: `Cmd/Ctrl+K` or `/` opens the command palette; `g` then
-  `d/b/s/r/t/l/m/f/p` navigates to on-call/dashboards/services/rules/traces/logs/metrics/fleet/
-  synthetics.
+  `d/b/s/r/t/l/m/f/p/a` navigates to on-call/dashboards/services/rules/traces/logs/metrics/fleet/
+  synthetics/alerts.
 - `TopBar` fetches `/v1/ui/user` and shows the display identity; it also links `/auth/logout`.
 - `FederationStatusPill` polls federation status for the top bar.
 
@@ -42,7 +43,7 @@ main.tsx
 | `/services/:name` | `ServicesPage` detail | `/v1/services/discover`, Prometheus, Tempo metrics, logs, traces |
 | `/federation` | `FederationCatalogPage` | `/v1/federation/status`, `/v1/federation/targets` |
 | `/probes` | `ProbesPage` | `/v1/guardian/probes` |
-| `/rules` | `RecordingRulesPage` | `/v1/rules`, `/v1/rules/status`, `/v1/rules/{tenant}/{group}`, evaluate |
+| `/rules` | `RecordingRulesPage` | `/v1/rules`, `/v1/rules/status`, `/v1/rules/{partition}/{group}`, evaluate |
 | `/quota` | `QuotaPage` | `/v1/quota` |
 | `/alerts`, `/alerts/*` | `AlertsPage` | `/v1/alerts*`, `/v1/alerts/inventory`, `/v1/alerts/routing/overview` |
 | `/traces` | `TracesPage` | `/v1/traces/recent`, `/v1/logs/services`, `/v1/traces/{id}` |
@@ -175,7 +176,7 @@ main.tsx
 - shows asset counts, health score, recommendation, recent events;
 - “copy diagnostics” builds a text bundle.
 
-`PartitionAssetsPage` (3k+ lines):
+`PartitionAssetsPage`:
 
 - loads partition topology, builds intents/assets, then on asset selection loads:
   - key metric discovery and a key metric chart;
@@ -242,8 +243,8 @@ health rules, traces, logs, graphs).
 
 ## 6. UI gaps and risks
 
-- No frontend tests, lint script, or CI build step. The `frontend` npm scripts are dev/build/preview
-  only.
+- No lint script; CI runs `npm run build`, `npm test` (Vitest), and `npm run typecheck` (see
+  `.github/workflows/tests.yml`).
 - `TopBar` and `AppLayout` links point to `/traces`, `/logs`, `/metrics`, `/services`, `/dashboards`, `/rules`, `/alerts`, `/incidents`, `/quota`, `/sql`, `/fleet`, `/probes`, `/federation`.
 - `PartitionAssetsPage`, `HubDetailView`, and `FleetDashboard` contain duplicated fetching and
   asset-detail logic; many effects are independent and can issue overlapping requests.

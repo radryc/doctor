@@ -276,6 +276,7 @@ func (u *GCPUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 		if partition != "" {
 			resource[telemetrylabels.GuardianPartition] = partition
 		}
+		traceID, spanID := gcpTraceSpan(attrs)
 		out = append(out, segment.LogRecord{
 			Tenant:             tenant,
 			Service:            resource["service.name"],
@@ -283,6 +284,8 @@ func (u *GCPUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 			Timestamp:          record.Timestamp,
 			SeverityText:       record.Severity,
 			Body:               record.Message,
+			TraceID:            traceID,
+			SpanID:             spanID,
 			ResourceAttributes: resource,
 			Attributes:         attrs,
 		})
@@ -291,6 +294,57 @@ func (u *GCPUpstream) QueryLogs(ctx context.Context, tenant string, pushdown Log
 		out = u.FilterLogs(ctx, out)
 	}
 	return out, nil
+}
+
+// gcpTraceSpan resolves the trace and span IDs carried by a Cloud Logging
+// record. Cloud Logging puts the canonical trace in the top-level `trace`
+// field ("projects/<project>/traces/<id>"), while applications commonly repeat
+// it in jsonPayload as `traceId`/`trace_id`. Both are normalized to the bare
+// trace ID used by the trace APIs and the Doctor UI.
+func gcpTraceSpan(attrs map[string]string) (string, string) {
+	var traceID, spanID string
+	for _, key := range []string{"trace", "traceId", "trace_id", "logging.googleapis.com/trace"} {
+		raw := strings.TrimSpace(attrs[key])
+		if raw == "" {
+			continue
+		}
+		if id, span := normalizeGCPTraceReference(raw); id != "" {
+			traceID = id
+			if span != "" {
+				spanID = span
+			}
+			break
+		}
+	}
+	if spanID == "" {
+		for _, key := range []string{"spanId", "span_id", "logging.googleapis.com/spanId"} {
+			if raw := strings.TrimSpace(attrs[key]); raw != "" {
+				spanID = raw
+				break
+			}
+		}
+	}
+	return traceID, spanID
+}
+
+// normalizeGCPTraceReference converts the trace formats found in Cloud
+// Logging into a bare trace ID plus an optional span ID:
+//
+//	projects/<project>/traces/<trace>
+//	00-<trace>-<span>-01          (W3C traceparent)
+//	<trace>
+func normalizeGCPTraceReference(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	if idx := strings.LastIndex(raw, "/traces/"); idx >= 0 {
+		return strings.TrimSpace(raw[idx+len("/traces/"):]), ""
+	}
+	if parts := strings.Split(raw, "-"); len(parts) == 4 && len(parts[1]) == 32 && len(parts[2]) == 16 {
+		return parts[1], parts[2]
+	}
+	return raw, ""
 }
 
 // gcpLogQuery extracts a log name and a Cloud Logging filter from a LogQL

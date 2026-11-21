@@ -80,7 +80,7 @@ OTLP gRPC and HTTP require a bearer token:
 - Optional collector mTLS is available: `DOCTOR_INGEST_MTLS_MODE` (`off`/`optional`/`require`) plus
   `DOCTOR_INGEST_MTLS_CA_FILE`, with `DOCTOR_GRPC_MTLS_*` / `DOCTOR_HTTP_MTLS_*` overrides. mTLS is
   transport authentication in addition to the bearer token; it does not replace tenant scoping.
-  TODO(security): add OIDC workload identity as an alternative to client certificates;
+  OIDC workload identity is not implemented as an alternative to client certificates.
 
 Example `DOCTOR_INGEST_TOKENS_FILE`:
 
@@ -112,9 +112,8 @@ exposed, heap profiles can leak telemetry and tokens in memory.
 2. break-glass static token when `DOCTOR_BREAK_GLASS_TOKEN` is set.
 
 If neither is configured, `NewVerifier` returns `(nil, nil)` and the middleware is a pass-through
-(`internal/auth/auth.go:39-67`). `DOCTOR_AUTH_REQUIRE` defaults to `true`, so a configured verifier rejects
-anonymous callers unless explicitly disabled
-(`internal/config/config.go:310`).
+(`internal/auth/auth.go`). `DOCTOR_AUTH_REQUIRE` defaults to `true`, so a configured verifier
+rejects anonymous callers unless explicitly disabled (`internal/config/config.go`).
 
 OIDC details (from the shared MonoFS `authz` package):
 
@@ -169,13 +168,13 @@ client-supplied copies of the header. If exposed directly, any caller can claim 
 The authorizer is `ruler.ScopedRulesAuthorizer`, which enforces per-partition read/write scopes.
 The query service’s rules proxy injects the service token alongside a short-lived HMAC-signed
 `X-Doctor-Identity` header (`DOCTOR_INTERNAL_IDENTITY_SECRET`), so proxied writes are
-authorized against the caller's partition scopes rather than the service credential.
-Residual risk: there is no rule-mutation audit trail yet.
+authorized against the caller's partition scopes rather than the service credential. Rule mutations
+hit `/v1/rules` and are audited by `internal/auditlog.MutationMiddleware` (see §7).
 
 ### 2.6 Federation controller and CLIs
 
 - `doctor-federation-controller` authenticates to Guardian with
-  `X-Guardian-Internal-Token` (`internal/federation/guardian_feed.go:141-160`) and to MonoFS with a
+  `X-Guardian-Internal-Token` (`internal/federation/guardian_feed.go`) and to MonoFS with a
   bearer token.
 - `doctor-federation-publish`/`controller` still accept `--monofs-token` and `--guardian-token`
   flags (`cmd/doctor-federation-*/main.go`), but both default to `DOCTOR_MONOFS_TOKEN` and
@@ -194,8 +193,10 @@ Residual risk: there is no rule-mutation audit trail yet.
   `insecure.NewCredentials()` unless `DOCTOR_MONOFS_TLS_REQUIRE=true`. A bearer token is never
   attached to an implicit plaintext connection: explicit local opt-outs are
   `DOCTOR_MONOFS_TLS_REQUIRE=false` or `DOCTOR_MONOFS_TLS_INSECURE=true`.
-- The file-store client sends the MonoFS token as `x-monofs-internal` metadata for node reads.
-- `LogEngineClient` accepts a token via `NewLogEngineClientWithToken` (`DOCTOR_MONOFS_TOKEN`).
+- The file-store client sends the MonoFS token as per-RPC `authorization: Bearer` metadata on
+  router and node connections, and keeps `x-monofs-internal` for node reads.
+- `LogEngineClient` accepts a token via `NewLogEngineClientWithToken` (`DOCTOR_MONOFS_TOKEN`) and
+  sends it as per-RPC `authorization: Bearer` metadata; MonoFS applies the caller's partition scope.
 
 ### 2.8 Doctor self-telemetry
 
@@ -282,14 +283,15 @@ scoping) but are never anonymous public data.
 | Native traces/logs | OIDC/bearer if configured | policy logs/traces; service catalog filter | |
 | Native metrics `/v1/metrics/range` | OIDC/bearer if configured | none | raw metric data |
 | Service discovery `/v1/services/*` | OIDC/bearer if configured | policy partition filter when enforced | otherwise all |
-| Dashboards `/v1/dashboards*` | OIDC/bearer if configured | **no tenant/user ACL** | any authenticated caller can read/write any tenant |
+| Dashboards `/v1/dashboards*` | OIDC/bearer if configured | partition role checks when policy enforced; **no tenant/user ACL** | writes require maintainer/admin on every declared partition; tenant path itself is not an ACL |
 | Rules proxy `/v1/rules*` | OIDC/bearer if configured | forwards signed `X-Doctor-Identity` | `doctor-rules` enforces per-partition scopes |
-| Rules API `:18081` | bearer/OIDC | per-partition token scopes or signed caller identity | legacy admin token is all-or-nothing |
+| Rules API `:18081` | bearer token | per-partition token scopes or signed caller identity | legacy admin token is all-or-nothing |
 | Federation status/targets | OIDC/bearer if configured | partition filter only when policy enforced | account/region metadata visible |
 | Federation plan | OIDC/bearer if configured | admin only when policy enforced | open otherwise |
 | Proxy endpoints | OIDC/bearer if configured | per-item access decision (`SummarizeEndpointsFor`) | |
 | Guardian proxy endpoints | OIDC/bearer if configured | caller token forwarded to Guardian | Guardian enforces its ACL |
 | pprof on ingest | none | localhost-only by default (`127.0.0.1:6060`) | disable by setting `DOCTOR_DEBUG_ADDR=""` |
+| pprof on query | bearer/OIDC when configured | none | registered on the main query listener, so it follows the normal auth chain |
 | MonoFS file store | token | MonoFS-side authz | TLS/mTLS via `DOCTOR_MONOFS_TLS_*` |
 | MonoFS log-engine | optional token (`DOCTOR_MONOFS_TOKEN`) | MonoFS-side authz | TLS/mTLS via `DOCTOR_MONOFS_TLS_*` |
 
@@ -300,12 +302,12 @@ scoping) but are never anonymous public data.
 | Secret | Where configured | Where used | Protection |
 |---|---|---|---|
 | Privacy HMAC key | `DOCTOR_PRIVACY_HMAC_KEY` | ingest tokenization | env only; no rotation/version |
-| MonoFS file token | `DOCTOR_MONOFS_TOKEN`, flags | query/rules/controller file store | env or CLI flag; sent as metadata; no TLS |
-| MonoFS log-engine access | (none) | ingest/query/rules | network-only |
+| MonoFS file token | `DOCTOR_MONOFS_TOKEN`, flags | query/rules/controller/sentinel file store | env or CLI flag; sent as per-RPC bearer metadata; TLS/mTLS via `DOCTOR_MONOFS_TLS_*`, required by default when the token is set |
+| MonoFS log-engine access | `DOCTOR_MONOFS_TOKEN` | ingest/query/rules | bearer metadata to the router; TLS/mTLS via `DOCTOR_MONOFS_TLS_*` |
 | OIDC client secret | `DOCTOR_OIDC_CLIENT_SECRET` | browser code exchange | env |
 | OIDC session cookie | `doctor_session` | browser auth; forwarded to Guardian | HttpOnly/SameSite/Secure-on-HTTPS; contains raw id_token |
 | Break-glass token | `DOCTOR_BREAK_GLASS_TOKEN` | query verifier | env; constant-time compare in verifier |
-| Guardian internal token | `DOCTOR_GUARDIAN_TOKEN` / `DOCTOR_ACCESS_POLICY_TOKEN` / flags | controller feed, token resolver, discovery | env or CLI flag; `X-Guardian-Internal-Token` |
+| Guardian internal token | `DOCTOR_GUARDIAN_TOKEN` / `DOCTOR_ACCESS_POLICY_TOKEN` / flags | controller feed, token resolver, discovery | env or CLI flag; `X-Guardian-Internal-Token`; raw pusher tokens are only returned with `includeTokens=1` plus this token |
 | AWS pusher tokens | Guardian feed → token bundle / resolver | query → pusher | AES-256-GCM encrypted in MonoFS token shards (`DOCTOR_FEDERATION_TOKEN_KEY`) or lazy fetch |
 | Access policy fetch token | `DOCTOR_ACCESS_POLICY_TOKEN` | policy bundle fetch | bearer |
 | Grafana/other backend tokens | static backend file `token` | proxy upstreams | plaintext YAML file, bearer over HTTP |
@@ -356,8 +358,8 @@ integration, rotation, or audit.
 
 ## 5. Data protection and transport
 
-- **HTTP/gRPC TLS is configurable** for ingest, query, and rules (`DOCTOR_TLS_*`,
-  `DOCTOR_GRPC_TLS_*`). It is not enabled by default.
+- **HTTP/gRPC TLS is configurable** for ingest, query, rules, and sentinel (`DOCTOR_TLS_*`,
+  `DOCTOR_GRPC_TLS_*`, `DOCTOR_SENTINEL_TLS_*`). It is not enabled by default.
 - **MonoFS TLS/mTLS is configurable** via `DOCTOR_MONOFS_TLS_*`. TLS is required by default when a
   MonoFS token is configured, and bearer credentials are not attached to implicit plaintext
   connections. Local development can opt out explicitly with `DOCTOR_MONOFS_TLS_REQUIRE=false` or
@@ -395,19 +397,24 @@ Missing or weak controls:
 - pprof defaults to localhost but remains unauthenticated if exposed;
 - Guardian topology fetches are capped at 8 concurrent requests;
 - trace discovery caches are capped at 10k entries per map and prune expired entries;
-- service discovery scans up to 5k traces + 5k logs + 10k metric points per call with no cache;
+- service discovery scans up to 5k traces + 5k logs + 10k metric points per call with no cache
+  (or 1k records per catalog partition when a policy catalog is available);
 - federation status/target list can serialize large metadata if `include_metadata=true`;
 - dashboard/rule import body limits are 16 MiB / 4 MiB but parsing can be expensive.
 
 ## 7. Audit and logging
 
-- `X-Request-ID` propagation and structured mutation audit events cover query-plane mutations
-  (`internal/query/audit.go`).
+- `X-Request-ID` propagation and structured audit events cover query-plane mutations and telemetry
+  reads (`internal/query/audit.go`); `GET /v1/audit/events` reads them back (audit or admin scope).
+  Events go to `DOCTOR_AUDIT_LOG` when set, otherwise to the process log unless
+  `DOCTOR_AUDIT_ENABLED=false`.
+- `doctor-sentinel` mutations and `doctor-rules` rule mutations are audited by
+  `internal/auditlog.MutationMiddleware`.
 - Query authorization decisions are logged by the legacy gate and policy gate (observe/enforce,
   subject, endpoint, reason).
 - Policy refresh/load failures are logged.
 - Remaining audit gaps:
-  - `doctor-rules` rule evaluations/mutations (when called directly) and `doctor-federation-controller` publishes;
+  - `doctor-federation-controller` publishes;
   - break-glass token use;
   - `doctor-ingest` per-request access log.
 - 5xx handler responses are sanitized behind a generic error envelope with `requestId` (`internal/query/errors_test.go`); some 4xx handlers still return raw error text.
@@ -454,7 +461,8 @@ Tenant is not an isolation boundary:
   is scoped to `DOCTOR_INGEST_ALLOWED_TENANTS`;
 - query enforces `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` via `TenantGuard` when configured;
 - MonoFS log-engine ignores the tenant parameter (`internal/store/monofs/logengine_client.go`);
-- dashboards/rules use tenant only as a path segment with no ACL;
+- dashboards use tenant and rules use partition only as a path segment with no ACL (rules still
+  enforce per-partition token scopes);
 - the policy is partition-based; a user with access to a partition can query it regardless of tenant;
 - metrics are global by design.
 
@@ -482,7 +490,7 @@ risks after the remediation pass; the second lists findings that were fixed in c
 | # | Severity | Finding | Evidence | Impact | Next step |
 |---|---|---|---|---|---|
 | 1 | **High** | Tenant is not a storage isolation boundary; MonoFS ignores tenant | `internal/store/monofs/logengine_client.go`; query `tenantFromRequest` | cross-tenant reads/writes if `TenantGuard` / partition ACL is misconfigured | bind tenant to identity and storage keys, or use single-tenant deployment |
-| 2 | **High** | Dashboards have no per-user/per-tenant authorization | `internal/query/dashboards_handlers.go`, `internal/dashboards/store.go` | any authenticated user can alter any tenant’s dashboards | add tenant/OWNERS authorization for dashboard reads and writes |
+| 2 | **High** | Dashboards have no per-user/per-tenant authorization; only partition-role checks | `internal/query/dashboards_handlers.go`, `internal/dashboards/store.go` | a user with maintainer on the declared partitions can alter dashboards regardless of tenant; legacy documents without partitions are admin-write-only | add tenant/OWNERS authorization for dashboard reads and writes |
 | 3 | **Accepted** | Metrics are globally readable by authenticated callers; telemetry APIs are not public | `internal/auth/auth.go`; `policy.CanReadSignal(SignalMetrics)` | any authenticated caller can see every partition's metrics; no anonymous metric data | no per-partition metric scoping. Grafana must send a bearer token; `/api/v1/status/buildinfo`, health, and the scrape endpoint stay exempt |
 | 4 | **Medium** | Secrets can be passed as federation CLI flags | `cmd/doctor-federation-controller/main.go`, `cmd/doctor-federation-publish/main.go` | process-list/audit leakage | remove flags or read from files/stdin; prefer env/secret mounts |
 | 5 | **Medium** | No retention/compaction control, key rotation, or secret-manager integration | federation token key, privacy HMAC key, MonoFS storage | unbounded data growth; weak key lifecycle | key versioning/rotation, secret manager, MonoFS-owned retention policy (Doctor only enforces per-partition admission) |
@@ -545,8 +553,9 @@ Use this as the minimum for an Internet-reachable deployment:
 - [ ] Set `DOCTOR_FEDERATION_TOKEN_KEY` and store it in a secret manager; the controller refuses to
       publish plaintext tokens.
 - [ ] Restrict egress from Doctor to known Guardian/pusher/MonoFS/IdP hosts.
-- [ ] Add body limits where missing, request IDs, and structured audit logs.
-- [ ] Add per-tenant/per-user authorization and CSRF protection for dashboards and rules.
+- [ ] Confirm request body limits, `X-Request-ID`, and audit-log retention (`DOCTOR_AUDIT_LOG`).
+- [ ] Add per-tenant/per-user authorization for dashboards (partition RBAC and same-origin mutation
+      checks already apply).
 - [ ] Keep the runtime non-root and add a read-only root filesystem/network policy.
 - [ ] Set `DOCTOR_MEMORY_LIMIT_BYTES` from the container limit instead of relying on the default.
 - [ ] Protect `/metrics` with network policy if it cannot be public; `/ready` now checks the log

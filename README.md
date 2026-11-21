@@ -2,8 +2,8 @@
 
 Doctor is a self-hosted observability data plane and query gateway. It receives OpenTelemetry
 telemetry, stores it through MonoFS, and serves Prometheus-, Loki-, and Tempo-compatible APIs plus an
-embedded React UI. It also federates AWS CloudWatch/X-Ray data from Guardian-managed pushers and can
-proxy other observability backends.
+embedded React UI. It also federates AWS CloudWatch/X-Ray and GCP Cloud Monitoring/Trace data from
+Guardian-managed pushers and can proxy other observability backends.
 
 ## Documentation
 

@@ -82,7 +82,7 @@ func (g *GuardianFeed) Pushers(ctx context.Context) ([]PusherInfo, map[string]st
 	tokens := make(map[string]string)
 	cursor := ""
 	for pageNumber := 0; pageNumber < 10000; pageNumber++ {
-		requestURL := g.BaseURL + "/api/m2m/pushers?limit=2000"
+		requestURL := g.BaseURL + "/api/m2m/pushers?limit=2000&includeTokens=1"
 		if cursor != "" {
 			requestURL += "&cursor=" + url.QueryEscape(cursor)
 		}
