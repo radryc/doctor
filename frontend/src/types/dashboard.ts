@@ -97,6 +97,8 @@ export interface DashboardDocument {
   layout?: DashboardWidget[];
   /** Partitions this dashboard affects. Write access requires maintainer/admin on each. */
   partitions?: string[];
+  /** Presentation profile pinned when this dashboard is opened. */
+  displayProfile?: string;
   meta?: DashboardMeta;
 }
 
