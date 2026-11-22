@@ -47,6 +47,7 @@ type Alert struct {
 	EndsAt          *time.Time        `json:"endsAt,omitempty"`
 	Value           string            `json:"value,omitempty"`
 	Delivery        string            `json:"delivery"`
+	DisplayProfile  string            `json:"displayProfile,omitempty"`
 	// Notify lists explicit receiver names chosen for this alert (for example
 	// by dragging a rule onto a destination in the UI). It takes precedence
 	// over label routes and the default receiver.

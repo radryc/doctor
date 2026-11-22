@@ -44,6 +44,8 @@ type AlertSpec struct {
 	Summary       string       `json:"summary,omitempty" yaml:"summary,omitempty"`
 	RunbookURL    string       `json:"runbookUrl,omitempty" yaml:"runbookUrl,omitempty"`
 	Destinations  []string     `json:"destinations,omitempty" yaml:"destinations,omitempty"`
+	// DisplayProfile pins the presentation vocabulary for this alert's views.
+	DisplayProfile string `json:"displayProfile,omitempty" yaml:"displayProfile,omitempty"`
 }
 
 // SignalQuery describes one metric stream.

@@ -11,6 +11,22 @@ import (
 	shared "github.com/radryc/monofs/pkg/display"
 )
 
+func (s *Service) handleDisplayEffective(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	profile, version, err := s.displayProfiles.Resolve(r.Context(), displaySubjects(r), "")
+	if err != nil || profile == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"profile": ""})
+		return
+	}
+	if version != "" {
+		w.Header().Set(shared.VersionHeader, version)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"profile": profile.ID})
+}
+
 func (s *Service) handleDisplayProfiles(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -39,7 +55,7 @@ func (s *Service) withDisplayMapping(next http.Handler) http.Handler {
 		if requested == "" {
 			requested = strings.TrimSpace(r.URL.Query().Get(shared.QueryParam))
 		}
-		if requested == "" || !displaySurface(r.URL.Path) {
+		if !displaySurface(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
