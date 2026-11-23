@@ -19,7 +19,9 @@ main.tsx
 ```
 
 - Routing is hash-based (`HashRouter`), so links look like `#/logs?partition=...`.
-- `ConfigProvider` supplies `default_tenant`, `guardian_url`, and `default_partition`.
+- `ConfigProvider` supplies `default_tenant`, `guardian_url`, `default_partition`, and
+  `accessible_partitions` when the policy gate restricts the caller. The backend rewrites
+  `default_partition` to a visible partition (or empty) when the configured default is not readable.
 - `TimeRangeProvider` owns the global relative/absolute time window, auto-refresh interval, step
   interval, and refresh tick. Pages subscribe to `resolve()`, `rangeString()`, `stepInterval()`, and
   `refreshTick`.
@@ -28,6 +30,11 @@ main.tsx
   `d/b/s/r/t/l/m/f/p/a` navigates to on-call/dashboards/services/rules/traces/logs/metrics/fleet/
   synthetics/alerts.
 - `TopBar` fetches `/v1/ui/user` and shows the display identity; it also links `/auth/logout`.
+- `DisplaySwitcher` in the top bar loads `/v1/display-profiles`, falls back to
+  `/v1/display-profiles/effective` for the caller's default, and stores the selection in
+  `localStorage` (`strata.displayProfile` / `strata.displayKeys`). Requests then send
+  `X-Strata-Display-Profile` and `X-Strata-Display-Keep-Canonical: 1`; selecting “Canonical labels”
+  clears the local selection.
 - `FederationStatusPill` polls federation status for the top bar.
 
 ## 2. Routes
@@ -86,6 +93,9 @@ main.tsx
 - Browser view: list, search, open, clone, delete, import, export.
 - Viewer: loads document, renders variables and widgets; edit mode adds widget editor and layout
   controls; saves with `meta.versionId` as `If-Match`.
+- A dashboard may carry `partitions` (dashboard and per-widget narrowing) and `displayProfile`.
+  Opening a dashboard whose pinned profile differs from the local selection switches the profile and
+  reloads. Tenant listing includes `*` (wildcard/shared) dashboards for every tenant.
 - `DashboardWidgetCard` dispatches by widget kind:
   - markdown → static;
   - stat → Prometheus instant or Tempo metrics instant;

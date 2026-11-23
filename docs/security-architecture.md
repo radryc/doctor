@@ -252,7 +252,7 @@ subject to the legacy gate as well.
 `PolicyGate.FilterLogs`/`FilterSpans` evaluate a non-short-circuited policy decision in observe mode
 so `would_filter` metrics accurately reflect what enforcement would drop (`TestObserveModeReportsWouldFilter`).
 
-### 3.4 Default configuration is open
+### 3.4 Default configuration and tenant guard
 
 | Setting | Default | Consequence |
 |---|---|---|
@@ -260,6 +260,7 @@ so `would_filter` metrics accurately reflect what enforcement would drop (`TestO
 | `DOCTOR_OIDC_REQUIRE_LOGIN` | `false` | browser login not required |
 | `DOCTOR_ACCESS_MODE` | `enforce` | partition policy enforcement enabled |
 | `DOCTOR_ACCESS_TRUST_TENANT_HEADER` | `false` | tenant trust off |
+| `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` | empty | `TenantGuard` fails closed: with no allowlist and no single-tenant pin, only `DOCTOR_DEFAULT_TENANT` is accepted |
 | `DOCTOR_PROXY_ENABLED` | `true` | proxy fan-out enabled |
 | `DOCTOR_AWS_ENABLED` | `true` | AWS fallback enabled if a URL exists |
 | `DOCTOR_FEDERATION_ENABLED` | `false` | federation off |
@@ -301,7 +302,7 @@ scoping) but are never anonymous public data.
 
 | Secret | Where configured | Where used | Protection |
 |---|---|---|---|
-| Privacy HMAC key | `DOCTOR_PRIVACY_HMAC_KEY` | ingest tokenization | env only; no rotation/version |
+| Privacy HMAC keys | `DOCTOR_PRIVACY_HMAC_KEY`, `DOCTOR_PRIVACY_KEY_ID`, `DOCTOR_PRIVACY_KEYS_JSON` | ingest tokenization and historical token verification | env only; versioned, multi-key rotation supported (tokens carry the key id); no secret-manager integration |
 | MonoFS file token | `DOCTOR_MONOFS_TOKEN`, flags | query/rules/controller/sentinel file store | env or CLI flag; sent as per-RPC bearer metadata; TLS/mTLS via `DOCTOR_MONOFS_TLS_*`, required by default when the token is set |
 | MonoFS log-engine access | `DOCTOR_MONOFS_TOKEN` | ingest/query/rules | bearer metadata to the router; TLS/mTLS via `DOCTOR_MONOFS_TLS_*` |
 | OIDC client secret | `DOCTOR_OIDC_CLIENT_SECRET` | browser code exchange | env |
@@ -317,9 +318,23 @@ scoping) but are never anonymous public data.
 At ingest, `internal/privacy`:
 
 - redacts values for sensitive keys and secret-looking values;
-- tokenizes email/user/account/client/IP values with HMAC-SHA256, truncated to 8 bytes;
-- tokenizes emails/IPs embedded in free text;
+- tokenizes email/user/account/client/IP values with HMAC-SHA256 truncated to a **128-bit** tag
+  (32 hex characters);
+- emits versioned tokens of the form `tok_v2_<keyid>_<32hex>`, so tokens minted under an older key
+  can still be verified after rotation;
+- tokenizes PII/PCI patterns embedded in free text: emails, IPv4 addresses, Luhn-valid payment-card
+  PANs, SSNs, phone numbers, IBANs (ISO 13616 mod-97), and ABA routing numbers (checksum);
+  CVV and date-of-birth patterns are redacted instead of tokenized;
 - preserves identity keys, including `service.name` and `guardian.*`.
+
+Key management:
+
+- `DOCTOR_PRIVACY_KEY_ID` selects the active key id (default `k1`);
+- `DOCTOR_PRIVACY_KEYS_JSON` supplies a JSON object of key id → secret for rotation and historical
+  verification; `DOCTOR_PRIVACY_HMAC_KEY` remains the single-key fallback and is registered as the
+  active key when absent from the map;
+- only the active key mints new tokens, while `VerifyToken` accepts any configured key id, so
+  rotation does not break correlation for historical data.
 
 Security properties:
 
@@ -327,10 +342,10 @@ Security properties:
 - identity keys are an explicit bypass;
 - tokenization is deterministic and stable for a key, so it preserves correlation but is
   pseudonymization, not anonymization;
-- the 64-bit token suffix has a non-trivial collision probability at very large volumes and low-entropy
-  inputs can be brute-forced if the HMAC key leaks;
-- the engine has no key rotation/versioning; rotating the key breaks correlation and requires
-  reprocessing;
+- the 128-bit tag removes the collision/brute-force concern of the earlier 64-bit suffix, but
+  low-entropy inputs can still be enumerated by anyone who obtains the HMAC key;
+- key material is still environment-only: there is no secret-manager integration, automatic
+  rotation schedule, or audit of key use;
 - nested OTLP maps/arrays are serialized to JSON text and then sanitized as text, which may miss
   structured fields or alter values.
 
@@ -407,7 +422,14 @@ Missing or weak controls:
 - `X-Request-ID` propagation and structured audit events cover query-plane mutations and telemetry
   reads (`internal/query/audit.go`); `GET /v1/audit/events` reads them back (audit or admin scope).
   Events go to `DOCTOR_AUDIT_LOG` when set, otherwise to the process log unless
-  `DOCTOR_AUDIT_ENABLED=false`.
+  `DOCTOR_AUDIT_ENABLED=false`; the shared `audit.events` ClickHouse table is populated through the
+  MonoFS audit emitter contract.
+- `GET /v1/audit/status` reports aggregate audit-pipeline health without event content.
+  `DOCTOR_AUDIT_CH_URL` enables the ClickHouse reader (`DOCTOR_AUDIT_CH_DATABASE` defaults to
+  `audit`; `DOCTOR_AUDIT_CH_USER` / `DOCTOR_AUDIT_CH_PASSWORD` are optional basic auth). The
+  endpoint returns 503 when the store is unreachable, when the newest event is more than 15 minutes
+  old (`maxEventAge`), or when a writer chain shows conflicting `(writer_id, seq)` sequences. The
+  same snapshot backs the Guardian probe.
 - `doctor-sentinel` mutations and `doctor-rules` rule mutations are audited by
   `internal/auditlog.MutationMiddleware`.
 - Query authorization decisions are logged by the legacy gate and policy gate (observe/enforce,
@@ -440,8 +462,8 @@ If an attacker can influence Guardian pusher metadata (or the static backend fil
 - PromQL/TraceQL parsing is stricter (Prometheus parser / custom subset), but expression text is
   forwarded to remote backends; those backends own their own parser.
 
-These require the ability to send a query to Doctor (any authenticated user, or anonymous if auth is
-not enforced), so they compound the “open by default” finding.
+These require the ability to send a query to Doctor (any authenticated user, or anonymous when no
+verifier is configured), so they compound the authentication gap on unconfigured deployments.
 
 ### 8.3 Header/metadata trust
 
@@ -459,7 +481,9 @@ Tenant is not an isolation boundary:
 
 - ingest binds per-collector tokens to tenants (`DOCTOR_INGEST_TOKENS_FILE`); the legacy shared token
   is scoped to `DOCTOR_INGEST_ALLOWED_TENANTS`;
-- query enforces `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` via `TenantGuard` when configured;
+- query enforces `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` via `TenantGuard`.
+  With neither configured the guard fails closed and accepts only `DOCTOR_DEFAULT_TENANT` (its
+  fallback is `default`); multi-tenant deployments must list tenants explicitly or use `*`;
 - MonoFS log-engine ignores the tenant parameter (`internal/store/monofs/logengine_client.go`);
 - dashboards use tenant and rules use partition only as a path segment with no ACL (rules still
   enforce per-partition token scopes);
@@ -493,9 +517,9 @@ risks after the remediation pass; the second lists findings that were fixed in c
 | 2 | **High** | Dashboards have no per-user/per-tenant authorization; only partition-role checks | `internal/query/dashboards_handlers.go`, `internal/dashboards/store.go` | a user with maintainer on the declared partitions can alter dashboards regardless of tenant; legacy documents without partitions are admin-write-only | add tenant/OWNERS authorization for dashboard reads and writes |
 | 3 | **Accepted** | Metrics are globally readable by authenticated callers; telemetry APIs are not public | `internal/auth/auth.go`; `policy.CanReadSignal(SignalMetrics)` | any authenticated caller can see every partition's metrics; no anonymous metric data | no per-partition metric scoping. Grafana must send a bearer token; `/api/v1/status/buildinfo`, health, and the scrape endpoint stay exempt |
 | 4 | **Medium** | Secrets can be passed as federation CLI flags | `cmd/doctor-federation-controller/main.go`, `cmd/doctor-federation-publish/main.go` | process-list/audit leakage | remove flags or read from files/stdin; prefer env/secret mounts |
-| 5 | **Medium** | No retention/compaction control, key rotation, or secret-manager integration | federation token key, privacy HMAC key, MonoFS storage | unbounded data growth; weak key lifecycle | key versioning/rotation, secret manager, MonoFS-owned retention policy (Doctor only enforces per-partition admission) |
+| 5 | **Medium** | No retention/compaction control for stored telemetry and no secret-manager integration for the federation token key | federation token key, MonoFS storage | unbounded data growth; federation token key has a weak lifecycle | add a secret manager and MonoFS-owned retention policy (Doctor only enforces per-partition admission); privacy keys already support versioned multi-key rotation |
 | 6 | **Low** | CI actions are not SHA-pinned | `.github/workflows/*` | supply-chain risk | pin action SHAs |
-| 7 | **Low** | HMAC token suffix is 64 bits | `internal/privacy/engine.go` | collisions/brute force at scale | use a longer suffix if correlation tokens are security-sensitive |
+| 7 | **Low** | Privacy HMAC keys are environment-only and rotation is manual | `internal/privacy/engine.go` | no automatic rotation/audit; a leaked key permits enumeration of low-entropy tokenized values | keep the active key id and previous keys in a secret manager and schedule rotation; tokens are now 128-bit and key-versioned |
 
 ### Fixed in the remediation pass
 

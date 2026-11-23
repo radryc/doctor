@@ -64,8 +64,11 @@ make image-all MONOFS_DIR=../monofs
 | `doctor-rules` | `DOCTOR_MONOFS_LOGENGINE_ADDR`, `DOCTOR_MONOFS_TOKEN`, `DOCTOR_RULES_TOKENS_FILE` (or `DOCTOR_RULES_API_TOKEN`) |
 | `doctor-sentinel` | none for in-memory dev; `DOCTOR_MONOFS_LOGENGINE_ADDR` + `DOCTOR_MONOFS_TOKEN` for durable MonoFS state |
 
-Authentication and access enforcement are opt-in and default to observe/open. Read
-[security-architecture.md](docs/security-architecture.md) before exposing any service to a network.
+Authentication is required by default once an OIDC or break-glass verifier is configured
+(`DOCTOR_AUTH_REQUIRE=true`), and partition access defaults to `DOCTOR_ACCESS_MODE=enforce`; with no
+policy source configured there is nothing to enforce. `observe` is an explicit validation opt-out.
+Read [security-architecture.md](docs/security-architecture.md) before exposing any service to a
+network.
 
 ## Transport security (TLS/mTLS)
 
@@ -102,13 +105,22 @@ existing `DOCTOR_MONOFS_TLS_*` variables; when none of them are set and
 minimum, client certificate when present). A bearer token is still refused over
 plaintext.
 
-Generate a local PKI and run the mTLS compose override:
+`STRATA_TLS_MODE=optional` is a migration mode: gRPC listeners use TLS when
+certificates are configured, but HTTP listeners stay plaintext unless a legacy
+certificate is supplied. Use `required` for an Internet-reachable deployment.
+
+Generate a local PKI and apply the checked-in mTLS override to your local base
+compose stack. The repository does not ship a root `docker-compose.yml`, so pass
+your own base file:
 
 ```bash
 (cd ../tlsx && go run ./cmd/tlsx gen --dir ../doctor/.tls --reuse-ca)
-docker compose -f docker-compose.yml \
+docker compose -f <your-base-compose.yml> \
   -f deploy/guardian/partitions/doctor-telemetry/docker-compose.mtls.yml up -d
 ```
+
+The override mounts per-service certificates under `/var/run/secrets/strata-tls`
+and sets `STRATA_TLS_MODE=required`; it is an override, not a standalone stack.
 
 The generated CA and 30-day leaf certificates are for local development and
 bootstrap only. Production replaces the local CA with cert-manager, Vault, or

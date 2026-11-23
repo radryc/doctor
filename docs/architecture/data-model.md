@@ -209,9 +209,23 @@ uint32 little-endian payload length | JSON batch
 - log batch: `{id, appended_at, records: [LogRecord]}`
 - metric batch: `{id, appended_at, records: [MetricPointRecord]}`
 
-`Replace` writes a temp file, fsyncs, and renames atomically. There is no checksum, version field, or
-segment rotation; the WAL is a single file per signal. Replay flushes to MonoFS then truncates the
-WAL.
+All three logs share the generic `commitLog[T]` implementation:
+
+- appends are **group-committed**: each appender writes its frame under the mutex and registers a
+  completion channel, but one goroutine performs the fsync for the whole pending generation;
+- flushed batches are retired by advancing a durable `.checkpoint` file (the byte offset to replay
+  from) instead of rewriting the WAL;
+- when the flushed dead prefix exceeds **64 MiB**, the live tail is compacted into a fresh file and
+  the checkpoint resets; arbitrary rewrites (`Replace`) still use a temp-file, fsync, and atomic
+  rename;
+- replay starts at the checkpoint, and a checkpoint past the file end is treated as stale and
+  ignored so it cannot hide data;
+- readers skip frames whose JSON payload cannot be decoded and stop cleanly on a truncated final
+  frame, so one corrupt frame does not block replay of later batches.
+
+There is still no frame checksum, format version, or per-segment rotation; the WAL is a single file
+per signal (plus its `.checkpoint`). Replay flushes to MonoFS, retires acknowledged batches, and
+compacts when the retained dead prefix exceeds the limit.
 
 ### Dashboards
 
@@ -222,10 +236,13 @@ version: doctor.dashboard/v1
 id: ...
 title: ...
 tenant: default
+partitions: [default, aws-prod]   # partitions the dashboard affects
+displayProfile: platform          # optional pinned presentation profile
 variables: [...]
 layout:
   - id: ...
     kind: timeseries|stat|toplist|gauge|table|logs|traces|topology|markdown
+    partitions: [aws-prod]        # optional per-widget narrowing
     gridPos: {x, y, w, h}
     queries:
       - refId: A
@@ -235,7 +252,10 @@ layout:
 ```
 
 Stored at `/doctor/v1/dashboards/<tenant>/<id>.yaml`. Built-in presets have tenant `*` and are
-read-only.
+read-only. Listing a tenant also includes `*` dashboards, so shared/wildcard dashboards appear for
+every tenant. `partitions` (dashboard level plus per-widget `EffectivePartitions`) drives
+partition-role write checks; `displayProfile` pins the presentation vocabulary used when the UI opens
+the dashboard. Sentinel alert rule specs carry the same `displayProfile` field for alert views.
 
 ### Rules
 
@@ -344,8 +364,9 @@ Doctor has a **tenant label**, not a tenant isolation boundary:
   HTTP header or gRPC metadata (ingest);
 - ingest restricts tenants to `DOCTOR_INGEST_ALLOWED_TENANTS` (default: the configured default
   tenant) and supports per-collector tenant scopes via `DOCTOR_INGEST_TOKENS_FILE`;
-- query enforces `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` via `TenantGuard`
-  when configured, and otherwise accepts any requested tenant;
+- query enforces `DOCTOR_QUERY_ALLOWED_TENANTS` / `DOCTOR_QUERY_SINGLE_TENANT` via `TenantGuard`.
+  The guard now fails closed: when neither variable is configured it accepts only
+  `DOCTOR_DEFAULT_TENANT` (or `default`), rejecting any other requested tenant with 403;
 - MonoFS log-engine ignores the tenant parameter entirely;
 - dashboards and rules use tenant/partition as a path segment; `doctor-rules` enforces per-partition
   token scopes (`DOCTOR_RULES_TOKENS_FILE`), and dashboards apply partition-role checks when the
