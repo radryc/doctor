@@ -38,8 +38,9 @@ postmortem:
   never open a critical incident.
 - Silenced alerts can open incidents only when `respectSilences` is false.
 - A set's `notify.receivers` must reference incident-capable receivers in the
-  partition routing document. Teams, Zoom Team Chat, and the Android webhook receiver are receiver types;
-  `urlEnv` keeps webhook credentials out of config.
+  partition routing document. The incident-capable types are `webhook`, `slack`, `teams`, `zoom`,
+  `android`, and `fcb` (`fcm-bridge`); GoAlert and PagerDuty are alert-only. `urlEnv` keeps webhook
+  credentials out of config.
 
 ## Lifecycle
 
@@ -125,8 +126,9 @@ options:
 ```
 
 Adding another engine requires implementing `incident.Engine` and registering
-it in `cmd/doctor-sentinel`; no frontend change is needed. Runtime integrations
-should use the generic webhook engine.
+it in `cmd/doctor-sentinel`; the built-ins are installed by
+`incident.NewEngineRegistry()` (builtin, webhook, Google Docs). No frontend
+change is needed. Runtime integrations should use the generic webhook engine.
 
 ## Notifications
 
@@ -154,9 +156,10 @@ POST            /v1/incidents/{id}/postmortem/analyze|publish
 GET             /v1/postmortem-engines
 ```
 
-Reads require `alerts.read`; ack/mitigate/resolve require `alerts.ack`; set,
-policy, and postmortem management require `alerts.rules.write`. All checks use
-the existing partition-scoped identity headers set by `doctor-query`.
+Reads require `alerts.read`; ack, mitigate, resolve, reopen, notes, and
+postmortem draft edits/analyze/publish require `alerts.ack`. Alert-set and
+partition-policy management require `alerts.rules.write`. All checks use the
+existing partition-scoped identity headers set by `doctor-query`.
 
 ## Operations
 

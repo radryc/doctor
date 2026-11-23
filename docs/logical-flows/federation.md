@@ -286,8 +286,11 @@ AWS.
 
 Potential issues:
 
-- `PrometheusSeries/Labels/LabelValues` build the plan from stripped selectors but forward the
-  original selectors to targets; Doctor-only labels can make CloudWatch reject the request.
+- `PrometheusSeries/Labels/LabelValues` strip Doctor-only target labels (`account`, `aws_account`,
+  `region`, `aws_region`, `partition`, `guardian_partition`) from `match[]` before forwarding to
+  CloudWatch, using `forwardedMatches`/`stripTargetLabels`. The planner still uses the original
+  labels to select targets; without the strip, `/series` and label discovery would fail for
+  federation-scoped selectors.
 - `ListMetrics` uses a per-catalog descriptor index. With descriptor metadata it preserves
   namespace identity; legacy `metric_names` metadata has no namespace and is deduped by
   account/region/name.
@@ -340,7 +343,7 @@ doctor-federation-build --input catalog-input.yaml --out snapshot.json
 # Publish a snapshot (optionally verify by reading it back).
 # Tokens and the router come from the environment by default; flags remain
 # available for compatibility but leak secrets into the process table.
-export DOCTOR_MONOFS_ROUTER_ADDR=monofs-router:9000
+export DOCTOR_MONOFS_ROUTER_ADDR=monofs-router:9000   # publish CLI also accepts DOCTOR_MONOFS_ROUTER
 export DOCTOR_MONOFS_TOKEN=...
 doctor-federation-publish \
   --file snapshot.json \
@@ -358,5 +361,7 @@ doctor-federation-controller --once --dry-run \
 `--expected-version` empty means “latest/absent” in `doctor-federation-publish`; the controller
 computes the expected manifest version itself.
 
+The controller reads the router only from `DOCTOR_MONOFS_ROUTER` (or `--monofs-router`);
+`DOCTOR_MONOFS_ROUTER_ADDR` is accepted by `doctor-federation-publish` but not by the controller.
 The controller reads `DOCTOR_FEDERATION_TOKEN_KEY` from the environment (not a CLI flag) to encrypt
 token shards.

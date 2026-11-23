@@ -146,6 +146,7 @@ X-Doctor-Signature: sha256=<hex>
   "endsAt": null,
   "value": "",
   "delivery": "sentinel",
+  "displayProfile": "platform",
   "createdAt": "2026-11-15T12:00:01Z",
   "updatedAt": "2026-11-15T12:00:01Z"
 }
@@ -163,6 +164,7 @@ Fields a receiver should rely on:
 | `labels.alertname` | Alert identity. |
 | `annotations.summary` / `description` | Human-readable text. |
 | `startsAt` / `endsAt` | RFC3339 UTC. `endsAt` is set on resolve. |
+| `displayProfile` | Optional presentation-profile id pinned by the alert rule or dashboard; treat it as a UI hint, not an authorization input. |
 | `acked` / `silenceIds` | Normally absent from delivered alerts (§6). |
 
 Treat unknown JSON fields as forward-compatible: ignore, do not reject.

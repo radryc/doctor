@@ -11,7 +11,9 @@
 | `:4318/v1/logs` | HTTP POST | OTLP/HTTP logs |
 | `:4318/v1/metrics` | HTTP POST | OTLP/HTTP metrics |
 | `:4318/v1/guardian/events` | HTTP POST | Guardian event JSON (not persisted, see below) |
+| `:4318/v1/quota/usage` | HTTP GET | quota enabled flag, usage snapshot, and policy readiness (bearer-protected) |
 | `:4318/healthz` | HTTP GET | constant `{"status":"ok"}` |
+| `:4318/metrics` | HTTP GET | Prometheus scrape endpoint (exempt from bearer auth) |
 | `:4318/api/v1/status/buildinfo` | HTTP GET | build metadata |
 | `:6060/debug/pprof/*` | HTTP | Go pprof on localhost by default (`127.0.0.1:6060`, if enabled) |
 
@@ -130,9 +132,11 @@ buffer is disabled the pipeline writes to MonoFS directly; set
 
 - `Append` reserves estimated bytes, appends a WAL batch, adds it to the in-memory list, and
   triggers a flush when the size/record threshold is crossed.
-- `Replay` iterates WAL batches, flushes in bounded chunks, then truncates the WAL.
-- `flushPending` snapshots the batches, clears the list, flushes, and rewrites the WAL with any
-  remaining batches. On a flush error, batches are restored.
+- `Replay` iterates WAL batches, flushes in bounded chunks, then retires all consumed batches
+  (`Retire(nil)`), which advances the durable checkpoint rather than rewriting the file.
+- `flushPending` snapshots the batches, clears the list, flushes, and retires the flushed batches;
+  any still-pending batch remains at or after the checkpoint. On a flush error, batches are
+  restored. Compaction happens inside `Retire` when the dead prefix exceeds 64 MiB.
 - `Stop` cancels the loop; the loop flushes pending batches with `context.Background()`.
 - The metric buffer splits large flushes into chunks; log/trace buffers send one call.
 

@@ -6,8 +6,11 @@ same query surface runs on either backend:
 
 | Backend | When | Semantics |
 |---|---|---|
-| DuckDB over Parquet | default `--spanengine=logengine` | each MonoFS node scans its local chunks; results are per-node partials |
-| ClickHouse | `--spanengine=clickhouse` | tables are shared; the router runs the statement once |
+| DuckDB over Parquet | MonoFS `--spanengine=logengine` (default) | each MonoFS node scans its local chunks; results are per-node partials |
+| ClickHouse | MonoFS `--spanengine=clickhouse` | tables are shared; the router runs the statement once |
+
+`--spanengine` is a **MonoFS router/server flag** (`monofs-router` / `monofs-server`, also
+`MONOFS_SPANENGINE`), not a Doctor flag. Doctor's SQL console only forwards the statement.
 
 Both backends use standard SQL string/identifier quoting, so most queries are
 portable. Backend-specific functions (JSON, time) are called out below.
@@ -125,6 +128,10 @@ FROM traces
 GROUP BY service
 ORDER BY spans DESC
 ```
+
+`countIf` is a **ClickHouse-only** aggregate. On DuckDB use
+`count(*) FILTER (WHERE status_code = 'STATUS_CODE_ERROR')` or
+`sum(CASE WHEN status_code = 'STATUS_CODE_ERROR' THEN 1 ELSE 0 END)`.
 
 Metric average:
 

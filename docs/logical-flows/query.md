@@ -6,8 +6,10 @@
 
 1. `config.LoadQuery`, OTel telemetry, heartbeat.
 2. Required MonoFS log-engine address → `LogEngineClient`.
-3. `query.NewServiceLogEngine`, then `SetTraceDiscoveryCacheTTL`, `SetTraceDiscoveryWindow`,
-   `SetTenantHeader`, Guardian URLs, default partition, rules URL/token/identity secret, Sentinel URL.
+3. `query.NewServiceLogEngine` (installs the ClickHouse audit reader from `DOCTOR_AUDIT_CH_*` and the
+   display-profile loader from `DOCTOR_DISPLAY_*`), then `SetTraceDiscoveryCacheTTL`,
+   `SetTraceDiscoveryWindow`, `SetTenantHeader`, Guardian URLs, default partition, rules
+   URL/token/identity secret, Sentinel URL.
 4. Shared file store:
    - if `DOCTOR_MONOFS_TOKEN` is set, connect `GRPCClient` (writable) and use it for dashboards;
    - if a file token is configured, a MonoFS connection failure is fatal;
@@ -46,13 +48,14 @@ flowchart LR
 |---|---|
 | `WebAuthenticator` | resolves `doctor_session` cookie (JWT verified, then opaque session fallback) or bearer; optionally redirects anonymous browser navigations to login; mounts `/auth/login`, `/auth/callback`, `/auth/logout` |
 | `TenantTrust` | if no verified identity and tenant header/query param exists, attaches `ClientID=tenant:<name>`, group `doctor:tenant`; verified identity wins |
-| `TenantGuard` | enforces `DOCTOR_QUERY_ALLOWED_TENANTS` or forces `DOCTOR_QUERY_SINGLE_TENANT` when configured |
+| `TenantGuard` | enforces `DOCTOR_QUERY_ALLOWED_TENANTS` or forces `DOCTOR_QUERY_SINGLE_TENANT`; with neither configured it fails closed and accepts only the default tenant |
 | `auth.Middleware` | re-verifies bearer if present; if `AuthRequire` and not exempt, rejects anonymous with 401; attaches identity |
 | `PolicyGate.Middleware` | under enforcement, rejects whole log/trace requests when the policy denies or is not loaded; metrics paths pass |
 | `quota.Engine.Middleware` | enforces per-partition/subject query rate, concurrency, and cost budgets |
 | `withHTTPMetrics`, `withSecurityHeaders`, `withBodyLimit`, `withRequestID`, `withMutationOriginCheck`, `withAuditLogging` | applied by `Service.Handler`: per-route metrics, CSP/security headers, request size cap, `X-Request-ID`, cross-origin mutation rejection, and audit events |
 | `withWarningHeaders` | attaches `proxy.WarningCollector` and federation `RequestMeta`; emits `X-Doctor-Partial*` headers |
 | `guardianTokenMiddleware` | copies the caller's bearer or `doctor_session` cookie into context for server-side Guardian reads |
+| `withDisplayMapping` | outermost wrapper inside `Service.Handler`: translates display query keys, resolves the caller's profile, maps JSON response keys for `/v1/`, `/loki/`, `/api/`, `/api/v2/`, and sets `X-Strata-Display-Profile` / `X-Strata-Display-Version` |
 | mux | route handlers |
 
 Exempt paths (when no custom list is set): `/healthz`, `/ready`, `/api/echo`, `/metrics`, and
@@ -143,6 +146,9 @@ not apply per-partition metric scoping.
 | ANY | `/api/v2/*` | Alertmanager-compatible v2 API proxy to Sentinel |
 | POST | `/v1/sql/query` | read-only DuckDB/ClickHouse SQL console |
 | GET | `/v1/audit/events` | query-plane audit events (requires audit or admin scope when a policy gate is configured) |
+| GET | `/v1/audit/status` | aggregate audit-pipeline health (no event content; 503 on stale/conflicting/unavailable) |
+| GET | `/v1/display-profiles` | available compiled display profiles and bundle version |
+| GET | `/v1/display-profiles/effective` | caller's effective profile id (empty when unmapped) |
 | GET | `/v1/quota` | partition and subject quota limits and usage |
 | GET/POST/PUT/DELETE | `/v1/dashboards*` | dashboard CRUD, versions, import/export |
 | GET | `/v1/guardian/topology` | Guardian topology projection |
@@ -195,8 +201,8 @@ Local engine details:
   non-negative observations so `histogram_stddev` / `histogram_stdvar` stay finite.
 - Broad all-series range selectors (`{__name__=~".+"}`) are rejected when the range exceeds 15
   minutes.
-- A `?timeout=` duration is honored up to 5 minutes; otherwise the engine uses 30s or the caller
-  deadline, whichever is longer.
+- A `?timeout=` duration is honored up to 5 minutes; otherwise the engine uses
+  `DOCTOR_QUERY_DEFAULT_TIMEOUT` (default 20s) or the caller deadline, whichever is longer.
 
 Provider selection:
 
@@ -288,7 +294,10 @@ Volume/index endpoints:
   - backends implementing `TraceQLUpstream` receive native TraceQL;
   - non-capable backends (local, AWS, GCP) receive the supported TraceQL subset folded into tag
     matchers via `ApplyTraceQL`, with warnings when a query uses unsupported constructs.
-- Local and remote backends are merged by the router.
+- Local, AWS, and GCP backends are merged by the router. `/v1/traces/recent` and
+  `/api/search` pagination also merge a GCP trace page: `queryGCPTracePage` fetches Cloud Trace
+  summaries, maps trace IDs to application-log partitions when summaries lack the Cloud Run service,
+  applies the cursor/limit, and `mergeTracePagesWithGCP` combines the local/AWS/GCP pages.
 - `spss` requests span sets; failures are non-fatal enrichment failures.
 - Results are deduplicated by trace ID, newest first.
 
@@ -333,7 +342,9 @@ Unsupported TraceQL constructs return 400.
 - `queryLocalTracePage` scans up to 8 batches of 2k spans, builds trace summaries, and only emits a
   trace once the scan watermark is below its earliest span start (so the summary is complete);
 - `queryAWSTracePage` reads up to 200 X-Ray summaries, applies the same cursor/partition rules;
-- `mergeTracePages` deduplicates by canonical trace ID, applies the cursor and limit;
+- `queryGCPTracePage` reads a Cloud Trace page (at least the AWS page limit), resolves partitions
+  from GCP application logs when summaries omit the Cloud Run service, and applies the cursor;
+- `mergeTracePagesWithGCP` deduplicates by canonical trace ID and applies the cursor and limit;
 - returns `{returned, traces, has_more, next_cursor, page_size}`.
 
 `/v1/traces/{id}` resolves latest magics, then uses the proxy router; returns
@@ -403,6 +414,29 @@ See [rules-dashboards.md](rules-dashboards.md).
 - overview: raw proxy with 1 MiB cap.
 - probes: proxy Guardian `/api/probes`, filter partitions, add pusher summary (freshness ≤3 min).
 
+### Audit status
+
+`/v1/audit/status` returns aggregate pipeline health from the configured `StatusReader` (the
+ClickHouse `audit.events` reader when `DOCTOR_AUDIT_CH_URL` is set). The payload contains
+`ok`, `clickhouse`, `eventsTotal`, `eventsRecent` (last 15 minutes), `lastEventAt`,
+`conflictingSequences`, and `maxEventAge`. It is 503 when the store is unreachable or `ok` is false;
+`ok` is false when no event has been seen, the newest event is older than 15 minutes, or a
+`(writer_id, seq)` group has more than one distinct event hash. The endpoint never returns event
+content.
+
+### Display profiles
+
+- `/v1/display-profiles` returns `{profiles, version}` from the compiled bundle; it is 503 when the
+  bundle cannot be loaded and returns the last good bundle after a refresh failure.
+- `/v1/display-profiles/effective` resolves the caller's default profile from email/user and
+  groups/teams, returning `{"profile": "<id>"}` (empty when no profile applies).
+- Requests select a profile with `X-Strata-Display-Profile` or `?displayProfile=`. Mapping applies
+  to Prometheus (`/api/v1/`), Loki (`/loki/`), Tempo (`/api/v2/`), and native `/v1/` JSON responses,
+  except `/v1/audit*` and `/v1/display*`. `X-Strata-Display-Keep-Canonical: 1` retains canonical
+  keys alongside display keys; the response echoes the applied profile and bundle version.
+- Dashboards and Sentinel alert rules may pin `displayProfile`; the UI switches to that profile when
+  opening them. Mapping changes presentation only, not values, ACLs, or stored data.
+
 ## 8. Proxy and federation data path
 
 ```mermaid
@@ -449,6 +483,13 @@ Two layers can apply:
 2. **`proxy.Router`** calls the legacy `access.Gate` for remote log/trace backends. In observe mode
    denials produce warnings; in enforce mode denied backends are excluded. If every enforced backend
    is denied, the request returns `access.ErrAccessDenied` (403 in handlers).
+   When the repo-managed trace policy is enforced for traces (`tracePolicyScoped`), the trace
+   adapters already filter every span/summary by partition, so the legacy endpoint OWNERS gate is
+   skipped for trace targets; applying both would hide federated traces from callers granted the
+   partition but not the endpoint name (`internal/proxy/router_traces.go`).
+
+Tenant selection is also bounded before authorization: `TenantGuard` fails closed to
+`DOCTOR_DEFAULT_TENANT` unless an explicit allowlist or single-tenant pin is configured.
 
 The repo policy gate also:
 - rejects whole log/trace requests when enforcement is on and policy is unavailable/anonymous;
@@ -480,5 +521,9 @@ Access enforcement maps to 403; planner scope errors map to 422 in Prometheus/qu
 - `handlePrometheusMetadata` reports stored metric types; AWS-only metrics remain `untyped`.
 - `handlePrometheusRules` always returns no groups, even when doctor-rules has rules.
 - `/ready` checks the log engine and enforced policy state, but not federation freshness or Guardian.
+- `/v1/audit/events` falls back to the local JSONL audit reader unless `DOCTOR_AUDIT_CH_URL` is set;
+  `/v1/audit/status` requires a reader that implements `StatusReader`, otherwise it returns 503.
+- Display mapping is skipped for audit/display endpoints and does not apply when no bundle is
+  configured; `Canonical`/empty profile ids leave responses untouched.
 - `proxy.Router` is always installed; `DOCTOR_PROXY_ENABLED` only controls external registry
   discovery. Legacy direct branches remain as unreachable rollback code.

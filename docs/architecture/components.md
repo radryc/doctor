@@ -103,8 +103,9 @@ a signed caller identity (`DOCTOR_INTERNAL_IDENTITY_SECRET`).
 | `doctor-federation-controller` | connects to Guardian + MonoFS, acquires a leader lease, builds metadata and catalog, publishes token shards and snapshot on an interval |
 
 The controller and publish CLIs accept `--monofs-token` and `--guardian-token` flags for
-compatibility, but read `DOCTOR_MONOFS_TOKEN`, `DOCTOR_MONOFS_ROUTER_ADDR`/`DOCTOR_MONOFS_ROUTER`,
-and `DOCTOR_GUARDIAN_TOKEN` by default. Prefer the environment variables: flags are visible in the
+compatibility, but read `DOCTOR_MONOFS_TOKEN` and `DOCTOR_GUARDIAN_TOKEN` by default. The controller
+reads the router only from `DOCTOR_MONOFS_ROUTER` (or `--monofs-router`); `doctor-federation-publish`
+also accepts `DOCTOR_MONOFS_ROUTER_ADDR`. Prefer the environment variables: flags are visible in the
 process table.
 
 ## 2. Configuration and shared primitives
@@ -125,7 +126,9 @@ Helper semantics worth knowing:
 - `envDuration` accepts a Go duration or a bare integer, which it interprets as **hours**.
 - `envCSV` trims values and drops empty entries.
 
-`service` parameters are accepted by every loader but unused.
+`service` parameters are accepted by every loader but unused. Some runtime knobs are read in their
+own packages rather than `LoadQuery`: display bundle (`internal/display`), audit reader
+(`internal/query/audit_clickhouse.go`), PromQL budgets, query cache TTL, and default timeout.
 
 ### `internal/buildinfo`
 
@@ -184,23 +187,35 @@ Deterministic sanitization at ingest:
 - keys matching password/secret/token/authorization/cookie/session/api-key/JWT/credential are
   replaced with `[REDACTED]`;
 - values that look like bearer tokens, JWTs, or long provider secrets are replaced;
-- email/user/account/client/IP keys and IPv4/email substrings are replaced with deterministic
-  `tok_<16hex>` HMAC-SHA256 tokens;
-- `Tokenize` uses the configured HMAC key.
+- email/user/account/client/IP keys and IPv4/email substrings are replaced with deterministic,
+  versioned `tok_v2_<keyid>_<32hex>` HMAC-SHA256 tokens (128-bit tag);
+- free text additionally tokenizes Luhn-valid PANs, SSNs, phone numbers, IBANs (mod-97), and ABA
+  routing numbers (checksum), and redacts CVV/date-of-birth patterns;
+- `Tokenize` mints with the active key (`DOCTOR_PRIVACY_KEY_ID`, default `k1`);
+  `DOCTOR_PRIVACY_KEYS_JSON` holds the key id → secret map for rotation and historical
+  verification; `DOCTOR_PRIVACY_HMAC_KEY` is the single-key fallback.
 
 The identity allowlist is also a bypass: any secret placed in an identity key is preserved.
+There is no secret-manager integration or automatic rotation schedule.
 
 ### `internal/wal`
 
-Three nearly identical batch logs plus one unused generic WAL:
+One shared generic WAL (`commitLog[T]`) behind three per-signal wrappers, plus one unused legacy WAL:
 
-- `TraceBatchLog`, `LogBatchLog`, `MetricBatchLog`: `Append`, `ReadAll`, `Iterate`, `Replace`,
-  `Count`, length-prefixed little-endian `uint32` + JSON frames, file `*.log`;
+- `TraceBatchLog`, `LogBatchLog`, `MetricBatchLog`: `Append`, `ReadAll`, `Iterate`, `Retire`,
+  `Replace`, `Count`, length-prefixed little-endian `uint32` + JSON frames, file `*.log`;
+- appends are group-committed: writers queue completion channels and one goroutine fsyncs the whole
+  pending generation;
+- `Retire` advances a durable `<file>.checkpoint` offset instead of rewriting the WAL; when more
+  than 64 MiB of flushed bytes accumulate, the live tail is compacted into a fresh file;
+- replay starts at the checkpoint, ignores a checkpoint past EOF, skips undecodable JSON frames,
+  and stops cleanly on a truncated final frame;
+- `Replace` remains the full-rewrite path (temp file + fsync + atomic rename);
 - `WAL`: per-entry `.pending` files with `Stage`, `Commit`, `Pending`, `Count`; not used by any
   service.
 
-There is no frame checksum or format version. Corrupt frames are skipped by the log/metric readers
-and returned as an error by the trace reader.
+There is no frame checksum or format version; corruption is handled by skipping bad JSON frames and
+treating a short read as end-of-log.
 
 ### `internal/store`
 
@@ -274,7 +289,9 @@ ingestTraces/Logs/Metrics
 - `Middleware`: wraps the MonoFS `authz.Authenticator`, attaches identity, and rejects anonymous
   callers outside exempt paths when `require` is set.
 - `DefaultExemptPaths`: `/healthz`, `/ready`, `/api/echo`, `/metrics`, `/api/v1/status/buildinfo`. Telemetry APIs (including `/api/v1/*`) require authentication when a verifier is configured.
-- `TenantGuard`: restricts query requests to `DOCTOR_QUERY_ALLOWED_TENANTS` or forces `DOCTOR_QUERY_SINGLE_TENANT`.
+- `TenantGuard`: restricts query requests to `DOCTOR_QUERY_ALLOWED_TENANTS` or forces
+  `DOCTOR_QUERY_SINGLE_TENANT`; with neither configured it fails closed to
+  `DOCTOR_DEFAULT_TENANT`.
 - `InternalIdentity`: HMAC-signed `X-Doctor-Identity` header forwarded from `doctor-query` to `doctor-rules`.
 - `TenantTrust`: synthetic machine identity `ClientID=tenant:<name>`, group `doctor:tenant`, from
   the tenant header or query parameter, only when no verified identity exists.
@@ -322,10 +339,23 @@ The largest package. Responsibilities:
 | `labels.go` | canonical label vocabulary and projection shared by all signals |
 | `identity_filter.go` | partition/intent/asset request filters and LogQL selector rendering |
 | `dashboards_handlers.go` | dashboard CRUD, versions, import/export |
-| `audit.go` | `X-Request-ID` propagation, mutation/read audit logging, `GET /v1/audit/events` |
+| `audit.go` / `audit_clickhouse.go` | `X-Request-ID` propagation, mutation/read audit logging, `GET /v1/audit/events`, `GET /v1/audit/status`, ClickHouse `audit.events` reader |
 | `guardian_probes.go` | Guardian `/api/probes` proxy + pusher summary + partition filtering |
 | `warnings_middleware.go` | per-request warning collector and `X-Doctor-*` response headers |
 | `ui.go` | `//go:embed ui/dist`, SPA fallback, API-path 404 guard |
+| `display.go` | `/v1/display-profiles`, `/v1/display-profiles/effective`, query translation, JSON key mapping for `/v1/`, `/loki/`, `/api/`, `/api/v2/` |
+
+### `internal/display`
+
+Loads the Guardian-compiled display bundle from `DOCTOR_DISPLAY_BUNDLE_URL` or
+`DOCTOR_DISPLAY_BUNDLE_FILE` (token from `DOCTOR_DISPLAY_BUNDLE_TOKEN`, falling back to
+`DOCTOR_ACCESS_POLICY_TOKEN`; refresh interval `DOCTOR_DISPLAY_REFRESH_INTERVAL`, default `30s`).
+It resolves a profile for the caller's subjects (user/email plus groups/teams), applies
+`X-Strata-Display-Profile` or `displayProfile`, translates repo-assigned display query keys to
+canonical keys, and maps JSON response keys. On bundle fetch failure it keeps the last good bundle.
+The mapping is presentation-only: values, query execution, ACLs, and audit rows stay canonical.
+`X-Strata-Display-Keep-Canonical: 1` keeps canonical keys alongside display keys, and responses
+carry `X-Strata-Display-Profile` / `X-Strata-Display-Version`.
 
 ### `internal/proxy`
 
@@ -460,8 +490,8 @@ Recording rules:
 | Peer | Protocol | Auth | Notes |
 |---|---|---|---|
 | OTLP clients → ingest | gRPC / HTTP protobuf or JSON | bearer (`DOCTOR_INGEST_TOKENS_FILE` / `DOCTOR_INGEST_AUTH_TOKEN`), optional mTLS | tenant from header/metadata validated against allowlist; 256 MiB gRPC, 10 MiB HTTP |
-| ingest/query/rules → MonoFS log-engine | gRPC `MonoFSRouter` | optional token (`DOCTOR_MONOFS_TOKEN`) | TLS/mTLS via `DOCTOR_MONOFS_TLS_*` (plaintext if unconfigured) |
-| query/rules/controller/sentinel → MonoFS file store | gRPC router + node streaming | per-RPC `authorization: Bearer` token plus `x-monofs-internal` metadata for node reads | TLS/mTLS via `DOCTOR_MONOFS_TLS_*` (plaintext if unconfigured) |
+| ingest/query/rules → MonoFS log-engine | gRPC `MonoFSRouter` | optional token (`DOCTOR_MONOFS_TOKEN`) | TLS/mTLS via `DOCTOR_MONOFS_TLS_*`; TLS required by default when the token is set, plaintext only without a token/TLS config or with an explicit opt-out |
+| query/rules/controller/sentinel → MonoFS file store | gRPC router + node streaming | per-RPC `authorization: Bearer` token plus `x-monofs-internal` metadata for node reads | TLS/mTLS via `DOCTOR_MONOFS_TLS_*`; TLS required by default when the token is set, plaintext only without a token/TLS config or with an explicit opt-out |
 | query → Guardian | HTTP JSON | caller bearer token or no token | legacy then M2M paths |
 | controller → Guardian | HTTP JSON | `X-Guardian-Internal-Token` | paginated M2M feeds plus `includeTokens=1` |
 | query → AWS/GCP pusher | HTTP JSON / PromQL proxy | bearer token from target/resolver | AWS client refreshes once after 401 |
@@ -478,7 +508,7 @@ Recording rules:
 | Ingest buffers | per-signal max bytes (4 MiB default), pending bytes (3× max), trace max records (4096) |
 | OTLP request | gRPC 256 MiB, HTTP 10 MiB |
 | Memory | `DOCTOR_MEMORY_LIMIT_BYTES` (default 858 MiB `GOMEMLIMIT` in ingest) |
-| PromQL | 4M samples and 100k series per query; 8M samples global; 1M engine `MaxSamples`; 30s default, 5m max caller timeout |
+| PromQL | 4M samples and 100k series per query; 8M samples global; 1M engine `MaxSamples`; 20s default, 5m max caller timeout |
 | PromQL discovery | 15-minute scan window, 10k records, 200k series |
 | Broad range guard | 15 minutes for `{__name__=~".+"}` |
 | Loki | 500 records per query_range/volume scan, 5k for instant metric evaluation, 200 series / 5k buckets volume output |
@@ -539,7 +569,9 @@ Recording rules:
 | `DOCTOR_METRIC_BUFFER_FLUSH_INTERVAL` | `5s` | |
 | `DOCTOR_METRIC_BUFFER_MAX_BYTES` | `4194304` | |
 | `DOCTOR_METRIC_MAX_PENDING_BYTES` | `0` → 3× max | |
-| `DOCTOR_PRIVACY_HMAC_KEY` | — | required |
+| `DOCTOR_PRIVACY_HMAC_KEY` | — | required single-key fallback / active key |
+| `DOCTOR_PRIVACY_KEY_ID` | `k1` | active key id used to mint `tok_v2_<keyid>_<32hex>` tokens |
+| `DOCTOR_PRIVACY_KEYS_JSON` | — | JSON map of key id → secret for rotation and historical verification |
 | `DOCTOR_WAL_ENABLED` | `false` | read but unused |
 | `DOCTOR_WAL_DIR` | `.doctor/wal` | read but unused |
 | `DOCTOR_PIPELINE_ENABLED` | `true` | pipeline stages records in the WAL buffers |
@@ -617,14 +649,26 @@ Recording rules:
 | `DOCTOR_ACCESS_MODE` | `enforce` | `enforce` or `observe` (explicit opt-out) |
 | `DOCTOR_ACCESS_ENFORCE_LOGS` / `_TRACES` | `false` | used outside `enforce` |
 | `DOCTOR_ACCESS_TEAM_MAPPING` | — | file or inline team map |
-| `DOCTOR_ACCESS_POLICY_URL` | — | Compiled access-policy bundle (logs/traces/partition scope) |
+| `DOCTOR_ACCESS_POLICY_URL` / `_FILE` | — | enables the repo policy gate; compiled bundle covers logs/traces/partition scope |
 | `DOCTOR_ACCESS_OWNERS_ROOT` | `/doctor/v1/endpoints` | |
 | `DOCTOR_ACCESS_CACHE_TTL` | `60s` | |
 | `DOCTOR_ACCESS_STATIC_ALLOW` / `_ALLOW_GROUPS` / `_DENY` | — | CSV |
 | `DOCTOR_ACCESS_TRUST_TENANT_HEADER` | `false` | |
-| `DOCTOR_ACCESS_POLICY_URL` / `_FILE` | — | enables repo policy gate |
 | `DOCTOR_ACCESS_POLICY_TOKEN` | — | policy fetch bearer |
 | `DOCTOR_ACCESS_POLICY_INTERVAL` | `30s` | |
+| `DOCTOR_AUDIT_CH_URL` | — | enables the ClickHouse `audit.events` reader for `/v1/audit/events` and `/v1/audit/status` |
+| `DOCTOR_AUDIT_CH_DATABASE` | `audit` | ClickHouse database containing `events` |
+| `DOCTOR_AUDIT_CH_USER` / `DOCTOR_AUDIT_CH_PASSWORD` | — | optional ClickHouse basic auth |
+| `DOCTOR_DISPLAY_BUNDLE_URL` / `DOCTOR_DISPLAY_BUNDLE_FILE` | — | display-profile bundle source; mapping is disabled when both are empty |
+| `DOCTOR_DISPLAY_BUNDLE_TOKEN` | falls back to `DOCTOR_ACCESS_POLICY_TOKEN` | bearer for the bundle URL |
+| `DOCTOR_DISPLAY_REFRESH_INTERVAL` | `30s` | bundle refresh cadence |
+| `DOCTOR_PROM_MAX_SAMPLES` | `4000000` | per-PromQL-query loaded sample budget |
+| `DOCTOR_PROM_MAX_SERIES` | `100000` | per-PromQL-query loaded series budget |
+| `DOCTOR_PROM_GLOBAL_MAX_SAMPLES` | `8000000` | samples held across all concurrent PromQL queries |
+| `DOCTOR_QUERY_CACHE_TTL` | `15s` | local log/trace result-cache TTL; `0`/invalid disables caching |
+| `DOCTOR_QUERY_DEFAULT_TIMEOUT` | `20s` | default Prometheus query timeout when `?timeout=` is absent; `?timeout=` is capped at 5m |
+| `DOCTOR_INGEST_URL` | — | ingest base URL for `/v1/quota/usage` aggregation |
+| `DOCTOR_INGEST_AUTH_TOKEN` | — | bearer for the ingest quota-usage call |
 | `DOCTOR_MONOFS_TOKEN` | — | file store and log-engine bearer token (dashboards, owners, federation bundle, SQL console) |
 | `DOCTOR_MONOFS_CLIENT_ID` | `doctor-query` | |
 | `DOCTOR_DASHBOARDS_STORE_ROOT` | `/doctor/v1/dashboards` | |

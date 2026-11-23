@@ -61,7 +61,7 @@ flowchart LR
 | Binary | Role | Startup dependencies | Long-running loops |
 |---|---|---|---|
 | `doctor-ingest` | OTLP trace/log/metric receiver, privacy filter, writer | MonoFS log-engine router, privacy HMAC key, ingest bearer token(s) | pipeline workers, trace/log/metric WAL buffers, quota provider/tracker, pprof on localhost |
-| `doctor-query` | Query API, compatibility APIs, UI host, proxy router, federation query plane | MonoFS log-engine router; optional MonoFS file store, Guardian, AWS/GCP federation, OIDC, policy/quota bundle, Sentinel/Rules proxies | policy/quota reload, federation catalog reload, client-pool pruning, proxy discovery |
+| `doctor-query` | Query API, compatibility APIs, UI host, proxy router, federation query plane, display-profile mapping, audit reads | MonoFS log-engine router; optional MonoFS file store, Guardian, AWS/GCP federation, OIDC, policy/quota bundle, Sentinel/Rules proxies, ClickHouse `audit.events`, display bundle | policy/quota reload, federation catalog reload, display-bundle refresh, client-pool pruning, proxy discovery |
 | `doctor-rules` | Recording-rule scheduler/evaluator and rule API | MonoFS file store and log-engine, doctor-query URL, rules API token(s) | leader lease, scheduler, HTTP API |
 | `doctor-sentinel` | Alert rule evaluation, source polling (Guardian/AWS/GCP), routing, delivery, incidents | optional MonoFS file store (in-memory fallback); optional doctor-query, Guardian, AWS/GCP, FCB, agent | sharded rule evaluation lease/scheduler, outbox dispatcher, incident reconciler, source pollers |
 | `doctor-federation-controller` | Builds the AWS/GCP multi-target catalog from Guardian | Guardian API, MonoFS file store | leader lease + periodic sync |
@@ -91,6 +91,7 @@ flowchart TB
     FED[federation.Manager]
     POLICY[access.PolicyGate + policyBackend]
     AUTH[auth.Middleware + WebAuthenticator]
+    DISP[display profile mapping]
   end
 
   subgraph Ingest
@@ -112,6 +113,7 @@ flowchart TB
   COMPAT --> SVC
   NATIVE --> SVC
   SVC --> AUTH --> POLICY
+  SVC --> DISP
   SVC --> PROM
   SVC --> LOGQL
   SVC --> TEMPO
@@ -153,7 +155,9 @@ flowchart TB
   pagination, tag discovery, and TraceQL-metrics evaluation.
 - **Native** (`/v1/*`) for the UI: recent traces, span/log search, service discovery, metric range,
   dashboards, rules proxy, federation status, proxy endpoints, Guardian topology/health/events/
-  probes, UI config/user.
+  probes, UI config/user, audit events and audit-pipeline status, and display-profile discovery.
+  Display-profile mapping rewrites presentation keys for `/v1/`, `/loki/`, `/api/`, and `/api/v2/`
+  responses based on `X-Strata-Display-Profile` / `displayProfile`; stored values stay canonical.
 
 The query service uses `proxy.Router` as its only execution path. Local storage, AWS, and GCP are
 registered as separate backends; `DOCTOR_PROXY_ENABLED` controls only external registry discovery.
@@ -272,10 +276,13 @@ federation CLI flags. The most important groups:
 | Sentinel | `DOCTOR_SENTINEL_*`, `DOCTOR_FCB_*` | sentinel / query |
 | Quotas | `DOCTOR_QUOTA_*` | ingest / query / rules |
 | UI | `DOCTOR_GUARDIAN_UI_URL`, `DOCTOR_DEFAULT_PARTITION`, `DOCTOR_DASHBOARDS_STORE_ROOT` | query |
+| Presentation | `DOCTOR_DISPLAY_BUNDLE_URL/_FILE/_TOKEN`, `DOCTOR_DISPLAY_REFRESH_INTERVAL` | query |
+| Audit reads | `DOCTOR_AUDIT_CH_URL`, `DOCTOR_AUDIT_CH_DATABASE`, `DOCTOR_AUDIT_CH_USER/_PASSWORD` | query |
+| Query budgets/cache | `DOCTOR_PROM_MAX_SAMPLES`, `DOCTOR_PROM_MAX_SERIES`, `DOCTOR_PROM_GLOBAL_MAX_SAMPLES`, `DOCTOR_QUERY_CACHE_TTL`, `DOCTOR_QUERY_DEFAULT_TIMEOUT` | query |
 | Doctor telemetry | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `DOCTOR_OTEL_*` | all |
 
 A full variable list with defaults is in
-[architecture/components.md § Configuration](components.md#configuration-reference).
+[architecture/components.md § Configuration](components.md#8-configuration-reference).
 
 ## 7. Observability of Doctor itself
 

@@ -14,6 +14,17 @@ The statements below are based on the code as it exists in this working tree. Wh
 surprising, broken, duplicated, or missing, the docs call it out explicitly instead of describing
 the intended design.
 
+Verified against commit c4c6e50 on 2026-11-23.
+
+Presentation **display profiles** are loaded by `doctor-query` from a Guardian-compiled bundle
+(`DOCTOR_DISPLAY_BUNDLE_URL` / `DOCTOR_DISPLAY_BUNDLE_FILE`, bearer
+`DOCTOR_DISPLAY_BUNDLE_TOKEN`, refresh `DOCTOR_DISPLAY_REFRESH_INTERVAL`) and map canonical
+identity keys to operator-facing labels without changing stored values, queries, or ACLs. The
+profile id travels in
+`X-Strata-Display-Profile` (or the `displayProfile` query parameter); dashboards and Sentinel alert
+rules can pin a profile. Profile discovery and audit-pipeline health are exposed at
+`/v1/display-profiles`, `/v1/display-profiles/effective`, and `/v1/audit/status`.
+
 ## Document map
 
 | Document | Audience | Contents |
@@ -53,6 +64,7 @@ internal/
   config/ buildinfo/         environment configuration and build metadata
   dashboards/                portable dashboard schema and CAS store
   delivery/                  notification receiver registry and channel senders
+  display/                   Guardian display-profile bundle loader and resolver
   federation/                AWS/GCP multi-target catalog, planner, fan-out, tokens
   identity/                  canonical <partition>.<intent>.<asset> names
   incident/                  alert sets, incident lifecycle, postmortem engines
@@ -103,6 +115,10 @@ Runtime requirements observed in code:
 | `doctor-federation-build` | input YAML/JSON | no listener; CLI |
 | `doctor-federation-publish` | snapshot file, MonoFS router/token | no listener; CLI |
 | `doctor-loadgen` | target endpoint | CLI (optional metrics HTTP listener) |
+
+`doctor-query` serves the native trace/log surface at `/v1/traces/recent`, `/v1/traces/{id}`,
+`/v1/spans/search`, `/v1/logs/services`, and `/v1/logs/search`, alongside the Prometheus, Loki,
+Tempo, audit, display-profile, dashboard, rules, and Sentinel proxy routes.
 
 See [architecture/components.md](architecture/components.md) for the full configuration matrix and
 [logical-flows/query.md](logical-flows/query.md) for every HTTP route.

@@ -77,9 +77,10 @@ source -> intake -> normalize -> fingerprint/state -> route
 - `delivery: native` means CloudWatch SNS or Alertmanager owns delivery;
   Sentinel imports and presents the alert only.
 - v1 channels: generic webhook, Slack, GoAlert, PagerDuty Events API v2,
-  Microsoft Teams, Zoom Team Chat, Android webhook receiver, and `fcb` (`fcm-bridge`). Teams,
-  Zoom, Android, and `fcb` also accept incident events; see [incidents.md](incidents.md)
-  and [receiver-plugins.md](receiver-plugins.md) for adding a channel.
+  Microsoft Teams, Zoom Team Chat, Android webhook receiver, and `fcb` (`fcm-bridge`). Incident
+  events are supported by `webhook`, `slack`, `teams`, `zoom`, `android`, and `fcb`; GoAlert and
+  PagerDuty receive alerts only. See [incidents.md](incidents.md) and
+  [receiver-plugins.md](receiver-plugins.md) for adding a channel.
 
 ## Alert authoring
 
@@ -104,6 +105,14 @@ Guided signals and their query shapes:
 A guided rule stores both its `spec` and the compiled `expr`. Re-saving
 recompiles the expression. Converting a guided rule to PromQL keeps the spec as
 recoverable metadata, but the expression becomes authoritative.
+
+Guided specs may also set `displayProfile` to pin the presentation vocabulary
+for the alert's views. The value is copied onto the routed `Alert` as
+`displayProfile` (see [sentinel-receiver-spec.md](sentinel-receiver-spec.md)).
+The UI resolves profile ids through `/v1/display-profiles` and sends the selected
+id in `X-Strata-Display-Profile`; `DOCTOR_DISPLAY_*` configures the bundle loaded
+by `doctor-query`. Mapping is presentation-only; labels and values remain
+canonical.
 
 ## Routing
 
